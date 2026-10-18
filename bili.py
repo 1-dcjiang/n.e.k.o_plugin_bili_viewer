@@ -1,7 +1,7 @@
 """B站看板 — 哔哩哔哩只读浏览 API 层（纯标准库实现）。
 
-覆盖：视频信息/分P/标签、弹幕（XML）、CC 字幕、AI 概要、评论、搜索、
-直播信息、直播实时弹幕（标准库手写 WebSocket）、UP主信息与视频列表。
+覆盖：视频信息/分P/标签、弹幕（seg.so protobuf，XML 兜底）、CC 字幕、AI 概要、
+评论、搜索、直播信息、直播实时弹幕（标准库手写 WebSocket）、UP主信息与视频列表。
 
 安全边界：只读公开内容；不登录、不发评论/弹幕/动态、不下载视频文件；
 可选用环境变量 BILI_COOKIE（完整 Cookie 字符串，含 SESSDATA）提升部分
@@ -266,19 +266,86 @@ def format_video_info(info: dict) -> str:
     return "\n".join(lines)
 
 
-def video_danmaku(bvid: str, cid: int | None = None, limit: int = 200) -> list[str]:
-    """拉取视频弹幕文本（默认第一P的 cid）。"""
-    bvid = _parse_bvid(bvid)
-    if cid is None:
-        info = video_info(bvid)
-        if not info["pages"]:
-            raise BiliError("该视频没有可用的分P信息", "NO_CID")
-        cid = info["pages"][0]["cid"]
-    url = _API + "/x/v1/dm/list.so"
-    params = {"oid": cid}
+def _proto_fields(data: bytes) -> list[tuple[int, int, int | None, bytes | None]]:
+    """轻量 protobuf wire 解析：返回 [(field_no, wire_type, varint值, 原始bytes)]。"""
+    out: list[tuple[int, int, int | None, bytes | None]] = []
+    pos = 0
+    n = len(data)
+    while pos < n:
+        key = 0
+        shift = 0
+        while pos < n:
+            b = data[pos]
+            pos += 1
+            key |= (b & 0x7F) << shift
+            shift += 7
+            if not (b & 0x80):
+                break
+        no, wire = key >> 3, key & 7
+        if wire == 0:
+            val = 0
+            shift = 0
+            while pos < n:
+                b = data[pos]
+                pos += 1
+                val |= (b & 0x7F) << shift
+                shift += 7
+                if not (b & 0x80):
+                    break
+            out.append((no, wire, val, None))
+        elif wire == 1:
+            out.append((no, wire, None, data[pos:pos + 8]))
+            pos += 8
+        elif wire == 2:
+            ln = 0
+            shift = 0
+            while pos < n:
+                b = data[pos]
+                pos += 1
+                ln |= (b & 0x7F) << shift
+                shift += 7
+                if not (b & 0x80):
+                    break
+            out.append((no, wire, None, data[pos:pos + ln]))
+            pos += ln
+        elif wire == 5:
+            out.append((no, wire, None, data[pos:pos + 4]))
+            pos += 4
+        else:
+            break
+    return out
+
+
+def _parse_danmaku_proto(raw: bytes) -> list[tuple[int, str]]:
+    """解析 B站弹幕 protobuf（seg.so 新版响应）。
+
+    顶层 = repeated DanmakuElem（field 1 嵌套消息，wire 2）；
+    每条弹幕：文本 = field 7（string），进度 = field 15（varint，秒）。
+    """
+    items: list[tuple[int, str]] = []
+    for no, wire, _v, blob in _proto_fields(raw):
+        if no != 1 or wire != 2 or not blob:
+            continue
+        text: str | None = None
+        progress = 0
+        for sno, swire, sval, sblob in _proto_fields(blob):
+            if sno == 7 and swire == 2 and sblob:
+                try:
+                    text = sblob.decode("utf-8")
+                except UnicodeDecodeError:
+                    text = None
+            elif sno == 15 and swire == 0 and sval is not None:
+                progress = int(sval)
+        if text:
+            items.append((progress, text))
+    return items
+
+
+def _fetch_raw(url: str, params: dict) -> bytes:
+    """带 UA/Referer/Cookie 的原始 GET，自动解 gzip。"""
     req = urllib.request.Request(
         url + "?" + urllib.parse.urlencode(params),
-        headers={"User-Agent": _UA, "Referer": f"https://www.bilibili.com/video/{bvid}"},
+        headers={"User-Agent": _UA, "Referer": "https://www.bilibili.com/video/"},
     )
     if _cookie():
         req.add_header("Cookie", _cookie())
@@ -294,23 +361,60 @@ def video_danmaku(bvid: str, cid: int | None = None, limit: int = 200) -> list[s
             raw = gzip.decompress(raw)
         except (OSError, EOFError) as exc:
             raise BiliError("弹幕数据解压失败", "DANMAKU_PARSE") from exc
-    text = raw.decode("utf-8", errors="replace")
-    try:
-        root = ET.fromstring(text)
-    except ET.ParseError as exc:
-        raise BiliError("弹幕接口返回加密/受限数据（游客模式弹幕可能被B站加扰；配置 BILI_COOKIE 后重试）", "DANMAKU_LOCKED") from exc
+    return raw
+
+
+def video_danmaku(bvid: str, cid: int | None = None, limit: int = 200) -> list[str]:
+    """拉取视频弹幕文本（默认第一P的 cid）。
+
+    优先新接口 x/v2/dm/web/seg.so（protobuf，游客可用）；分 P 逐段采集；
+    老接口 dm/list.so（XML）保留为兜底。
+    """
+    bvid = _parse_bvid(bvid)
+    if cid is None:
+        info = video_info(bvid)
+        if not info["pages"]:
+            raise BiliError("该视频没有可用的分P信息", "NO_CID")
+        cid = info["pages"][0]["cid"]
     danmakus: list[str] = []
-    for d in root.findall("d"):
-        p = (d.get("p") or "").split(",")
-        try:
-            ts = float(p[0]) if p and p[0] else 0.0
-        except ValueError:
-            ts = 0.0
-        danmakus.append(f"[{_fmt_duration(int(ts))}] {d.text or ''}".strip())
-        if len(danmakus) >= limit:
-            break
+    # 新接口 seg.so：protobuf 弹幕，逐段采集直到 limit
+    try:
+        for seg in range(1, 8):
+            raw = _fetch_raw(_API + "/x/v2/dm/web/seg.so", {"type": 1, "oid": cid, "segment_index": seg})
+            items = _parse_danmaku_proto(raw)
+            if not items:
+                break
+            for progress, text in items:
+                danmakus.append(f"[{_fmt_duration(int(progress))}] {text}")
+                if len(danmakus) >= limit:
+                    break
+            if len(danmakus) >= limit:
+                break
+    except BiliError:
+        pass
     if not danmakus:
-        raise BiliError("该视频暂无弹幕", "NO_DANMAKU")
+        # 老接口兜底：dm/list.so（部分情况仍返回 XML）
+        try:
+            raw = _fetch_raw(_API + "/x/v1/dm/list.so", {"oid": cid})
+            text = raw.decode("utf-8", errors="replace")
+            try:
+                root = ET.fromstring(text)
+            except ET.ParseError:
+                root = None
+            if root is not None:
+                for d in root.findall("d"):
+                    p = (d.get("p") or "").split(",")
+                    try:
+                        ts = float(p[0]) if p and p[0] else 0.0
+                    except ValueError:
+                        ts = 0.0
+                    danmakus.append(f"[{_fmt_duration(int(ts))}] {d.text or ''}".strip())
+                    if len(danmakus) >= limit:
+                        break
+        except BiliError:
+            pass
+    if not danmakus:
+        raise BiliError("该视频暂无弹幕（游客模式弹幕可能被B站加扰；配置 BILI_COOKIE 后重试）", "NO_DANMAKU")
     return danmakus
 
 
@@ -347,19 +451,19 @@ def video_subtitle(bvid: str, cid: int | None = None, lan: str = "zh-CN") -> str
 
 
 def video_ai_summary(bvid: str) -> str:
-    """B站官方 AI 视频概要（仅部分视频提供）。"""
+    """B站官方 AI 视频概要（仅部分视频提供，游客不可用，需登录态）。"""
     bvid = _parse_bvid(bvid)
     info = video_info(bvid)
     if not info["pages"]:
         raise BiliError("该视频没有分P信息", "NO_CID")
     cid = info["pages"][0]["cid"]
     try:
-        data = _http_get(
+        data = _wbi_get(
             _API + "/x/web-interface/view/conclusion/get",
             {"bvid": bvid, "cid": cid},
         ).get("data") or {}
     except BiliError:
-        raise BiliError("该视频暂不提供 AI 概要", "NO_SUMMARY") from None
+        raise BiliError("AI 概要需要登录态（游客不可用；配置 BILI_COOKIE 后重试）", "NO_SUMMARY") from None
     model = data.get("model_result") or {}
     summary = (model.get("summary") or "").strip()
     if not summary:
@@ -755,9 +859,16 @@ def live_danmaku(room: str, duration: int = 8, limit: int = 60) -> list[dict]:
 def user_info(mid: int) -> dict:
     """UP主信息：昵称/签名/粉丝/关注/视频数/等级。
 
-    用 acc/info + jsonp=jsonp（免 wbi、未登录可用、风控宽松）。
+    用 acc/info + jsonp=jsonp（免 wbi、未登录可用）；当前网络被 B站限流时
+    给出明确提示（配置 BILI_COOKIE 可提升）。
     """
-    data = (_http_get(_API + "/x/space/acc/info", {"mid": int(mid), "jsonp": "jsonp"})).get("data") or {}
+    try:
+        data = (_http_get(_API + "/x/space/acc/info", {"mid": int(mid), "jsonp": "jsonp"})).get("data") or {}
+    except BiliError as exc:
+        raise BiliError(
+            "用户信息获取失败（当前网络可能被B站限流；配置 BILI_COOKIE 后重试）：" + exc.message,
+            "USER_INFO",
+        ) from exc
     if not data:
         raise BiliError("用户不存在", "USER_NOT_FOUND")
     return {
@@ -878,13 +989,23 @@ def format_my_info(info: dict) -> str:
 
 
 def my_videos(page: int = 1, limit: int = 10) -> list[dict]:
-    """当前账号的投稿列表（创作中心接口，需 BILI_COOKIE）。"""
+    """当前账号的投稿列表（nav 取 uid → arc/search，需 BILI_COOKIE）。
+
+    注：创作中心 /x/vu/web/video/list 接口已失效（404），改用空间投稿接口。
+    """
     _require_login()
+    mid = my_info()["mid"]
     try:
-        data = (_http_get(_API + "/x/vu/web/video/list", {"pn": max(1, page), "ps": min(limit, 30)})).get("data") or {}
+        data = _wbi_get(
+            _API + "/x/space/wbi/arc/search",
+            {"mid": int(mid), "ps": min(limit, 30), "pn": max(1, page), "order": "pubdate"},
+            timeout=15,
+        ).get("data") or {}
     except BiliError as exc:
-        raise BiliError("稿件列表获取失败：" + exc.message, "MY_VIDEOS") from exc
+        raise BiliError("稿件列表获取失败（当前网络可能被B站风控；请重新配置有效的 BILI_COOKIE）：" + exc.message, "MY_VIDEOS") from exc
     vlist = ((data.get("list") or {}).get("vlist")) or []
+    if not vlist:
+        raise BiliError("暂无投稿或列表为空", "NO_VIDEOS")
     out = []
     for v in vlist[:limit]:
         state = v.get("state", 0)

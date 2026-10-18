@@ -273,6 +273,75 @@ def test_live_danmaku_uses_wbi(monkeypatch) -> None:
     assert called["wbi"] is True
 
 
+def test_parse_danmaku_proto() -> None:
+    """seg.so protobuf 弹幕解析：文本 field 7、进度 field 15。"""
+    from plugin.plugins.bili_viewer.bili import _parse_danmaku_proto
+
+    def _varint(v: int) -> bytes:
+        out = b""
+        while True:
+            b = v & 0x7F
+            v >>= 7
+            if v:
+                out += bytes([b | 0x80])
+            else:
+                out += bytes([b])
+                return out
+
+    def _field(no: int, payload: bytes) -> bytes:
+        return _varint((no << 3) | 2) + _varint(len(payload)) + payload
+
+    def _vfield(no: int, v: int) -> bytes:
+        return _varint((no << 3) | 0) + _varint(v)
+
+    def _elem(progress: int, text: str) -> bytes:
+        return _vfield(1, 12345) + _vfield(3, 0) + _field(7, text.encode("utf-8")) + _vfield(15, progress)
+
+    raw = _field(1, _elem(12, "第一条弹幕")) + _field(1, _elem(35, "第二条弹幕")) + _vfield(2, 1)
+    items = _parse_danmaku_proto(raw)
+    assert items == [(12, "第一条弹幕"), (35, "第二条弹幕")]
+
+
+def test_video_danmaku_uses_seg_so(monkeypatch) -> None:
+    """video_danmaku 应优先走 seg.so protobuf，而非失效的 dm/list.so XML。"""
+    from plugin.plugins.bili_viewer import bili
+
+    def _fake_video_info(bvid):
+        return {"pages": [{"cid": 1001, "page": 1, "part": "正片"}]}
+
+    def _fake_fetch_raw(url, params):
+        assert "/x/v2/dm/web/seg.so" in url
+        # 第一段返回 1 条弹幕；后续段返回空（触发采集结束）
+        if params["segment_index"] != 1:
+            return b""
+        assert params == {"type": 1, "oid": 1001, "segment_index": 1}
+
+        def _varint(v):
+            out = b""
+            while True:
+                b = v & 0x7F
+                v >>= 7
+                if v:
+                    out += bytes([b | 0x80])
+                else:
+                    out += bytes([b])
+                    return out
+
+        def _field(no, payload):
+            return _varint((no << 3) | 2) + _varint(len(payload)) + payload
+
+        def _vfield(no, v):
+            return _varint((no << 3) | 0) + _varint(v)
+
+        elem = _field(7, "测试弹幕".encode()) + _vfield(15, 42)
+        return _field(1, elem)
+
+    monkeypatch.setattr(bili, "video_info", _fake_video_info)
+    monkeypatch.setattr(bili, "_fetch_raw", _fake_fetch_raw)
+    got = bili.video_danmaku("BV1xx411c7mD", limit=5)
+    assert got == ["[0:42] 测试弹幕"]
+
+
 # ══════════ 当前观看感知（通用窗口感知） ══════════
 
 
