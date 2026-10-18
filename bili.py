@@ -974,3 +974,174 @@ def live_send_danmaku(room: str, text: str) -> dict:
     except BiliError as exc:
         raise BiliError("弹幕发送失败：" + exc.message, "SEND_FAILED") from exc
     return {"ok": True, "room_id": room_id, "text": text, "server": data.get("message") or ""}
+
+
+# ══════════════ 当前观看感知（前台窗口标题，通用） ══════════════
+
+_BROWSER_MARKERS = ("chrome", "edge", "firefox", "opera", "brave", "browser", "safari", "360")
+_SITE_KEYWORDS = [
+    ("bilibili", ("哔哩哔哩", "bilibili")),
+    ("youtube", ("youtube",)),
+    ("zhihu", ("知乎", "zhihu")),
+    ("weibo", ("微博", "weibo")),
+    ("xiaohongshu", ("小红书", "xiaohongshu")),
+    ("douyin", ("抖音", "douyin")),
+    ("baidu", ("百度", "baidu")),
+    ("taobao", ("淘宝", "taobao")),
+    ("jd", ("京东", "jd")),
+    ("tieba", ("贴吧", "tieba")),
+    ("github", ("github",)),
+    ("douban", ("豆瓣", "douban")),
+    ("steam", ("steam",)),
+    ("netease", ("网易", "163.com")),
+    ("tencent", ("腾讯", "qq.com")),
+    ("dingtalk", ("钉钉", "dingtalk")),
+    ("feishu", ("飞书", "feishu", "lark")),
+    ("wechat", ("微信", "weixin", "wechat")),
+]
+_BILI_TITLE_SUFFIX_RE = re.compile(r"^(.*?)[_\-—]哔哩哔哩")
+_BROWSER_TITLE_SUFFIX_RE = re.compile(
+    r"\s*[-—_]\s*(?:Google Chrome|Chrome|Microsoft Edge|Edge|Firefox|Opera|Brave|Safari|浏览器)$",
+    re.IGNORECASE,
+)
+
+
+def _strip_browser_suffix(title: str) -> str:
+    """去掉浏览器窗口标题末尾的浏览器名，还原页面标题。"""
+    return _BROWSER_TITLE_SUFFIX_RE.sub("", title).strip()
+
+
+def parse_window_title(title: str, exe: str = "") -> dict:
+    """解析前台窗口标题与进程名，识别应用/站点/页面主题。纯函数，可测试。
+
+    返回：app（进程名）、window（原始标题）、is_browser、site（站点标识）、
+    subject（页面/窗口主题）、kind（video/live/web/app/other/unknown）、is_bili。
+    """
+    title = (title or "").strip()
+    exe_name = os.path.basename((exe or "").replace("\\", "/")).lower()
+    if not title and not exe_name:
+        return {"app": "", "window": "", "is_browser": False, "site": "", "subject": "", "kind": "unknown", "is_bili": False}
+    low = title.lower()
+    is_browser = any(m in exe_name for m in _BROWSER_MARKERS) or any(
+        m in low for m in ("google chrome", "microsoft edge", "firefox", "opera", "brave")
+    )
+    site = ""
+    for name, kws in _SITE_KEYWORDS:
+        if any(k in low or k in exe_name for k in kws):
+            site = name
+            break
+    # B站：视频页/直播页特殊解析
+    if "哔哩哔哩" in title or "bilibili" in low:
+        if "直播" in title:
+            subject = re.split(r"[_\-—]", title, maxsplit=1)[0].strip()
+            return {
+                "app": exe_name, "window": title, "is_browser": is_browser, "site": "bilibili",
+                "subject": subject, "kind": "live", "is_bili": True,
+            }
+        m = _BILI_TITLE_SUFFIX_RE.match(title)
+        if m and m.group(1).strip():
+            return {
+                "app": exe_name, "window": title, "is_browser": is_browser, "site": "bilibili",
+                "subject": m.group(1).strip(), "kind": "video", "is_bili": True,
+            }
+        return {
+            "app": exe_name, "window": title, "is_browser": is_browser, "site": "bilibili",
+            "subject": "", "kind": "other", "is_bili": True,
+        }
+    subject = _strip_browser_suffix(title) if is_browser else title
+    return {
+        "app": exe_name, "window": title, "is_browser": is_browser, "site": site,
+        "subject": subject, "kind": "web" if is_browser else "app", "is_bili": False,
+    }
+
+
+def _foreground_window() -> dict:
+    """读取当前前台窗口的标题与进程路径（仅 Windows 可用）。"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+    except (AttributeError, ImportError, OSError):
+        raise BiliError("当前平台不支持读取前台窗口", "PLATFORM")
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        return {"title": "", "exe": ""}
+    buf = ctypes.create_unicode_buffer(512)
+    n = user32.GetWindowTextW(hwnd, buf, 512)
+    title = buf.value[: max(0, n)]
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    exe = ""
+    handle = kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if handle:
+        try:
+            size = wintypes.DWORD(512)
+            path = ctypes.create_unicode_buffer(512)
+            if kernel32.QueryFullProcessImageNameW(handle, 0, path, ctypes.byref(size)):
+                exe = path.value
+        finally:
+            kernel32.CloseHandle(handle)
+    return {"title": title, "exe": exe}
+
+
+def now_watching() -> dict:
+    """感知用户当前在看什么：读取前台窗口，识别应用/站点/页面主题；B站视频/直播自动匹配信息。"""
+    fg = _foreground_window()
+    parsed = parse_window_title(fg["title"], fg["exe"])
+    out = dict(parsed)
+    if parsed["kind"] == "video" and parsed["subject"]:
+        try:
+            results = search(parsed["subject"], "video", limit=3)
+        except BiliError:
+            results = []
+        if results:
+            best = results[0]
+            out["match"] = best
+            try:
+                info = video_info(best["bvid"])
+                out["video"] = {
+                    "bvid": best["bvid"],
+                    "title": info["title"],
+                    "owner_name": info["owner_name"],
+                    "view": info["view"],
+                    "danmaku": info["danmaku"],
+                    "duration": _fmt_duration(info["duration"]),
+                    "pubdate": _fmt_time(info["pubdate"]),
+                    "desc": (info["desc"] or "")[:200],
+                }
+            except BiliError:
+                out["video"] = None
+    return out
+
+
+def format_now_watching(info: dict) -> str:
+    kind = info.get("kind")
+    if kind == "unknown":
+        return "没有检测到前台窗口，无法感知当前内容。"
+    if info.get("is_bili"):
+        head = "用户正在看 B站" + ("直播" if kind == "live" else "视频") + "："
+        if kind == "live":
+            return head + "「" + (info.get("subject") or "未知直播间") + "」（窗口：%s）" % info.get("window")
+        if info.get("video"):
+            v = info["video"]
+            lines = [
+                head + f"「{v['title']}」",
+                f"UP主：{v['owner_name']} ｜ 播放 {v['view']} ｜ 弹幕 {v['danmaku']} ｜ 时长 {v['duration']}",
+                f"发布时间：{v['pubdate']} ｜ BV号 {v['bvid']}",
+            ]
+            if v.get("desc"):
+                lines.append("简介：" + v["desc"])
+            return "\n".join(lines)
+        if info.get("match"):
+            m = info["match"]
+            return head + f"「{m['title']}」（作者 {m['author']}）BV号 {m['bvid']}"
+        return head + "「" + (info.get("subject") or "未知") + "」（未能精确匹配，可让用户提供视频链接）"
+    app = info.get("app") or ""
+    subject = info.get("subject") or ""
+    if info.get("site"):
+        return f"用户正在浏览 {info['site']}：{subject or '（首页/未知页面）'}（{app}）"
+    if kind == "web":
+        return f"用户正在浏览网页：{subject or '（未知页面）'}（{app}）"
+    return f"用户正在使用应用：{app or '未知'}（窗口：{info.get('window') or '无标题'}）"

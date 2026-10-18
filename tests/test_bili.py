@@ -214,3 +214,76 @@ def test_no_csrf_for_write(monkeypatch) -> None:
     except BiliError as exc:
         assert exc.code == "NO_CSRF"
     monkeypatch.delenv("BILI_COOKIE", raising=False)
+
+
+# ══════════ 当前观看感知（通用窗口感知） ══════════
+
+
+def test_parse_window_title_bili_video() -> None:
+    from plugin.plugins.bili_viewer.bili import parse_window_title
+
+    p = parse_window_title("【原神】4.0 剧情PV_哔哩哔哩_bilibili", "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe")
+    assert p["is_bili"] is True
+    assert p["kind"] == "video"
+    assert p["site"] == "bilibili"
+    assert p["is_browser"] is True
+    assert p["subject"] == "【原神】4.0 剧情PV"
+
+
+def test_parse_window_title_bili_live() -> None:
+    from plugin.plugins.bili_viewer.bili import parse_window_title
+
+    p = parse_window_title("某某游戏直播中_哔哩哔哩直播", "chrome.exe")
+    assert p["is_bili"] is True and p["kind"] == "live" and p["subject"] == "某某游戏直播中"
+
+
+def test_parse_window_title_site() -> None:
+    from plugin.plugins.bili_viewer.bili import parse_window_title
+
+    p = parse_window_title("如何评价XXX - 知乎 - Google Chrome", "chrome.exe")
+    assert p["is_bili"] is False
+    assert p["site"] == "zhihu"
+    assert p["kind"] == "web"
+    assert "如何评价XXX" in p["subject"]
+
+
+def test_parse_window_title_app() -> None:
+    from plugin.plugins.bili_viewer.bili import parse_window_title
+
+    p = parse_window_title("工作文档 - Word", "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE")
+    assert p["is_bili"] is False
+    assert p["kind"] == "app"
+    assert p["site"] == ""
+    assert p["app"] == "winword.exe"
+    assert p["subject"] == "工作文档 - Word"
+
+
+def test_parse_window_title_empty() -> None:
+    from plugin.plugins.bili_viewer.bili import parse_window_title
+
+    p = parse_window_title("", "")
+    assert p["kind"] == "unknown" and p["is_bili"] is False
+
+
+def test_now_watching_app(monkeypatch) -> None:
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setattr(bili, "_foreground_window", lambda: {"title": "记事本 - 未命名", "exe": "notepad.exe"})
+    info = bili.now_watching()
+    assert info["is_bili"] is False
+    assert info["kind"] == "app"
+    assert info["app"] == "notepad.exe"
+
+
+def test_now_watching_bili_search_fails(monkeypatch) -> None:
+    from plugin.plugins.bili_viewer import bili
+    from plugin.plugins.bili_viewer.bili import BiliError
+
+    def _raise(*_args, **_kwargs):
+        raise BiliError("风控", "RISK_CONTROL")
+
+    monkeypatch.setattr(bili, "_foreground_window", lambda: {"title": "测试视频_哔哩哔哩_bilibili", "exe": "chrome.exe"})
+    monkeypatch.setattr(bili, "search", _raise)
+    info = bili.now_watching()
+    assert info["is_bili"] is True and info["kind"] == "video"
+    assert "match" not in info and "video" not in info

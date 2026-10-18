@@ -369,6 +369,29 @@ class BiliViewerPlugin(NekoPluginBase):
     # ══════════ 我的账号 / 稿件（需 BILI_COOKIE 登录态） ══════════
 
     @llm_tool(
+        name="bili_now_watching",
+        description=(
+            "感知用户当前正在看/用的内容（读取前台窗口标题与进程，通用感知，不限于 B站）。何时用：用户说"
+            "'我现在在看XX/我切视频了/跟着我看/看看我现在在干嘛/我正开着什么'时。"
+            "返回 app（进程）、window（窗口标题）、site（站点：bilibili/zhihu/weibo/youtube/steam 等）、"
+            "subject（页面/窗口主题）、kind（video/live/web/app）；若在 B站视频/直播页会自动匹配视频详情"
+            "（标题/UP主/播放/弹幕/BV号/简介）。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+        timeout=25.0,
+    )
+    async def bili_now_watching(self, **_):
+        try:
+            info = bili.now_watching()
+        except bili.BiliError as exc:
+            return _wrap_err(exc)
+        return {"output": bili.format_now_watching(info), "is_error": False, "watching": info}
+
+    @llm_tool(
         name="bili_my_info",
         description=(
             "查看当前 B站账号（BILI_COOKIE）信息。何时用：用户说'看看我的B站账号/我多少粉丝/我是大会员吗'时。"
