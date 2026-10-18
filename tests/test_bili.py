@@ -393,6 +393,41 @@ def test_pick_now_watching_all_skipped(monkeypatch) -> None:
     assert bili.pick_now_watching() is None
 
 
+def test_parse_bili_section_suffix() -> None:
+    """B站新版视频页标题「视频_分区名」（不带'哔哩哔哩'字样）应识别为 B站视频。"""
+    from plugin.plugins.bili_viewer.bili import parse_window_title
+
+    p = parse_window_title("1939锦标赛事件到底发生了什么？一个视频给你讲清楚_游戏杂谈 - Google Chrome", "chrome.exe")
+    assert p["is_bili"] is True and p["kind"] == "video"
+    assert p["site"] == "bilibili"
+    assert p["subject"] == "1939锦标赛事件到底发生了什么？一个视频给你讲清楚"
+
+
+def test_parse_watt_toolkit_not_steam() -> None:
+    """Steam++（Watt Toolkit）不应被误判为 Steam 站点。"""
+    from plugin.plugins.bili_viewer.bili import parse_window_title
+
+    p = parse_window_title("Watt Toolkit", r"D:\Steam++\Steam++.exe")
+    assert p["site"] == "" and p["is_bili"] is False and p["kind"] == "app"
+
+
+def test_pick_prefers_bili_over_watt_toolkit(monkeypatch) -> None:
+    """Watt Toolkit 在前台/可见时，B站视频窗口仍应胜出。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setattr(
+        bili,
+        "_visible_windows",
+        lambda: [
+            {"title": "Watt Toolkit", "exe": r"D:\Steam++\Steam++.exe"},
+            {"title": "1939锦标赛事件到底发生了什么？一个视频给你讲清楚_游戏杂谈 - Google Chrome", "exe": "chrome.exe"},
+            {"title": "N.E.K.O", "exe": r"D:\SteamLibrary\steamapps\common\n.e.k.o\N.E.K.O.exe"},
+        ],
+    )
+    got = bili.pick_now_watching()
+    assert got is not None and got["site"] == "bilibili" and got["is_bili"] is True
+
+
 def test_sync_text_prefix_is_inference() -> None:
     from plugin.plugins.bili_viewer import _sync_text
 

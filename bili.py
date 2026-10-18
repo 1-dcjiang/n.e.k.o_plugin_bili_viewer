@@ -1000,6 +1000,14 @@ _SITE_KEYWORDS = [
     ("wechat", ("微信", "weixin", "wechat")),
 ]
 _BILI_TITLE_SUFFIX_RE = re.compile(r"^(.*?)[_\-—]哔哩哔哩")
+# B站新版视频页标题常见格式「视频标题_分区名」（不带"哔哩哔哩"字样），用于兜底识别
+_BILI_SECTION_MARKERS = (
+    "游戏杂谈", "游戏热门视频", "单机游戏", "电子竞技", "手机游戏", "网络游戏", "桌游棋牌",
+    "动画", "番剧", "影视", "电影", "纪录片", "音乐", "舞蹈", "知识", "科技", "数码",
+    "生活", "美食", "动物圈", "时尚", "运动", "汽车", "鬼畜", "娱乐", "综艺", "资讯",
+    "Vlog", "专栏", "公开课", "搞笑", "日常", "手工", "绘画", "历史", "军事", "游戏",
+)
+_BILI_SECTION_SUFFIX_RE = re.compile(r"[_\-—](?:" + "|".join(map(re.escape, _BILI_SECTION_MARKERS)) + r")$")
 _BROWSER_TITLE_SUFFIX_RE = re.compile(
     r"\s*[-—_]\s*(?:Google Chrome|Chrome|Microsoft Edge|Edge|Firefox|Opera|Brave|Safari|浏览器)$",
     re.IGNORECASE,
@@ -1025,9 +1033,10 @@ def parse_window_title(title: str, exe: str = "") -> dict:
     is_browser = any(m in exe_name for m in _BROWSER_MARKERS) or any(
         m in low for m in ("google chrome", "microsoft edge", "firefox", "opera", "brave")
     )
+    # 站点关键词只在标题中匹配（不匹配进程名，避免 steam++.exe/Watt Toolkit 这类误判为 steam）
     site = ""
     for name, kws in _SITE_KEYWORDS:
-        if any(k in low or k in exe_name for k in kws):
+        if any(k in low for k in kws):
             site = name
             break
     # B站：视频页/直播页特殊解析
@@ -1048,6 +1057,17 @@ def parse_window_title(title: str, exe: str = "") -> dict:
             "app": exe_name, "window": title, "is_browser": is_browser, "site": "bilibili",
             "subject": "", "kind": "other", "is_bili": True,
         }
+    # B站兜底：浏览器标题形如「视频标题_分区名」（新版页面不带"哔哩哔哩"字样）
+    if is_browser and not site:
+        stripped = _strip_browser_suffix(title)
+        m = _BILI_SECTION_SUFFIX_RE.search(stripped)
+        if m:
+            subject = stripped[: m.start()].strip(" _-")
+            if subject:
+                return {
+                    "app": exe_name, "window": title, "is_browser": is_browser, "site": "bilibili",
+                    "subject": subject, "kind": "video", "is_bili": True,
+                }
     subject = _strip_browser_suffix(title) if is_browser else title
     return {
         "app": exe_name, "window": title, "is_browser": is_browser, "site": site,
