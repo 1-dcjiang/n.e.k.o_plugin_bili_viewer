@@ -1,10 +1,18 @@
-"""B站看板（bili_viewer）— 让 YUI 浏览哔哩哔哩视频/直播/评论/弹幕/字幕。
+"""B站全能助手（bili_viewer）— 让 YUI 浏览、感知并管理哔哩哔哩。
 
-安全边界：只读公开内容；不登录、不发布评论/弹幕/动态、不下载视频文件；
-可选用环境变量 BILI_COOKIE 提升接口可用性，但绝不读写账号数据。
+能力：
+- 浏览：搜索/视频详情/弹幕/字幕/AI概要/评论/直播信息与实时弹幕/UP主信息
+- 感知：读取前台窗口，识别用户在看的应用/站点/页面主题（实时同步给 YUI）
+- 管理：查看自己账号与稿件、修改稿件信息、直播时回复弹幕（需 BILI_COOKIE 登录态）
+
+安全边界：读操作只访问公开内容；写操作仅限本人账号内容、需登录态与用户确认；
+实时感知仅读取本地窗口标题与进程名，不读取页面内容、不做网络传输。
 """
 
 from __future__ import annotations
+
+import os
+import threading
 
 from plugin.sdk.plugin import NekoPluginBase, lifecycle, llm_tool, neko_plugin
 
@@ -19,17 +27,118 @@ def _wrap_err(exc: bili.BiliError) -> dict:
     }
 
 
+# 实时同步的轮询间隔（秒）与稳定判定次数（连续 N 次相同才推送，防抖动）
+_SYNC_POLL_INTERVAL = 2.5
+_SYNC_STABLE_COUNT = 2
+_SYNC_DISABLE_ENV = "BILLI_SYNC_DISABLE"
+
+
+def _sync_text(parsed: dict) -> str | None:
+    """把识别结果渲染为注入 YUI 上下文的一句话（read 模式，不打扰用户）。"""
+    kind = parsed.get("kind")
+    if kind == "unknown":
+        return None
+    if parsed.get("is_bili"):
+        label = "直播" if kind == "live" else "视频"
+        subject = parsed.get("subject") or "未知内容"
+        return f"（实时感知：用户当前正在看 B站{label}「{subject}」）"
+    if parsed.get("site"):
+        return f"（实时感知：用户当前正在用 {parsed['site']}，页面「{parsed.get('subject') or '未知'}」）"
+    if kind == "web":
+        return f"（实时感知：用户当前正在浏览网页「{parsed.get('subject') or '未知'}」）"
+    return f"（实时感知：用户当前正在使用应用 {parsed.get('app') or '未知'}，窗口「{parsed.get('subject') or '未知'}」）"
+
+
+def _window_fingerprint(parsed: dict) -> str:
+    """内容指纹：app|site|kind|subject。"""
+    return "|".join(
+        (
+            str(parsed.get("app") or ""),
+            str(parsed.get("site") or ""),
+            str(parsed.get("kind") or ""),
+            str(parsed.get("subject") or ""),
+        )
+    )
+
+
 @neko_plugin
 class BiliViewerPlugin(NekoPluginBase):
-    """N.E.K.O. 插件：哔哩哔哩内容浏览助手。"""
+    """N.E.K.O. 插件：哔哩哔哩内容浏览与实时感知助手。"""
 
     def __init__(self, ctx):
         super().__init__(ctx)
+        self._sync_thread: threading.Thread | None = None
+        self._sync_lock = threading.Lock()
+        # 启动后台实时感知线程（守护线程，不阻塞插件生命周期）
+        self._start_sync_watcher()
+
+    # ══════════ 实时感知同步（后台线程） ══════════
+
+    def _start_sync_watcher(self) -> None:
+        """启动后台轮询线程；仅在宿主上下文有效（非测试环境）且未禁用时启动。"""
+        if os.environ.get(_SYNC_DISABLE_ENV, "").strip() not in ("", "0"):
+            return
+        ctx = getattr(self, "ctx", None)
+        if ctx is None or not callable(getattr(ctx, "push_message", None)):
+            return  # 无宿主上下文
+        host = getattr(ctx, "_host_ctx", None)
+        if host is None:
+            return  # 测试/空宿主包装（如 SdkContext(None)）不启动线程
+        with self._sync_lock:
+            if self._sync_thread is not None and self._sync_thread.is_alive():
+                return  # 防重复启动
+            self._sync_thread = threading.Thread(
+                target=self._sync_watcher_loop,
+                name="bili-now-watching-sync",
+                daemon=True,
+            )
+            self._sync_thread.start()
+
+    def _sync_watcher_loop(self) -> None:
+        """轮询前台窗口，内容变化且稳定后静默注入 YUI 上下文。"""
+        last_pushed: str | None = None
+        candidate: str | None = None
+        candidate_count = 0
+        platform_ok = True
+        while True:
+            try:
+                fg = bili._foreground_window()
+                parsed = bili.parse_window_title(fg["title"], fg["exe"])
+            except bili.BiliError:
+                if platform_ok:
+                    platform_ok = False  # 非 Windows 等：只提示一次，退出轮询
+                break
+            fingerprint = _window_fingerprint(parsed)
+            if fingerprint != candidate:
+                candidate, candidate_count = fingerprint, 0
+            else:
+                candidate_count += 1
+            if (
+                candidate_count >= _SYNC_STABLE_COUNT
+                and fingerprint != last_pushed
+                and fingerprint
+            ):
+                text = _sync_text(parsed)
+                if text:
+                    try:
+                        self.ctx.push_message(
+                            visibility=[],
+                            ai_behavior="read",
+                            parts=[{"type": "text", "text": text}],
+                            source=self.plugin_id,
+                            coalesce_key="now_watching_sync",
+                            priority=0,
+                        )
+                        last_pushed = fingerprint
+                    except Exception:
+                        pass  # 推送失败不中断轮询
+            threading.Event().wait(_SYNC_POLL_INTERVAL)
 
     # ══════════ 生命周期 ══════════
 
     @lifecycle(id="startup")
     async def on_startup(self, **_):
+        self._start_sync_watcher()
         return {"status": "ready", "plugin": "bili_viewer"}
 
     @lifecycle(id="shutdown")

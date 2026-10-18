@@ -1,10 +1,10 @@
 [plugin]
 id = "bili_viewer"
-name = "B站看板"
-description = "让 YUI 浏览哔哩哔哩：搜索视频/直播/用户，查看视频详情（标题/UP主/时长/播放/弹幕/点赞/分P/标签）、弹幕文本、CC 字幕、B站官方 AI 概要、视频评论，查看直播间信息与实时弹幕（匿名采集），查看 UP主信息与投稿列表；可感知用户当前正在看/用的内容（前台窗口通用感知，B站视频/直播自动匹配详情）；支持管理自己的稿件与直播时回复弹幕（需配置 BILI_COOKIE 登录态）。"
-short_description = "让 YUI 浏览 B站：搜索、视频详情、弹幕、字幕、AI概要、评论、直播信息与实时弹幕、UP主与投稿、感知当前观看"
-keywords = ["bilibili", "哔哩哔哩", "B站", "视频", "弹幕", "评论", "直播", "字幕", "AI概要", "UP主", "搜索", "bili", "danmaku", "live", "感知", "now_watching"]
-version = "0.3.0"
+name = "B站全能助手"
+description = "让 YUI 浏览、感知并管理哔哩哔哩：搜索视频/直播/用户，查看视频详情（标题/UP主/时长/播放/弹幕/点赞/分P/标签）、弹幕文本、CC 字幕、B站官方 AI 概要、视频评论，查看直播间信息与实时弹幕（匿名采集），查看 UP主信息与投稿列表；可感知用户当前正在看/用的内容（前台窗口通用感知，识别应用/站点/页面主题，B站视频/直播自动匹配详情）；支持管理自己的账号与稿件（查看/改标题简介标签）与直播时回复弹幕（写操作需配置 BILI_COOKIE 含 bili_jct 登录态，仅作用于本人账号内容）。"
+short_description = "让 YUI 浏览、感知并管理 B站：搜索/视频详情/弹幕/字幕/AI概要/评论/直播弹幕/UP主/稿件管理/发弹幕/感知当前观看"
+keywords = ["bilibili", "哔哩哔哩", "B站", "视频", "弹幕", "评论", "直播", "字幕", "AI概要", "UP主", "搜索", "bili", "danmaku", "live", "感知", "now_watching", "稿件", "发弹幕", "当前观看"]
+version = "0.4.0"
 type = "plugin"
 entry = "plugin.plugins.bili_viewer:BiliViewerPlugin"
 

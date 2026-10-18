@@ -287,3 +287,53 @@ def test_now_watching_bili_search_fails(monkeypatch) -> None:
     info = bili.now_watching()
     assert info["is_bili"] is True and info["kind"] == "video"
     assert "match" not in info and "video" not in info
+
+
+# ══════════ 实时感知同步（后台注入） ══════════
+
+
+def test_sync_text_bili() -> None:
+    from plugin.plugins.bili_viewer import _sync_text
+
+    t = _sync_text({"kind": "video", "is_bili": True, "subject": "原神 PV"})
+    assert t is not None and "原神 PV" in t and "B站视频" in t
+
+
+def test_sync_text_site() -> None:
+    from plugin.plugins.bili_viewer import _sync_text
+
+    t = _sync_text({"kind": "web", "is_bili": False, "site": "zhihu", "subject": "如何评价"})
+    assert t is not None and "zhihu" in t and "如何评价" in t
+
+
+def test_sync_text_unknown() -> None:
+    from plugin.plugins.bili_viewer import _sync_text
+
+    assert _sync_text({"kind": "unknown", "is_bili": False}) is None
+
+
+def test_window_fingerprint() -> None:
+    from plugin.plugins.bili_viewer import _window_fingerprint
+
+    a = _window_fingerprint({"app": "chrome.exe", "site": "bilibili", "kind": "video", "subject": "A"})
+    b = _window_fingerprint({"app": "chrome.exe", "site": "bilibili", "kind": "video", "subject": "B"})
+    assert a != b
+    assert _window_fingerprint({"app": "x", "site": "", "kind": "app", "subject": "y"}) != a
+
+
+def test_watcher_not_started_without_host(monkeypatch) -> None:
+    """无宿主 ctx（测试环境）不启动后台线程。"""
+    from plugin.plugins.bili_viewer import BiliViewerPlugin
+
+    monkeypatch.delenv("BILLI_SYNC_DISABLE", raising=False)
+    inst = BiliViewerPlugin(ctx=None)
+    assert inst._sync_thread is None
+
+
+def test_watcher_not_started_when_disabled(monkeypatch) -> None:
+    from plugin.plugins.bili_viewer import BiliViewerPlugin
+
+    monkeypatch.setenv("BILLI_SYNC_DISABLE", "1")
+    inst = BiliViewerPlugin(ctx=None)
+    assert inst._sync_thread is None
+    monkeypatch.delenv("BILLI_SYNC_DISABLE", raising=False)
