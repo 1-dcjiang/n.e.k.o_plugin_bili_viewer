@@ -585,4 +585,29 @@ def test_watcher_not_started_when_disabled(monkeypatch) -> None:
     monkeypatch.setenv("BILLI_SYNC_DISABLE", "1")
     inst = BiliViewerPlugin(ctx=None)
     assert inst._sync_thread is None
-    monkeypatch.delenv("BILLI_SYNC_DISABLE", raising=False)
+
+
+# ══════════ BILI_COOKIE 配置注入 ══════════
+
+
+def test_cookie_env_priority() -> None:
+    from plugin.plugins.bili_viewer import _apply_cookie_from_config
+
+    cfg = {"settings": {"bili_cookie": "cfg=SESSDATA_CFG"}}
+    env = {"BILI_COOKIE": "env=SESSDATA_ENV"}
+    assert _apply_cookie_from_config(cfg, env) == "env=SESSDATA_ENV"
+
+
+def test_cookie_from_config_when_no_env() -> None:
+    from plugin.plugins.bili_viewer import _apply_cookie_from_config
+
+    cfg = {"settings": {"bili_cookie": "cfg=SESSDATA_CFG;bili_jct=abc"}}
+    assert _apply_cookie_from_config(cfg, {}) == "cfg=SESSDATA_CFG;bili_jct=abc"
+
+
+def test_cookie_empty_when_unset() -> None:
+    from plugin.plugins.bili_viewer import _apply_cookie_from_config
+
+    assert _apply_cookie_from_config({}, {}) == ""
+    assert _apply_cookie_from_config({"settings": {"bili_cookie": "   "}}, {}) == ""
+    assert _apply_cookie_from_config({"settings": {}}, {"BILI_COOKIE": ""}) == ""

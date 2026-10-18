@@ -1,0 +1,17 @@
+[plugin_runtime]
+enabled = true
+auto_start = true
+
+# B站登录 Cookie（可选但强烈建议）——接入你的 B站账号后，
+# 直播弹幕（当前网络下游客被 -352 风控）、发弹幕、稿件管理等
+# 需登录态的接口即可正常使用。
+#
+# 如何获取（不要发给 AI/发到聊天里，只填到本配置文件/插件配置界面）：
+#   1. 用浏览器登录 bilibili.com
+#   2. 按 F12 打开开发者工具 → Application（应用）→ Cookies → https://www.bilibili.com
+#   3. 任选一条 Cookie 右键 → 复制（或点击后按 Ctrl+A 再 Ctrl+C 复制整行 Cookie 头）
+#   4. 粘贴到下方 bili_cookie = "..." 中
+# 要求：必须包含 SESSDATA（读接口）与 bili_jct（写接口：发弹幕/改稿件）。
+# 提示：Cookie 会过期，失效后重新获取即可。
+[settings]
+bili_cookie = ""

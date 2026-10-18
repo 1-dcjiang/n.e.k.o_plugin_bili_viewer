@@ -34,6 +34,26 @@ _SYNC_STABLE_COUNT = 2
 _SYNC_MIN_INTERVAL = 15.0  # 两次推送的最小间隔（秒），避免频繁切内容时刷屏
 _SYNC_DISABLE_ENV = "BILLI_SYNC_DISABLE"
 
+# 插件配置段与 Cookie 配置键
+_CONFIG_SECTION = "settings"
+_CONFIG_COOKIE_KEY = "bili_cookie"
+
+
+def _apply_cookie_from_config(cfg: dict, env: dict) -> str:
+    """决定实际生效的 BILI_COOKIE：环境变量优先，其次插件配置（settings.bili_cookie）。
+
+    返回最终生效的 Cookie 字符串（可能为空）。纯函数便于测试。
+    """
+    env_cookie = str(env.get("BILI_COOKIE", "") or "").strip()
+    if env_cookie:
+        return env_cookie
+    section = cfg.get(_CONFIG_SECTION) if isinstance(cfg, dict) else None
+    if isinstance(section, dict):
+        val = section.get(_CONFIG_COOKIE_KEY)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return ""
+
 
 def _sync_text(parsed: dict) -> str | None:
     """把识别结果渲染为注入 YUI 上下文的一句话。"""
@@ -148,6 +168,15 @@ class BiliViewerPlugin(NekoPluginBase):
 
     @lifecycle(id="startup")
     async def on_startup(self, **_):
+        # 从插件配置注入 BILI_COOKIE（环境变量优先；配置在插件管理页/配置文件 settings.bili_cookie）
+        try:
+            cfg = await self.config.dump(timeout=5.0)
+            cfg = cfg if isinstance(cfg, dict) else {}
+        except Exception:
+            cfg = {}
+        cookie = _apply_cookie_from_config(cfg, os.environ)
+        if cookie:
+            os.environ["BILI_COOKIE"] = cookie
         self._start_sync_watcher()
         return {"status": "ready", "plugin": "bili_viewer"}
 
