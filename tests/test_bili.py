@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import struct
 import zlib
 
@@ -611,3 +612,66 @@ def test_cookie_empty_when_unset() -> None:
     assert _apply_cookie_from_config({}, {}) == ""
     assert _apply_cookie_from_config({"settings": {"bili_cookie": "   "}}, {}) == ""
     assert _apply_cookie_from_config({"settings": {}}, {"BILI_COOKIE": ""}) == ""
+
+
+# ══════════ 自动绑定（allow_cookie_scan / cookie_auto） ══════════
+
+
+def test_allow_cookie_scan_values() -> None:
+    from plugin.plugins.bili_viewer import _allow_cookie_scan
+
+    assert _allow_cookie_scan({}) is False
+    assert _allow_cookie_scan({"settings": {}}) is False
+    assert _allow_cookie_scan({"settings": {"allow_cookie_scan": True}}) is True
+    assert _allow_cookie_scan({"settings": {"allow_cookie_scan": "true"}}) is True
+    assert _allow_cookie_scan({"settings": {"allow_cookie_scan": "1"}}) is True
+    assert _allow_cookie_scan({"settings": {"allow_cookie_scan": False}}) is False
+    assert _allow_cookie_scan({"settings": {"allow_cookie_scan": "no"}}) is False
+
+
+def test_cookie_summary_no_leak() -> None:
+    from plugin.plugins.bili_viewer import _cookie_summary
+
+    assert _cookie_summary("") == "未配置"
+    assert "SESSDATA" in _cookie_summary("SESSDATA=abc; bili_jct=xyz")
+    assert "abc" not in _cookie_summary("SESSDATA=abc; bili_jct=xyz")  # 不泄露值
+    assert _cookie_summary("buvid3=xx") == "已配置（无登录态字段）"
+
+
+def test_build_cookie_string_sanitizes() -> None:
+    from plugin.plugins.bili_viewer.cookie_auto import build_cookie_string
+
+    s = build_cookie_string(
+        [("SESSDATA", "a"), ("bili_jct", "b"), ("SESSDATA", "dup"), ("bad", "x;y"), ("bad2", 'x"y'), ("ok", "v")]
+    )
+    assert s == "SESSDATA=a; bili_jct=b; ok=v"
+
+
+def test_detect_no_browser(monkeypatch) -> None:
+    from plugin.plugins.bili_viewer import cookie_auto
+
+    monkeypatch.setenv("LOCALAPPDATA", "Z:\\nonexistent\\dir")
+    status, cookie, detail = cookie_auto.detect_bili_cookie()
+    assert status == cookie_auto._STATUS_NO_BROWSER and cookie == "" and detail
+
+
+def test_detect_locked_when_browser_running(monkeypatch, tmp_path) -> None:
+    """模拟浏览器数据目录存在但 Cookies 文件不可读 → 锁定状态。"""
+    from plugin.plugins.bili_viewer import cookie_auto
+
+    monkeypatch.setattr(
+        cookie_auto,
+        "AUTO_COOKIE_SOURCES",
+        (("Chrome", os.path.join("Google", "Chrome", "User Data")),),
+    )
+    root = tmp_path / "Google" / "Chrome" / "User Data"
+    (root / "Default" / "Network").mkdir(parents=True)
+    with open(root / "Default" / "Network" / "Cookies", "w", encoding="utf-8") as f:
+        f.write("")  # 文件存在但打开被模拟为锁定
+    with open(root / "Local State", "w", encoding="utf-8") as f:
+        f.write('{"os_crypt":{"encrypted_key":"QQ=="}}')
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(cookie_auto, "_load_aes_key", lambda path: b"\x00" * 32)  # 绕过真实 DPAPI
+    monkeypatch.setattr(cookie_auto, "_open_cookies_db", lambda path: None)  # 模拟锁
+    status, cookie, _ = cookie_auto.detect_bili_cookie()
+    assert status == cookie_auto._STATUS_LOCKED and cookie == ""

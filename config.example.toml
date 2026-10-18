@@ -2,16 +2,19 @@
 enabled = true
 auto_start = true
 
-# B站登录 Cookie（可选但强烈建议）——接入你的 B站账号后，
-# 直播弹幕（当前网络下游客被 -352 风控）、发弹幕、稿件管理等
-# 需登录态的接口即可正常使用。
+# ── B站账号接入（推荐方式：自动绑定）────────────────────────────
+# 推荐让 YUI 自动读取本机浏览器（Chrome/Edge）已登录的 B站 Cookie 并绑定：
+#   1. 先在浏览器里登录一次 bilibili.com（扫码/账号均可）
+#   2. 对 YUI 说"允许你读取浏览器 Cookie 绑定 B站账号"，YUI 会调用 bili_bind_account(allow=true)
+#   3. 之后关闭 Chrome/Edge，重启 N.E.K.O 客户端即可自动绑定（授权只确认一次，永久生效）
+# 注意：浏览器运行中 Cookie 文件被浏览器独占锁定，插件读不到；需先关闭浏览器再重启客户端。
+# 自动读取为本地操作，Cookie 不上传、不写日志、不发给 AI。
 #
-# 如何获取（不要发给 AI/发到聊天里，只填到本配置文件/插件配置界面）：
-#   1. 用浏览器登录 bilibili.com
-#   2. 按 F12 打开开发者工具 → Application（应用）→ Cookies → https://www.bilibili.com
-#   3. 任选一条 Cookie 右键 → 复制（或点击后按 Ctrl+A 再 Ctrl+C 复制整行 Cookie 头）
-#   4. 粘贴到下方 bili_cookie = "..." 中
-# 要求：必须包含 SESSDATA（读接口）与 bili_jct（写接口：发弹幕/改稿件）。
-# 提示：Cookie 会过期，失效后重新获取即可。
+# ── 手动配置（备选）────────────────────────────────────────────
+# 也可把浏览器 F12 → Application → Cookies → bilibili.com 复制的整串 Cookie
+# 直接填到下方 bili_cookie = "..."（含 SESSDATA；发弹幕/改稿件还需 bili_jct）。
+# 手动配置优先级高于自动读取。
 [settings]
 bili_cookie = ""
+# 是否允许插件自动读取浏览器 Cookie（true=允许；YUI 询问时回复"允许"即可自动置为 true）
+allow_cookie_scan = false

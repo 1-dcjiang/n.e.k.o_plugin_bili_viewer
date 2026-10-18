@@ -17,7 +17,7 @@ import time
 
 from plugin.sdk.plugin import NekoPluginBase, lifecycle, llm_tool, neko_plugin
 
-from . import bili
+from . import bili, cookie_auto
 
 
 def _wrap_err(exc: bili.BiliError) -> dict:
@@ -37,6 +37,11 @@ _SYNC_DISABLE_ENV = "BILLI_SYNC_DISABLE"
 # 插件配置段与 Cookie 配置键
 _CONFIG_SECTION = "settings"
 _CONFIG_COOKIE_KEY = "bili_cookie"
+_CONFIG_ALLOW_SCAN_KEY = "allow_cookie_scan"
+
+_COOKIE_SOURCE_MANUAL = "manual"
+_COOKIE_SOURCE_AUTO = "auto"
+_COOKIE_SOURCE_NONE = "none"
 
 
 def _apply_cookie_from_config(cfg: dict, env: dict) -> str:
@@ -53,6 +58,33 @@ def _apply_cookie_from_config(cfg: dict, env: dict) -> str:
         if isinstance(val, str) and val.strip():
             return val.strip()
     return ""
+
+
+def _allow_cookie_scan(cfg: dict) -> bool:
+    """用户是否已授权自动读取浏览器 Cookie（settings.allow_cookie_scan）。"""
+    section = cfg.get(_CONFIG_SECTION) if isinstance(cfg, dict) else None
+    if not isinstance(section, dict):
+        return False
+    val = section.get(_CONFIG_ALLOW_SCAN_KEY)
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        return val.strip().lower() in ("1", "true", "yes", "on")
+    return False
+
+
+def _cookie_summary(cookie: str) -> str:
+    """简短描述 Cookie 是否含登录态（不泄露内容）。"""
+    if not cookie:
+        return "未配置"
+    marks = []
+    if "SESSDATA=" in cookie:
+        marks.append("SESSDATA（登录态）")
+    if "bili_jct=" in cookie:
+        marks.append("bili_jct（写操作凭证）")
+    if not marks:
+        return "已配置（无登录态字段）"
+    return "含 " + "、".join(marks)
 
 
 def _sync_text(parsed: dict) -> str | None:
@@ -168,15 +200,23 @@ class BiliViewerPlugin(NekoPluginBase):
 
     @lifecycle(id="startup")
     async def on_startup(self, **_):
-        # 从插件配置注入 BILI_COOKIE（环境变量优先；配置在插件管理页/配置文件 settings.bili_cookie）
+        # 1) 手动配置（settings.bili_cookie / 环境变量 BILI_COOKIE）
         try:
             cfg = await self.config.dump(timeout=5.0)
             cfg = cfg if isinstance(cfg, dict) else {}
         except Exception:
             cfg = {}
         cookie = _apply_cookie_from_config(cfg, os.environ)
+        source = _COOKIE_SOURCE_MANUAL if cookie else _COOKIE_SOURCE_NONE
+        # 2) 未手动配置且用户已授权 → 自动检测浏览器（Chrome/Edge）已登录的 B站 Cookie
+        if not cookie and _allow_cookie_scan(cfg):
+            status, auto_cookie, _detail = cookie_auto.detect_bili_cookie()
+            if auto_cookie:
+                cookie = auto_cookie
+                source = _COOKIE_SOURCE_AUTO
         if cookie:
             os.environ["BILI_COOKIE"] = cookie
+        self._cookie_source = source
         self._start_sync_watcher()
         return {"status": "ready", "plugin": "bili_viewer"}
 
@@ -663,3 +703,90 @@ class BiliViewerPlugin(NekoPluginBase):
         except bili.BiliError as exc:
             return _wrap_err(exc)
         return {"output": f"已向直播间 {result['room_id']} 发送弹幕：{result['text']}", "is_error": False, "result": result}
+
+    # ══════════ 账号绑定（自动检测浏览器 Cookie） ══════════
+
+    @llm_tool(
+        name="bili_bind_status",
+        description=(
+            "查看当前 B站账号绑定状态。何时用：用户问'你绑定B站了吗/为什么看不到弹幕/账号接上了吗'时，"
+            "或 YUI 需要自查登录态是否可用。返回：绑定来源（手动配置/自动读取浏览器 Cookie/未绑定）、"
+            "Cookie 包含哪些凭证（不泄露内容）、未绑定时给出下一步建议（关闭浏览器/先登录 B站）。"
+        ),
+        parameters={"type": "object", "properties": {}, "required": []},
+        timeout=10.0,
+    )
+    async def bili_bind_status(self, **_):
+        cookie = os.environ.get("BILI_COOKIE", "") or ""
+        source = getattr(self, "_cookie_source", _COOKIE_SOURCE_NONE)
+        summary = _cookie_summary(cookie)
+        if cookie and "SESSDATA=" in cookie:
+            output = f"当前 B站账号已绑定（来源：{'自动读取浏览器 Cookie' if source == _COOKIE_SOURCE_AUTO else '手动配置'}），{summary}。"
+            return {"output": output, "is_error": False, "bound": True, "source": source}
+        if source == _COOKIE_SOURCE_AUTO:
+            return {"output": "已启用自动读取浏览器 Cookie，但当前未检测到 B站登录态。", "is_error": True, "bound": False, "source": source}
+        # 未绑定：尝试自动检测并报告原因
+        try:
+            status, auto_cookie, detail = cookie_auto.detect_bili_cookie()
+        except Exception:
+            status, auto_cookie, detail = cookie_auto._STATUS_FAIL, "", cookie_auto.STATUS_TEXT[cookie_auto._STATUS_FAIL]
+        if auto_cookie:
+            os.environ["BILI_COOKIE"] = auto_cookie
+            self._cookie_source = _COOKIE_SOURCE_AUTO
+            return {"output": "已自动绑定 B站账号（读取浏览器 Cookie）。", "is_error": False, "bound": True, "source": _COOKIE_SOURCE_AUTO}
+        return {
+            "output": f"未绑定 B站账号。原因：{detail}。"
+            + ("若用户同意，可调用 bili_bind_account(allow=true) 授权自动读取浏览器 Cookie。" if not _allow_cookie_scan({}) else ""),
+            "is_error": True,
+            "bound": False,
+            "source": _COOKIE_SOURCE_NONE,
+            "detect_status": status,
+        }
+
+    @llm_tool(
+        name="bili_bind_account",
+        description=(
+            "接入 B站账号：授权插件自动读取本机浏览器（Chrome/Edge）已登录的 B站 Cookie 并绑定。"
+            "何时用：用户说'允许你读取浏览器Cookie/接我的B站账号/绑定账号/确认'时。"
+            "参数 allow（必填布尔）：true=用户已授权自动读取（写入一次永久生效），false=拒绝。"
+            "授权后立即检测：浏览器关闭时可直接绑定；浏览器运行中 Cookie 被浏览器锁定，"
+            "会提示用户先关闭 Chrome/Edge 再重试。这是本地读取，无网络传输，Cookie 不上传不写日志。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {"allow": {"type": "boolean", "description": "用户是否允许自动读取浏览器 Cookie"}},
+            "required": ["allow"],
+        },
+        timeout=20.0,
+    )
+    async def bili_bind_account(self, *, allow: bool = False, **_):
+        params = _.get("parameters") or {}
+        allow = bool(allow) if isinstance(allow, bool) else bool(params.get("allow"))
+        if not allow:
+            return {"output": "已保持不读取浏览器 Cookie（仅手动配置可用）。", "is_error": False, "allowed": False}
+        # 写入授权（保留已有 settings 其他键）
+        try:
+            cfg = await self.config.dump(timeout=5.0)
+            cfg = cfg if isinstance(cfg, dict) else {}
+        except Exception:
+            cfg = {}
+        section = cfg.get(_CONFIG_SECTION) if isinstance(cfg.get(_CONFIG_SECTION), dict) else {}
+        new_section = {**section, _CONFIG_ALLOW_SCAN_KEY: True}
+        try:
+            await self.config.update({_CONFIG_SECTION: new_section})
+        except Exception:
+            pass  # 授权写入失败不阻塞本次绑定（下次启动需重新授权）
+        try:
+            status, cookie, detail = cookie_auto.detect_bili_cookie()
+        except Exception:
+            status, cookie, detail = cookie_auto._STATUS_FAIL, "", cookie_auto.STATUS_TEXT[cookie_auto._STATUS_FAIL]
+        if cookie:
+            os.environ["BILI_COOKIE"] = cookie
+            self._cookie_source = _COOKIE_SOURCE_AUTO
+            return {"output": f"已授权并自动绑定 B站账号（{detail}）。", "is_error": False, "bound": True, "source": _COOKIE_SOURCE_AUTO}
+        return {
+            "output": f"授权已记录（下次启动自动生效）。当前检测：{detail}。若浏览器正在运行，请关闭 Chrome/Edge 后重启客户端，或再对我说一次'确认'重新检测。",
+            "is_error": True,
+            "bound": False,
+            "detect_status": status,
+        }

@@ -49,12 +49,21 @@
 
 ## 配置（可选）——接入你的 B站账号
 
-插件通过 `settings.bili_cookie` 配置项读取你的 B站登录 Cookie（登录态）。
-配置后，被 B站对游客风控/拦截的接口即可正常使用。
+插件提供两种方式接入账号，让被 B站对游客风控/拦截的接口（直播弹幕 -352 等）正常使用：
 
-**优先推荐：在客户端插件管理页的 bili_viewer 配置界面填写 `bili_cookie`**；
-或直接编辑配置文件
-`C:\Users\jh\AppData\Local\N.E.K.O\.neko-package-profiles\bili_viewer\default.toml`，
+### 方式一：自动绑定（推荐，无需手动复制）
+
+1. 先在浏览器里登录一次 bilibili.com（扫码或账号密码均可）；
+2. 对 YUI 说"**允许你读取浏览器 Cookie 绑定 B站账号**"——YUI 会调用 `bili_bind_account(allow=true)` 记录授权（只确认一次，永久生效）；
+3. **关闭 Chrome/Edge**（浏览器运行中 Cookie 文件被独占锁定，插件读不到），然后重启 N.E.K.O 客户端；
+4. 插件自动读取浏览器中已登录的 B站 Cookie 并绑定。可让 YUI 用 `bili_bind_status` 查看绑定状态。
+
+读取为本地操作：Cookie 不上传、不写日志、不发给 AI。
+
+### 方式二：手动配置（备选）
+
+在客户端插件管理页的 bili_viewer 配置界面填写 `bili_cookie`；
+或编辑 `C:\Users\jh\AppData\Local\N.E.K.O\.neko-package-profiles\bili_viewer\default.toml`，
 在文件末尾追加：
 
 ```toml
@@ -62,18 +71,9 @@
 bili_cookie = "完整Cookie字符串"
 ```
 
-**如何获取 Cookie（不要发给 AI / 不要发到聊天里，只填到配置）**：
-1. 浏览器登录 bilibili.com；
-2. 按 F12 → Application（应用）→ Cookies → `https://www.bilibili.com`；
-3. 任选一条 Cookie 右键 → 复制，粘贴到配置的 `bili_cookie` 中；
-4. 保存后**重启客户端**生效。
-
-要求：读接口需含 `SESSDATA`；写接口（发弹幕/改稿件）还需 `bili_jct`。
-不配置时搜索、视频详情、评论、字幕、AI 概要、直播信息、UP主信息均可用；
-**直播实时弹幕**在当前网络下游客会被 B站风控（-352），配置后可正常获取。
-**稿件管理与直播发弹幕**为写操作，必须配置 BILI_COOKIE（含 `bili_jct`），
-且只作用于当前账号自己的内容，请仅在明确确认后使用。
-插件绝不把 Cookie 写入磁盘或对外发送。
+获取方法：浏览器登录 bilibili.com → F12 → Application（应用）→ Cookies → `https://www.bilibili.com` → 任选一条 Cookie 右键复制。
+要求：读接口需含 `SESSDATA`；写接口（发弹幕/改稿件）还需 `bili_jct`。手动配置优先级高于自动读取。
+插件绝不把 Cookie 写入日志或对外发送。
 
 ## 安全说明
 
