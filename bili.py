@@ -1086,10 +1086,131 @@ def _foreground_window() -> dict:
     return {"title": title, "exe": exe}
 
 
+# ══════════ 多窗口感知（实时同步 / bili_now_watching 共用） ══════════
+#
+# 为什么不用"前台窗口"：用户和 YUI 聊天时，聊天窗口（N.E.K.O 客户端）必然在前台，
+# 但用户真正在看的内容（B站视频/网页/游戏）往往在后台。因此改为枚举所有可见窗口，
+# 排除聊天客户端/终端/空标题，再按内容优先级选出"最可能在看"的窗口。
+
+# 开发终端/命令行：多为调试或 AI 操作，不代表用户在看的内容
+_TERMINAL_EXES = (
+    "windowsterminal", "cmd.exe", "powershell", "pwsh",
+    "python", "py.exe", "bash", "sh.exe", "wt.exe", "conhost",
+)
+# N.E.K.O 客户端自身（用户与 YUI 聊天的窗口）：不作为感知对象
+_NEKO_CLIENT_EXES = ("n.e.k.o", "neko", "launcher")
+
+
+def _is_terminal_window(parsed: dict) -> bool:
+    """是否开发终端/命令行窗口（不参与感知）。"""
+    app = (parsed.get("app") or "").lower()
+    return any(m in app for m in _TERMINAL_EXES)
+
+
+def _is_neko_client(parsed: dict) -> bool:
+    """是否 N.E.K.O 客户端聊天窗口（不参与感知）。"""
+    app = (parsed.get("app") or "").lower()
+    return any(m in app for m in _NEKO_CLIENT_EXES)
+
+
+def _skip_window(parsed: dict) -> bool:
+    """窗口是否应被排除（未知/空标题/终端/聊天客户端）。"""
+    if parsed.get("kind") in ("", "unknown"):
+        return True
+    if not parsed.get("window"):
+        return True
+    if _is_terminal_window(parsed) or _is_neko_client(parsed):
+        return True
+    return False
+
+
+def _window_score(parsed: dict) -> int:
+    """内容优先级：B站视频/直播 > 已知站点 > 网页 > 其他应用。"""
+    if parsed.get("is_bili"):
+        return 100
+    if parsed.get("site"):
+        return 90
+    if parsed.get("kind") == "web":
+        return 80
+    if parsed.get("kind") == "app":
+        return 70
+    return 60
+
+
+def _visible_windows() -> list[dict]:
+    """枚举所有可见顶层窗口（仅 Windows），返回 [{"title": str, "exe": str}]。"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+    except (AttributeError, ImportError, OSError):
+        raise BiliError("当前平台不支持读取窗口", "PLATFORM")
+
+    windows: list[dict] = []
+
+    def _exe_of(pid: int) -> str:
+        exe = ""
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if handle:
+            try:
+                size = wintypes.DWORD(512)
+                path = ctypes.create_unicode_buffer(512)
+                if kernel32.QueryFullProcessImageNameW(handle, 0, path, ctypes.byref(size)):
+                    exe = path.value
+            finally:
+                kernel32.CloseHandle(handle)
+        return exe
+
+    wnd_enum_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+    def _enum_proc(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        buf = ctypes.create_unicode_buffer(512)
+        n = user32.GetWindowTextW(hwnd, buf, 512)
+        title = buf.value[: max(0, n)].strip()
+        if not title:
+            return True
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        windows.append({"title": title, "exe": _exe_of(pid.value)})
+        return True
+
+    user32.EnumWindows(wnd_enum_proc(_enum_proc), 0)
+    return windows
+
+
+def pick_now_watching() -> dict | None:
+    """选出最可能'用户正在看'的窗口，返回 parse_window_title 结果；无可感知窗口返回 None。
+
+    排除：N.E.K.O 聊天客户端、开发终端、空标题/系统窗口。
+    优先级：B站视频/直播 > 已知站点 > 网页 > 其他应用（游戏等）。
+    """
+    best = None
+    best_score = -1
+    try:
+        windows = _visible_windows()
+    except BiliError:
+        return None
+    for win in windows:
+        parsed = parse_window_title(win["title"], win["exe"])
+        if _skip_window(parsed):
+            continue
+        score = _window_score(parsed)
+        if score > best_score:
+            best_score, best = score, parsed
+    return best
+
+
 def now_watching() -> dict:
-    """感知用户当前在看什么：读取前台窗口，识别应用/站点/页面主题；B站视频/直播自动匹配信息。"""
-    fg = _foreground_window()
-    parsed = parse_window_title(fg["title"], fg["exe"])
+    """感知用户当前在看什么：枚举可见窗口选最优（排除聊天客户端/终端）；
+    B站视频/直播自动匹配信息。无可用窗口时回退读取前台窗口。"""
+    parsed = pick_now_watching()
+    if parsed is None:
+        fg = _foreground_window()
+        parsed = parse_window_title(fg["title"], fg["exe"])
     out = dict(parsed)
     if parsed["kind"] == "video" and parsed["subject"]:
         try:

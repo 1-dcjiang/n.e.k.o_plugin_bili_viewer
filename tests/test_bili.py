@@ -268,7 +268,7 @@ def test_parse_window_title_empty() -> None:
 def test_now_watching_app(monkeypatch) -> None:
     from plugin.plugins.bili_viewer import bili
 
-    monkeypatch.setattr(bili, "_foreground_window", lambda: {"title": "记事本 - 未命名", "exe": "notepad.exe"})
+    monkeypatch.setattr(bili, "_visible_windows", lambda: [{"title": "记事本 - 未命名", "exe": "notepad.exe"}])
     info = bili.now_watching()
     assert info["is_bili"] is False
     assert info["kind"] == "app"
@@ -282,7 +282,7 @@ def test_now_watching_bili_search_fails(monkeypatch) -> None:
     def _raise(*_args, **_kwargs):
         raise BiliError("风控", "RISK_CONTROL")
 
-    monkeypatch.setattr(bili, "_foreground_window", lambda: {"title": "测试视频_哔哩哔哩_bilibili", "exe": "chrome.exe"})
+    monkeypatch.setattr(bili, "_visible_windows", lambda: [{"title": "测试视频_哔哩哔哩_bilibili", "exe": "chrome.exe"}])
     monkeypatch.setattr(bili, "search", _raise)
     info = bili.now_watching()
     assert info["is_bili"] is True and info["kind"] == "video"
@@ -322,13 +322,75 @@ def test_window_fingerprint() -> None:
 
 
 def test_is_terminal_window() -> None:
-    from plugin.plugins.bili_viewer import _is_terminal_window
+    from plugin.plugins.bili_viewer.bili import _is_terminal_window
 
     for app in ("windowsterminal.exe", "powershell.exe", "cmd.exe", "python.exe", "pwsh.exe", "wt.exe", "bash.exe"):
         assert _is_terminal_window({"app": app, "kind": "app"}), app
     for app in ("chrome.exe", "msedge.exe", "steam.exe", "WeChat.exe", "explorer.exe", "QQMusic.exe"):
         assert not _is_terminal_window({"app": app, "kind": "app"}), app
     assert not _is_terminal_window({"app": "", "kind": "unknown"})
+
+
+def test_is_neko_client() -> None:
+    from plugin.plugins.bili_viewer.bili import _is_neko_client
+
+    for app in ("N.E.K.O.exe", "n.e.k.o.exe", "neko.exe", "launcher.exe"):
+        assert _is_neko_client({"app": app, "kind": "app"}), app
+    assert not _is_neko_client({"app": "chrome.exe", "kind": "web"})
+
+
+def test_skip_window() -> None:
+    from plugin.plugins.bili_viewer.bili import _skip_window
+
+    assert _skip_window({"kind": "unknown", "window": "x", "app": ""})
+    assert _skip_window({"kind": "app", "window": "", "app": "steam.exe"})
+    assert _skip_window({"kind": "app", "window": "term", "app": "powershell.exe"})
+    assert _skip_window({"kind": "app", "window": "N.E.K.O", "app": "n.e.k.o.exe"})
+    assert not _skip_window({"kind": "web", "window": "视频_哔哩哔哩_bilibili", "app": "chrome.exe"})
+
+
+def test_window_score() -> None:
+    from plugin.plugins.bili_viewer.bili import _window_score
+
+    assert _window_score({"kind": "video", "is_bili": True, "site": "bilibili"}) == 100
+    assert _window_score({"kind": "web", "is_bili": False, "site": "zhihu"}) == 90
+    assert _window_score({"kind": "web", "is_bili": False, "site": ""}) == 80
+    assert _window_score({"kind": "app", "is_bili": False, "site": ""}) == 70
+    assert _window_score({"kind": "other", "is_bili": False, "site": ""}) == 60
+
+
+def test_pick_now_watching(monkeypatch) -> None:
+    """多窗口场景：聊天客户端在前台也不影响——后台的 B站视频优先。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setattr(
+        bili,
+        "_visible_windows",
+        lambda: [
+            {"title": "N.E.K.O", "exe": r"C:\apps\N.E.K.O.exe"},
+            {"title": "Terminal", "exe": r"C:\Windows\System32\WindowsTerminal.exe"},
+            {"title": "丧尸爆发合集_游戏热门视频 - Google Chrome", "exe": r"C:\Program Files\Google\Chrome\Application\chrome.exe"},
+            {"title": "QQ", "exe": r"C:\Program Files\Tencent\QQ\QQ.exe"},
+        ],
+    )
+    got = bili.pick_now_watching()
+    assert got is not None
+    assert got["app"] == "chrome.exe"
+    assert "丧尸爆发合集" in got["subject"]
+
+
+def test_pick_now_watching_all_skipped(monkeypatch) -> None:
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setattr(
+        bili,
+        "_visible_windows",
+        lambda: [
+            {"title": "N.E.K.O", "exe": r"C:\apps\N.E.K.O.exe"},
+            {"title": "Terminal", "exe": r"C:\Windows\System32\WindowsTerminal.exe"},
+        ],
+    )
+    assert bili.pick_now_watching() is None
 
 
 def test_sync_text_prefix_is_inference() -> None:

@@ -32,27 +32,6 @@ _SYNC_POLL_INTERVAL = 2.5
 _SYNC_STABLE_COUNT = 2
 _SYNC_DISABLE_ENV = "BILLI_SYNC_DISABLE"
 
-# 开发终端/命令行类窗口不参与实时同步：多为调试或 AI 操作，不代表用户在看的内容，
-# 推给 YUI 会造成"我在看 B站、YUI 却说我开了终端"这类误报。
-_TERMINAL_MARKERS = (
-    "windowsterminal",
-    "cmd.exe",
-    "powershell",
-    "pwsh",
-    "python",
-    "py.exe",
-    "bash",
-    "sh.exe",
-    "wt.exe",
-    "conhost",
-)
-
-
-def _is_terminal_window(parsed: dict) -> bool:
-    """是否开发终端/命令行窗口（不推送实时同步）。"""
-    app = (parsed.get("app") or "").lower()
-    return any(m in app for m in _TERMINAL_MARKERS)
-
 
 def _sync_text(parsed: dict) -> str | None:
     """把识别结果渲染为注入 YUI 上下文的一句话（read 模式，不打扰用户）。"""
@@ -123,14 +102,13 @@ class BiliViewerPlugin(NekoPluginBase):
         platform_ok = True
         while True:
             try:
-                fg = bili._foreground_window()
-                parsed = bili.parse_window_title(fg["title"], fg["exe"])
-            except bili.BiliError:
+                parsed = bili.pick_now_watching()
+            except Exception:
                 if platform_ok:
-                    platform_ok = False  # 非 Windows 等：只提示一次，退出轮询
+                    platform_ok = False  # 感知不可用：只提示一次，退出轮询
                 break
-            if _is_terminal_window(parsed):
-                # 终端/命令行窗口：跳过，不更新候选与推送状态（保持上一次有效感知）
+            if not parsed:
+                # 无可感知窗口（如仅剩聊天客户端/终端）：跳过，保持上一次有效感知
                 threading.Event().wait(_SYNC_POLL_INTERVAL)
                 continue
             fingerprint = _window_fingerprint(parsed)
