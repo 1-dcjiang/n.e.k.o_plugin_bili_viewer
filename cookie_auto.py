@@ -3,6 +3,9 @@
 - 仅本地读取（浏览器 Cookies 数据库），无网络传输、不写日志、不上传；
 - 解密走 Windows 系统 API（Crypt32 DPAPI + BCrypt AES-256-GCM），零第三方依赖；
 - 浏览器运行中 Cookies 文件被浏览器独占锁定时返回 "locked"，提示用户关闭浏览器后重试；
+- 浏览器窗口关闭但后台进程仍在运行（Chrome 后台应用 / Edge 启动增强）也会判定为 "locked"，
+  提示用户在任务管理器结束 chrome.exe/msedge.exe 进程；
+- 浏览器已关闭但数据库仍打不开时返回 "fail"（数据库异常/权限不足），不再误报为 "locked"；
 - 浏览器未登录 B站时返回 "not_logged_in"（只有游客 Cookie，无 SESSDATA 则无登录态）。
 """
 
@@ -13,6 +16,7 @@ import ctypes
 import json
 import os
 import sqlite3
+import subprocess
 from ctypes import wintypes
 
 __all__ = ["detect_bili_cookie", "AUTO_COOKIE_SOURCES", "STATUS_TEXT"]
@@ -36,17 +40,17 @@ _KEEP_NAMES = (
 )
 
 _STATUS_BOUND = "bound"           # 自动绑定成功
-_STATUS_LOCKED = "locked"         # 浏览器运行中，文件被独占锁
+_STATUS_LOCKED = "locked"         # 浏览器进程仍在运行，文件被独占锁
 _STATUS_NOT_LOGGED_IN = "not_logged_in"  # 浏览器可读但无登录态
 _STATUS_NO_BROWSER = "no_browser" # 未找到浏览器数据目录
-_STATUS_FAIL = "fail"             # 其他失败（解密异常等）
+_STATUS_FAIL = "fail"             # 其他失败（数据库异常/解密异常等）
 
 STATUS_TEXT = {
     _STATUS_BOUND: "已自动绑定 B站账号（自动读取浏览器 Cookie）",
-    _STATUS_LOCKED: "浏览器正在运行，Cookie 被浏览器锁定；请先关闭 Chrome/Edge，然后重启客户端或再确认一次",
+    _STATUS_LOCKED: "浏览器进程仍在运行，Cookie 被锁定。若窗口已关闭仍提示此错误，请打开任务管理器结束 chrome.exe / msedge.exe 进程（Chrome 后台应用、Edge 启动增强会让进程常驻），然后重启客户端或再确认一次",
     _STATUS_NOT_LOGGED_IN: "浏览器未登录 B站（没有登录态 Cookie），请先在浏览器登录一次 bilibili.com",
     _STATUS_NO_BROWSER: "未在本机找到 Chrome/Edge 浏览器数据",
-    _STATUS_FAIL: "自动读取浏览器 Cookie 失败（解密异常）",
+    _STATUS_FAIL: "浏览器已关闭但 Cookie 数据库仍无法读取（可能损坏或权限不足），请修复浏览器数据或改用手动配置",
 }
 
 # (浏览器名, User Data 根目录相对 LOCALAPPDATA 的路径)
@@ -54,6 +58,27 @@ AUTO_COOKIE_SOURCES: tuple[tuple[str, str], ...] = (
     ("Chrome", os.path.join("Google", "Chrome", "User Data")),
     ("Edge", os.path.join("Microsoft", "Edge", "User Data")),
 )
+
+# 各浏览器对应的进程名（用于区分"浏览器真的在运行"与"数据库异常"）
+_BROWSER_EXES: dict[str, str] = {"Chrome": "chrome.exe", "Edge": "msedge.exe"}
+
+
+def _browser_process_running(exe_name: str) -> bool:
+    """检测浏览器进程是否在运行（窗口关闭但后台进程仍在运行也算运行）。
+
+    失败时保守返回 True（避免误读被浏览器锁定的文件）。
+    """
+    try:
+        proc = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {exe_name}", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return exe_name.lower() in proc.stdout.lower()
+    except Exception:
+        return True
 
 
 # ══════════ DPAPI（Crypt32） ══════════
@@ -227,7 +252,9 @@ def _load_aes_key(local_state_path: str) -> bytes | None:
 
 
 def _open_cookies_db(cookies_path: str) -> sqlite3.Connection | None:
-    uri = "file:///{}?mode=ro&immutable=1".format(cookies_path.replace("\\", "/"))
+    # 不用 immutable=1：浏览器关闭后 Cookies 常为 WAL 模式，immutable 会误判打不开。
+    # 浏览器运行时文件被独占锁，mode=ro 同样会失败，由进程检测区分真实原因。
+    uri = "file:///{}?mode=ro".format(cookies_path.replace("\\", "/"))
     try:
         con = sqlite3.connect(uri, uri=True, timeout=1)
         con.execute("SELECT 1").fetchone()
@@ -286,24 +313,29 @@ def detect_bili_cookie() -> tuple[str, str, str]:
       - detail: 人类可读说明
     """
     last_locked = False
+    last_db_fail = False
     found_any_browser = False
     for browser_name, rel in AUTO_COOKIE_SOURCES:
         root = os.path.join(os.environ.get("LOCALAPPDATA", ""), rel)
         if not os.path.isdir(root):
             continue
         found_any_browser = True
+        running = _browser_process_running(_BROWSER_EXES.get(browser_name, browser_name))
         local_state = os.path.join(root, "Local State")
         aes_key = _load_aes_key(local_state)
         if aes_key is None:
             continue
         for profile_dir in _iter_profiles(root):
             status, items = _scan_profile(profile_dir, aes_key)
-            if status == _STATUS_LOCKED:
-                last_locked = True
-                continue
             if status == _STATUS_BOUND:
                 cookie = build_cookie_string(items)
                 return _STATUS_BOUND, cookie, f"已从 {browser_name} 自动读取 B站登录态"
+            if status == _STATUS_LOCKED:
+                if running:
+                    last_locked = True
+                else:
+                    # 浏览器进程已不在，却仍打不开数据库 → 数据库异常，不误报为"浏览器没关"
+                    last_db_fail = True
             if status == _STATUS_FAIL:
                 continue
         if last_locked:
@@ -312,4 +344,6 @@ def detect_bili_cookie() -> tuple[str, str, str]:
         return _STATUS_NO_BROWSER, "", STATUS_TEXT[_STATUS_NO_BROWSER]
     if last_locked:
         return _STATUS_LOCKED, "", STATUS_TEXT[_STATUS_LOCKED]
+    if last_db_fail:
+        return _STATUS_FAIL, "", STATUS_TEXT[_STATUS_FAIL]
     return _STATUS_NOT_LOGGED_IN, "", STATUS_TEXT[_STATUS_NOT_LOGGED_IN]

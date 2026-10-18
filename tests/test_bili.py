@@ -656,7 +656,7 @@ def test_detect_no_browser(monkeypatch) -> None:
 
 
 def test_detect_locked_when_browser_running(monkeypatch, tmp_path) -> None:
-    """模拟浏览器数据目录存在但 Cookies 文件不可读 → 锁定状态。"""
+    """模拟浏览器进程在运行且 Cookies 文件不可读 → 锁定状态。"""
     from plugin.plugins.bili_viewer import cookie_auto
 
     monkeypatch.setattr(
@@ -673,5 +673,29 @@ def test_detect_locked_when_browser_running(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     monkeypatch.setattr(cookie_auto, "_load_aes_key", lambda path: b"\x00" * 32)  # 绕过真实 DPAPI
     monkeypatch.setattr(cookie_auto, "_open_cookies_db", lambda path: None)  # 模拟锁
+    monkeypatch.setattr(cookie_auto, "_browser_process_running", lambda name: True)  # 浏览器在跑
     status, cookie, _ = cookie_auto.detect_bili_cookie()
     assert status == cookie_auto._STATUS_LOCKED and cookie == ""
+
+
+def test_detect_db_error_when_browser_closed(monkeypatch, tmp_path) -> None:
+    """浏览器进程已退出但 Cookie 库仍打不开 → 数据库异常（fail），不再误报 locked。"""
+    from plugin.plugins.bili_viewer import cookie_auto
+
+    monkeypatch.setattr(
+        cookie_auto,
+        "AUTO_COOKIE_SOURCES",
+        (("Chrome", os.path.join("Google", "Chrome", "User Data")),),
+    )
+    root = tmp_path / "Google" / "Chrome" / "User Data"
+    (root / "Default" / "Network").mkdir(parents=True)
+    with open(root / "Default" / "Network" / "Cookies", "w", encoding="utf-8") as f:
+        f.write("")
+    with open(root / "Local State", "w", encoding="utf-8") as f:
+        f.write('{"os_crypt":{"encrypted_key":"QQ=="}}')
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(cookie_auto, "_load_aes_key", lambda path: b"\x00" * 32)
+    monkeypatch.setattr(cookie_auto, "_open_cookies_db", lambda path: None)
+    monkeypatch.setattr(cookie_auto, "_browser_process_running", lambda name: False)  # 浏览器已关
+    status, cookie, _ = cookie_auto.detect_bili_cookie()
+    assert status == cookie_auto._STATUS_FAIL and cookie == ""
