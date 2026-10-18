@@ -558,9 +558,16 @@ def test_sync_text_prefix_is_inference() -> None:
     from plugin.plugins.bili_viewer import _sync_text
 
     t = _sync_text({"kind": "video", "is_bili": True, "subject": "原神 PV"})
-    assert t is not None and "前台窗口推断" in t
+    assert t is not None and "实时感知" in t and "B站视频" in t
     t2 = _sync_text({"kind": "app", "is_bili": False, "app": "steam.exe", "subject": "赛博朋克"})
-    assert t2 is not None and "前台窗口推断" in t2
+    assert t2 is not None and "实时感知" in t2 and "steam.exe" in t2
+
+
+def test_sync_text_live_marks_live() -> None:
+    from plugin.plugins.bili_viewer import _sync_text
+
+    t = _sync_text({"kind": "live", "is_bili": True, "subject": "某直播间"})
+    assert t is not None and "B站直播" in t
 
 
 def test_watcher_not_started_without_host(monkeypatch) -> None:

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 
 from plugin.sdk.plugin import NekoPluginBase, lifecycle, llm_tool, neko_plugin
 
@@ -30,23 +31,24 @@ def _wrap_err(exc: bili.BiliError) -> dict:
 # 实时同步的轮询间隔（秒）与稳定判定次数（连续 N 次相同才推送，防抖动）
 _SYNC_POLL_INTERVAL = 2.5
 _SYNC_STABLE_COUNT = 2
+_SYNC_MIN_INTERVAL = 15.0  # 两次推送的最小间隔（秒），避免频繁切内容时刷屏
 _SYNC_DISABLE_ENV = "BILLI_SYNC_DISABLE"
 
 
 def _sync_text(parsed: dict) -> str | None:
-    """把识别结果渲染为注入 YUI 上下文的一句话（read 模式，不打扰用户）。"""
+    """把识别结果渲染为注入 YUI 上下文的一句话。"""
     kind = parsed.get("kind")
     if kind == "unknown":
         return None
     if parsed.get("is_bili"):
         label = "直播" if kind == "live" else "视频"
         subject = parsed.get("subject") or "未知内容"
-        return f"（实时感知·前台窗口推断：用户当前正在看 B站{label}「{subject}」）"
+        return f"（实时感知：用户当前正在看 B站{label}「{subject}」）"
     if parsed.get("site"):
-        return f"（实时感知·前台窗口推断：用户当前正在用 {parsed['site']}，页面「{parsed.get('subject') or '未知'}」）"
+        return f"（实时感知：用户当前正在用 {parsed['site']}，页面「{parsed.get('subject') or '未知'}」）"
     if kind == "web":
-        return f"（实时感知·前台窗口推断：用户当前正在浏览网页「{parsed.get('subject') or '未知'}」）"
-    return f"（实时感知·前台窗口推断：用户当前正在使用应用 {parsed.get('app') or '未知'}，窗口「{parsed.get('subject') or '未知'}」）"
+        return f"（实时感知：用户当前正在浏览网页「{parsed.get('subject') or '未知'}」）"
+    return f"（实时感知：用户当前正在使用应用 {parsed.get('app') or '未知'}，窗口「{parsed.get('subject') or '未知'}」）"
 
 
 def _window_fingerprint(parsed: dict) -> str:
@@ -95,18 +97,18 @@ class BiliViewerPlugin(NekoPluginBase):
             self._sync_thread.start()
 
     def _sync_watcher_loop(self) -> None:
-        """轮询前台窗口，内容变化且稳定后静默注入 YUI 上下文。"""
+        """轮询窗口，内容变化且稳定后向 YUI 推送（B站内容主动触发，其余静默注入）。"""
         last_pushed: str | None = None
         candidate: str | None = None
         candidate_count = 0
-        platform_ok = True
+        last_push_ts = 0.0
         while True:
             try:
                 parsed = bili.pick_now_watching()
             except Exception:
-                if platform_ok:
-                    platform_ok = False  # 感知不可用：只提示一次，退出轮询
-                break
+                # 感知单次失败不退出线程：等待后重试，避免同步永久失效
+                threading.Event().wait(_SYNC_POLL_INTERVAL)
+                continue
             if not parsed:
                 # 无可感知窗口（如仅剩聊天客户端/终端）：跳过，保持上一次有效感知
                 threading.Event().wait(_SYNC_POLL_INTERVAL)
@@ -116,23 +118,28 @@ class BiliViewerPlugin(NekoPluginBase):
                 candidate, candidate_count = fingerprint, 0
             else:
                 candidate_count += 1
+            now = time.time()
             if (
                 candidate_count >= _SYNC_STABLE_COUNT
                 and fingerprint != last_pushed
                 and fingerprint
+                and now - last_push_ts >= _SYNC_MIN_INTERVAL
             ):
                 text = _sync_text(parsed)
                 if text:
+                    # B站内容主动触发（respond，YUI 自动跟上）；其余静默注入（read）
+                    behavior = "respond" if parsed.get("is_bili") else "read"
                     try:
                         self.ctx.push_message(
                             visibility=[],
-                            ai_behavior="read",
+                            ai_behavior=behavior,
                             parts=[{"type": "text", "text": text}],
                             source=self.plugin_id,
                             coalesce_key="now_watching_sync",
                             priority=0,
                         )
                         last_pushed = fingerprint
+                        last_push_ts = now
                     except Exception:
                         pass  # 推送失败不中断轮询
             threading.Event().wait(_SYNC_POLL_INTERVAL)
