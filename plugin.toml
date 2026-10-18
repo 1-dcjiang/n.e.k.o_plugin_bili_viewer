@@ -1,0 +1,31 @@
+[plugin]
+id = "bili_viewer"
+name = "B站看板"
+description = "让 YUI 浏览哔哩哔哩：搜索视频/直播/用户，查看视频详情（标题/UP主/时长/播放/弹幕/点赞/分P/标签）、弹幕文本、CC 字幕、B站官方 AI 概要、视频评论，查看直播间信息与实时弹幕（匿名采集），查看 UP主信息与投稿列表。只读公开内容：不登录、不发布评论/弹幕/动态、不下载视频文件；可用环境变量 BILI_COOKIE 提升接口可用性。"
+short_description = "让 YUI 浏览 B站：搜索、视频详情、弹幕、字幕、AI概要、评论、直播信息与实时弹幕、UP主与投稿"
+keywords = ["bilibili", "哔哩哔哩", "B站", "视频", "弹幕", "评论", "直播", "字幕", "AI概要", "UP主", "搜索", "bili", "danmaku", "live"]
+version = "0.1.0"
+type = "plugin"
+entry = "plugin.plugins.bili_viewer:BiliViewerPlugin"
+
+[plugin.author]
+name = "起诉人"
+
+[plugin.sdk]
+recommended = ">=0.1.0,<0.2.0"
+supported = ">=0.1.0,<0.3.0"
+
+[plugin_runtime]
+enabled = true
+auto_start = true
+
+[plugin.store]
+enabled = true
+
+[plugin.ui]
+enabled = true
+
+[[plugin.ui.guide]]
+id = "quickstart"
+title = "使用说明"
+entry = "docs/guide.md"
