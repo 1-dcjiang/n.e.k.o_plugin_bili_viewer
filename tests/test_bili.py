@@ -321,6 +321,25 @@ def test_window_fingerprint() -> None:
     assert _window_fingerprint({"app": "x", "site": "", "kind": "app", "subject": "y"}) != a
 
 
+def test_is_terminal_window() -> None:
+    from plugin.plugins.bili_viewer import _is_terminal_window
+
+    for app in ("windowsterminal.exe", "powershell.exe", "cmd.exe", "python.exe", "pwsh.exe", "wt.exe", "bash.exe"):
+        assert _is_terminal_window({"app": app, "kind": "app"}), app
+    for app in ("chrome.exe", "msedge.exe", "steam.exe", "WeChat.exe", "explorer.exe", "QQMusic.exe"):
+        assert not _is_terminal_window({"app": app, "kind": "app"}), app
+    assert not _is_terminal_window({"app": "", "kind": "unknown"})
+
+
+def test_sync_text_prefix_is_inference() -> None:
+    from plugin.plugins.bili_viewer import _sync_text
+
+    t = _sync_text({"kind": "video", "is_bili": True, "subject": "原神 PV"})
+    assert t is not None and "前台窗口推断" in t
+    t2 = _sync_text({"kind": "app", "is_bili": False, "app": "steam.exe", "subject": "赛博朋克"})
+    assert t2 is not None and "前台窗口推断" in t2
+
+
 def test_watcher_not_started_without_host(monkeypatch) -> None:
     """无宿主 ctx（测试环境）不启动后台线程。"""
     from plugin.plugins.bili_viewer import BiliViewerPlugin

@@ -32,6 +32,27 @@ _SYNC_POLL_INTERVAL = 2.5
 _SYNC_STABLE_COUNT = 2
 _SYNC_DISABLE_ENV = "BILLI_SYNC_DISABLE"
 
+# 开发终端/命令行类窗口不参与实时同步：多为调试或 AI 操作，不代表用户在看的内容，
+# 推给 YUI 会造成"我在看 B站、YUI 却说我开了终端"这类误报。
+_TERMINAL_MARKERS = (
+    "windowsterminal",
+    "cmd.exe",
+    "powershell",
+    "pwsh",
+    "python",
+    "py.exe",
+    "bash",
+    "sh.exe",
+    "wt.exe",
+    "conhost",
+)
+
+
+def _is_terminal_window(parsed: dict) -> bool:
+    """是否开发终端/命令行窗口（不推送实时同步）。"""
+    app = (parsed.get("app") or "").lower()
+    return any(m in app for m in _TERMINAL_MARKERS)
+
 
 def _sync_text(parsed: dict) -> str | None:
     """把识别结果渲染为注入 YUI 上下文的一句话（read 模式，不打扰用户）。"""
@@ -41,12 +62,12 @@ def _sync_text(parsed: dict) -> str | None:
     if parsed.get("is_bili"):
         label = "直播" if kind == "live" else "视频"
         subject = parsed.get("subject") or "未知内容"
-        return f"（实时感知：用户当前正在看 B站{label}「{subject}」）"
+        return f"（实时感知·前台窗口推断：用户当前正在看 B站{label}「{subject}」）"
     if parsed.get("site"):
-        return f"（实时感知：用户当前正在用 {parsed['site']}，页面「{parsed.get('subject') or '未知'}」）"
+        return f"（实时感知·前台窗口推断：用户当前正在用 {parsed['site']}，页面「{parsed.get('subject') or '未知'}」）"
     if kind == "web":
-        return f"（实时感知：用户当前正在浏览网页「{parsed.get('subject') or '未知'}」）"
-    return f"（实时感知：用户当前正在使用应用 {parsed.get('app') or '未知'}，窗口「{parsed.get('subject') or '未知'}」）"
+        return f"（实时感知·前台窗口推断：用户当前正在浏览网页「{parsed.get('subject') or '未知'}」）"
+    return f"（实时感知·前台窗口推断：用户当前正在使用应用 {parsed.get('app') or '未知'}，窗口「{parsed.get('subject') or '未知'}」）"
 
 
 def _window_fingerprint(parsed: dict) -> str:
@@ -108,6 +129,10 @@ class BiliViewerPlugin(NekoPluginBase):
                 if platform_ok:
                     platform_ok = False  # 非 Windows 等：只提示一次，退出轮询
                 break
+            if _is_terminal_window(parsed):
+                # 终端/命令行窗口：跳过，不更新候选与推送状态（保持上一次有效感知）
+                threading.Event().wait(_SYNC_POLL_INTERVAL)
+                continue
             fingerprint = _window_fingerprint(parsed)
             if fingerprint != candidate:
                 candidate, candidate_count = fingerprint, 0
