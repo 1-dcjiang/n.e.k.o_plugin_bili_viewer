@@ -484,9 +484,9 @@ def live_info(room: str) -> dict:
     try:
         data = (_http_get("https://api.live.bilibili.com/room/v1/Room/get_info", {"room_id": room_id})).get("data") or {}
     except BiliError:
-        # 旧接口风控时回退到 web 接口
+        # 旧接口风控时回退到 web 接口（需 wbi 签名；配置 BILI_COOKIE 后可用）
         try:
-            data = (_http_get(_LIVE_API + "/xlive/web-room/v1/index/getInfoByRoom", {"room_id": room_id})).get("data") or {}
+            data = (_wbi_get(_LIVE_API + "/xlive/web-room/v1/index/getInfoByRoom", {"room_id": room_id})).get("data") or {}
             room_info = data.get("room_info") or {}
             anchor = data.get("anchor_info") or {}
             base = anchor.get("base_info") or {}
@@ -673,9 +673,10 @@ def live_danmaku(room: str, duration: int = 8, limit: int = 60) -> list[dict]:
     resolved = _resolve_room(room)
     room_id = resolved["room_id"]
     try:
-        data = (_http_get(_LIVE_API + "/xlive/web-room/v1/index/getDanmuInfo", {"id": room_id})).get("data") or {}
+        # getDanmuInfo 需要 wbi 签名；游客密钥可获取，仍失败通常是网络 IP 被风控（-352）
+        data = (_wbi_get(_LIVE_API + "/xlive/web-room/v1/index/getDanmuInfo", {"id": room_id})).get("data") or {}
     except BiliError as exc:
-        raise BiliError("弹幕服务器信息获取失败（当前网络可能被B站风控；配置 BILI_COOKIE 后重试）：" + exc.message, "DANMU_INFO") from exc
+        raise BiliError("弹幕服务器信息获取失败（当前网络可能被B站风控；配置 BILI_COOKIE 或更换网络后重试）：" + exc.message, "DANMU_INFO") from exc
     token = data.get("token") or ""
     hosts = data.get("host_list") or []
     if not hosts:

@@ -216,6 +216,63 @@ def test_no_csrf_for_write(monkeypatch) -> None:
     monkeypatch.delenv("BILI_COOKIE", raising=False)
 
 
+def test_live_info_fallback_uses_wbi(monkeypatch) -> None:
+    """get_info 风控时回退到 getInfoByRoom，且必须带 wbi 签名。"""
+    from plugin.plugins.bili_viewer import bili
+    from plugin.plugins.bili_viewer.bili import BiliError
+
+    def _raise(*_args, **_kwargs):
+        raise BiliError("风控", "RISK_CONTROL")
+
+    called = {"wbi": False}
+
+    def _fake_wbi_get(url, params):
+        called["wbi"] = True
+        assert "/getInfoByRoom" in url
+        return {"code": 0, "data": {"room_info": {"room_id": 1, "title": "测试直播间", "live_status": 1, "online": 99}}}
+
+    monkeypatch.setattr(bili, "_resolve_room", lambda room: {"room_id": 1, "live_status": 1})
+    monkeypatch.setattr(bili, "_http_get", _raise)
+    monkeypatch.setattr(bili, "_wbi_get", _fake_wbi_get)
+    info = bili.live_info("1")
+    assert called["wbi"] is True
+    assert info["title"] == "测试直播间"
+    assert info["status_text"] == "直播中"
+
+
+def test_live_danmaku_uses_wbi(monkeypatch) -> None:
+    """getDanmuInfo 必须带 wbi 签名；连接阶段再走 websocket。"""
+    import types
+
+    from plugin.plugins.bili_viewer import bili
+
+    called = {"wbi": False}
+
+    def _fake_wbi_get(url, params):
+        called["wbi"] = True
+        assert "/getDanmuInfo" in url
+        return {"code": 0, "data": {"token": "t0k", "host_list": [{"host": "broadcastlv.chat.bilibili.com", "wss_port": 443}]}}
+
+    def _fake_ws_connect(host, port, path, timeout):
+        return types.SimpleNamespace(settimeout=lambda _t: None, close=lambda: None)
+
+    def _fake_resolve(room):
+        return {"room_id": 1, "live_status": 1}
+
+    monkeypatch.setattr(bili, "_http_get", lambda *a, **k: {"code": 0, "data": {"room_id": 1, "live_status": 1}})
+    monkeypatch.setattr(bili, "_wbi_get", _fake_wbi_get)
+    monkeypatch.setattr(bili, "_resolve_room", _fake_resolve)
+    monkeypatch.setattr(bili, "_ws_connect", _fake_ws_connect)
+    monkeypatch.setattr(bili, "_ws_send", lambda *a, **k: None)
+    monkeypatch.setattr(bili, "_ws_recv", lambda *a, **k: b"")  # 无消息，直到超时
+    try:
+        bili.live_danmaku("1", duration=3, limit=5)
+        raise AssertionError("should raise NO_DANMAKU")
+    except Exception as exc:
+        assert getattr(exc, "code", "") == "NO_DANMAKU"
+    assert called["wbi"] is True
+
+
 # ══════════ 当前观看感知（通用窗口感知） ══════════
 
 
