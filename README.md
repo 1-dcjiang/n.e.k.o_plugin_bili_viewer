@@ -16,6 +16,10 @@
 | `bili_live_danmaku` | 直播间实时弹幕（匿名采集数秒） |
 | `bili_user_info` | UP主信息：粉丝、关注、视频数、等级、签名 |
 | `bili_user_videos` | UP主的投稿视频列表 |
+| `bili_my_info` | 当前账号（BILI_COOKIE）信息：昵称、uid、等级、硬币、大会员 |
+| `bili_my_videos` | 自己账号的稿件列表（状态/播放/时长） |
+| `bili_edit_video` | 修改自己稿件的标题/简介/标签（需登录态，写操作） |
+| `bili_live_send_danmaku` | 向直播间发送弹幕（直播时回复观众，需登录态，写操作） |
 
 ## 使用示例（对 YUI 说）
 
@@ -27,6 +31,9 @@
 - "xxx 的直播间开着吗，多少人在线" → `bili_live_info(room="12345")`
 - "直播间现在弹幕在说什么" → `bili_live_danmaku(room="12345", duration=8)`
 - "查一下这个UP主" → `bili_user_info(mid=12345)` / `bili_user_videos(mid=12345)`
+- "看看我的账号/我的稿件" → `bili_my_info()` / `bili_my_videos()`
+- "把我的视频 BV1xx... 标题改成 XXX" → `bili_edit_video(bvid="...", title="XXX")`
+- "帮我在直播间回复弹幕：谢谢大家的关注" → `bili_live_send_danmaku(room="12345", text="谢谢大家的关注")`
 
 ## 配置（可选）
 
@@ -34,7 +41,9 @@
 不配置时搜索、视频详情、评论、字幕、AI 概要、直播信息、UP主信息均可用；
 **视频弹幕与直播实时弹幕**在游客模式下可能被 B站加扰/风控（接口返回加密数据），
 配置 BILI_COOKIE 后可正常获取。
-插件绝不写入、修改任何账号数据。
+**稿件管理与直播发弹幕**为写操作，必须配置 BILI_COOKIE（含 `bili_jct`），
+且只作用于当前账号自己的内容，请仅在明确确认后使用。
+插件绝不把 Cookie 写入磁盘或对外发送。
 
 ## 安全说明
 

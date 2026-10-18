@@ -365,3 +365,130 @@ class BiliViewerPlugin(NekoPluginBase):
         for i, v in enumerate(videos, 1):
             lines.append(f"{i}. {v['title']}（播放 {v['play']}，时长 {v['duration']}）BV号 {v['bvid']}")
         return {"output": f"UP主 mid {mid} 的投稿（第 {page} 页）：\n" + "\n".join(lines), "is_error": False, "videos": videos}
+
+    # ══════════ 我的账号 / 稿件（需 BILI_COOKIE 登录态） ══════════
+
+    @llm_tool(
+        name="bili_my_info",
+        description=(
+            "查看当前 B站账号（BILI_COOKIE）信息。何时用：用户说'看看我的B站账号/我多少粉丝/我是大会员吗'时。"
+            "返回昵称、uid、等级、硬币、大会员状态、关注与粉丝数。需要配置 BILI_COOKIE 环境变量。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+        timeout=20.0,
+    )
+    async def bili_my_info(self, **_):
+        try:
+            info = bili.my_info()
+        except bili.BiliError as exc:
+            return _wrap_err(exc)
+        return {"output": bili.format_my_info(info), "is_error": False, "account": info}
+
+    @llm_tool(
+        name="bili_my_videos",
+        description=(
+            "查看当前 B站账号（BILI_COOKIE）的投稿稿件列表。何时用：用户说'看看我自己的稿件/我的投稿'时。"
+            "参数 page：页码；limit：条数（默认 10）。返回标题、状态（公开/审核中）、播放量、时长与 BV 号。"
+            "需要配置 BILI_COOKIE 环境变量。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "page": {"type": "integer", "description": "页码，默认 1"},
+                "limit": {"type": "integer", "description": "条数，默认 10"},
+            },
+            "required": [],
+        },
+        timeout=25.0,
+    )
+    async def bili_my_videos(self, *, page: int = 1, limit: int = 0, **_):
+        params = _.get("parameters") or {}
+        try:
+            page = int(page if page else params.get("page") or 1)
+            n = int(limit if limit else params.get("limit") or 10)
+        except (TypeError, ValueError):
+            page, n = 1, 10
+        n = max(1, min(n, 30))
+        page = max(1, page)
+        try:
+            videos = bili.my_videos(page=page, limit=n)
+        except bili.BiliError as exc:
+            return _wrap_err(exc)
+        return {"output": f"我的稿件（第 {page} 页）：\n" + bili.format_my_videos(videos), "is_error": False, "videos": videos}
+
+    @llm_tool(
+        name="bili_edit_video",
+        description=(
+            "修改自己 B站稿件的信息（标题/简介/标签）。何时用：用户明确要求'改我的视频标题/简介/标签'时。"
+            "这是写操作：只能修改当前账号（BILI_COOKIE）自己的稿件，服务端校验所有权。"
+            "参数 bvid：要修改的 BV 号；title/desc/tag：要更新的内容（不传则保留原值）。"
+            "需要配置 BILI_COOKIE（含 bili_jct）环境变量，且仅在用户明确确认后调用。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "bvid": {"type": "string", "description": "要修改的稿件 BV 号"},
+                "title": {"type": "string", "description": "新标题（可选）"},
+                "desc": {"type": "string", "description": "新简介（可选）"},
+                "tag": {"type": "string", "description": "新标签，逗号分隔（可选）"},
+            },
+            "required": ["bvid"],
+        },
+        timeout=30.0,
+    )
+    async def bili_edit_video(self, *, bvid: str = "", title: str = "", desc: str = "", tag: str = "", **_):
+        params = _.get("parameters") or {}
+        bvid = (bvid or params.get("bvid") or "").strip()
+        if not bvid:
+            return {"output": "请提供要修改的稿件 BV 号。", "is_error": True, "error": "NO_BVID"}
+        try:
+            result = bili.edit_video(
+                bvid,
+                title=(title or params.get("title") or None),
+                desc=(desc or params.get("desc") or None),
+                tag=(tag or params.get("tag") or None),
+            )
+        except bili.BiliError as exc:
+            return _wrap_err(exc)
+        return {
+            "output": f"稿件已更新：{result['title']}\n简介：{result['desc'][:100] or '无'}\n标签：{result['tag'] or '无'}",
+            "is_error": False,
+            "result": result,
+        }
+
+    @llm_tool(
+        name="bili_live_send_danmaku",
+        description=(
+            "向 B站直播间发送一条弹幕。何时用：直播时用户要求'回复弹幕/发一条弹幕'时，"
+            "配合 bili_live_danmaku 采集实时弹幕、理解后再回复。"
+            "参数 room：房间号或链接；text：弹幕内容（最长 30 字）。"
+            "这是写操作：需要配置 BILI_COOKIE（含 bili_jct 与 SESSDATA）环境变量，"
+            "且仅在用户明确确认后调用。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "room": {"type": "string", "description": "直播间房间号或链接"},
+                "text": {"type": "string", "description": "要发送的弹幕内容，最长 30 字"},
+            },
+            "required": ["room", "text"],
+        },
+        timeout=30.0,
+    )
+    async def bili_live_send_danmaku(self, *, room: str = "", text: str = "", **_):
+        params = _.get("parameters") or {}
+        room = (room or params.get("room") or "").strip()
+        text = (text or params.get("text") or "").strip()
+        if not room:
+            return {"output": "请提供直播房间号或链接。", "is_error": True, "error": "NO_ROOM"}
+        if not text:
+            return {"output": "请提供要发送的弹幕内容。", "is_error": True, "error": "EMPTY_MSG"}
+        try:
+            result = bili.live_send_danmaku(room, text)
+        except bili.BiliError as exc:
+            return _wrap_err(exc)
+        return {"output": f"已向直播间 {result['room_id']} 发送弹幕：{result['text']}", "is_error": False, "result": result}

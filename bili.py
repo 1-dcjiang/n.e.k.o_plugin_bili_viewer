@@ -800,3 +800,177 @@ def user_videos(mid: int, page: int = 1, limit: int = 15) -> list[dict]:
             "pubdate": v.get("pubdate", 0),
         })
     return out
+
+
+# ══════════════ 我的账号 / 稿件管理（需 BILI_COOKIE 登录态） ══════════════
+
+
+def _csrf() -> str:
+    """从 Cookie 中提取 bili_jct（写操作的 CSRF token）。"""
+    m = re.search(r"bili_jct=([0-9a-zA-Z]+)", _cookie())
+    return m.group(1) if m else ""
+
+
+def _require_login() -> str:
+    cookie = _cookie()
+    if not cookie:
+        raise BiliError("需要登录态：请配置环境变量 BILI_COOKIE（含 SESSDATA 与 bili_jct）", "NEED_LOGIN")
+    return cookie
+
+
+def _http_post(url: str, form: dict, timeout: float = _TIMEOUT) -> dict:
+    """POST 表单（带 Cookie）；解析 JSON。"""
+    body = urllib.parse.urlencode(form).encode()
+    req = urllib.request.Request(url, data=body, headers={
+        "User-Agent": _UA,
+        "Referer": "https://www.bilibili.com/",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": "https://www.bilibili.com",
+    })
+    if _cookie():
+        req.add_header("Cookie", _cookie())
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        raise BiliError(f"接口 HTTP {exc.code}", "HTTP_ERROR") from exc
+    except urllib.error.URLError as exc:
+        raise BiliError(f"网络错误：{exc.reason}", "NETWORK") from exc
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise BiliError("接口返回非 JSON", "BAD_RESPONSE") from exc
+    if data.get("code", 0) != 0:
+        code = data.get("code", -1)
+        if code in (-352, -401, -412, -101):
+            raise BiliError("登录态失效或触发风控（请重新配置有效的 BILI_COOKIE）", "AUTH_FAILED")
+        raise BiliError(data.get("message") or data.get("msg") or "B站接口错误", f"BIZ_{code}")
+    return data
+
+
+def my_info() -> dict:
+    """当前账号（BILI_COOKIE）信息：昵称/uid/等级/硬币/大会员。"""
+    _require_login()
+    data = (_http_get(_API + "/x/web-interface/nav")).get("data") or {}
+    if not data.get("mid"):
+        raise BiliError("无法读取账号信息（登录态无效）", "AUTH_FAILED")
+    level_info = data.get("level_info") or {}
+    vip = data.get("vipStatus", 0)
+    return {
+        "mid": data.get("mid"),
+        "uname": data.get("uname", ""),
+        "level": level_info.get("current_level", 0),
+        "coins": data.get("money", 0),
+        "vip": bool(vip),
+        "following": data.get("following", 0),
+        "follower": data.get("follower", 0),
+    }
+
+
+def format_my_info(info: dict) -> str:
+    vip = "大会员" if info["vip"] else "普通用户"
+    return (
+        f"当前账号：{info['uname']}（uid {info['mid']}）\n"
+        f"等级 Lv{info['level']} ｜ {vip} ｜ 硬币 {info['coins']}\n"
+        f"关注 {info['following']} ｜ 粉丝 {info['follower']}"
+    )
+
+
+def my_videos(page: int = 1, limit: int = 10) -> list[dict]:
+    """当前账号的投稿列表（创作中心接口，需 BILI_COOKIE）。"""
+    _require_login()
+    try:
+        data = (_http_get(_API + "/x/vu/web/video/list", {"pn": max(1, page), "ps": min(limit, 30)})).get("data") or {}
+    except BiliError as exc:
+        raise BiliError("稿件列表获取失败：" + exc.message, "MY_VIDEOS") from exc
+    vlist = ((data.get("list") or {}).get("vlist")) or []
+    out = []
+    for v in vlist[:limit]:
+        state = v.get("state", 0)
+        state_text = {0: "公开", -2: "删除", -1: "审核中", 1: "审核中"}.get(state, f"状态{state}")
+        out.append({
+            "bvid": v.get("bvid", ""),
+            "aid": v.get("aid"),
+            "title": v.get("title", "").strip(),
+            "play": v.get("play", 0),
+            "state": state,
+            "state_text": state_text,
+            "pubdate": v.get("pubdate", 0),
+            "length": v.get("length", ""),
+        })
+    return out
+
+
+def format_my_videos(videos: list[dict]) -> str:
+    lines = []
+    for i, v in enumerate(videos, 1):
+        lines.append(
+            f"{i}. {v['title']}（{v['state_text']}，播放 {v['play']}，时长 {v['length']}）BV号 {v['bvid']}"
+        )
+    return "\n".join(lines) if lines else "暂无投稿"
+
+
+def edit_video(bvid: str, title: str | None = None, desc: str | None = None, tag: str | None = None) -> dict:
+    """修改自己稿件的信息（标题/简介/标签）。需 BILI_COOKIE 登录态。
+
+    只允许修改属于当前账号的稿件；服务端会校验所有权。
+    """
+    _require_login()
+    bvid = _parse_bvid(bvid)
+    info = video_info(bvid)
+    aid = info.get("aid")
+    if not aid:
+        raise BiliError("无法获取稿件编号", "NO_AID")
+    form = {
+        "aid": int(aid),
+        "vfe": "1",
+        "csrf": _csrf(),
+        "title": (title if title is not None else info["title"]).strip(),
+        "desc": (desc if desc is not None else info["desc"]).strip(),
+        "tag": (tag if tag is not None else ",".join(info["tags"])).strip(),
+    }
+    if not form["csrf"]:
+        raise BiliError("Cookie 缺少 bili_jct（CSRF token），无法执行写操作", "NO_CSRF")
+    try:
+        _http_post(_API + "/x/vu/edit", form)
+    except BiliError as exc:
+        raise BiliError("稿件修改失败：" + exc.message, "EDIT_FAILED") from exc
+    return {"bvid": bvid, "title": form["title"], "desc": form["desc"], "tag": form["tag"], "ok": True}
+
+
+def live_send_danmaku(room: str, text: str) -> dict:
+    """向直播间发送一条弹幕。需 BILI_COOKIE 登录态（含 bili_jct）。"""
+    _require_login()
+    text = (text or "").strip()
+    if not text:
+        raise BiliError("弹幕内容为空", "EMPTY_MSG")
+    if len(text) > 30:
+        raise BiliError("弹幕最长 30 个字符", "MSG_TOO_LONG")
+    csrf = _csrf()
+    if not csrf:
+        raise BiliError("Cookie 缺少 bili_jct（CSRF token），无法发送弹幕", "NO_CSRF")
+    resolved = _resolve_room(room)
+    room_id = resolved["room_id"]
+    form = {
+        "roomid": room_id,
+        "msg": text,
+        "csrf": csrf,
+        "csrf_token": csrf,
+        "rnd": str(int(time.time())),
+        "color": "16777215",
+        "fontsize": "25",
+        "mode": "1",
+        "platform": "web",
+        "web_location": "1550101",
+    }
+    # 新版发送接口要求 wbi 签名
+    try:
+        mixin = _get_mixin_key()
+        signed = _wbi_sign(form, mixin)
+    except BiliError:
+        signed = form
+    try:
+        data = _http_post(_LIVE_API + "/xlive/web-room/v1/dms/send", signed)
+    except BiliError as exc:
+        raise BiliError("弹幕发送失败：" + exc.message, "SEND_FAILED") from exc
+    return {"ok": True, "room_id": room_id, "text": text, "server": data.get("message") or ""}

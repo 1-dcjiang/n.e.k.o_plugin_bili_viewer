@@ -144,3 +144,73 @@ def test_wrap_err_shape() -> None:
     assert out["is_error"] is True
     assert out["error"] == "TEST_CODE"
     assert "测试错误" in out["output"]
+
+
+# ══════════ 账号 / 稿件（登录态） ══════════
+
+
+def test_csrf_extract(monkeypatch) -> None:
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_COOKIE", "SESSDATA=abc123; bili_jct=xyz789; other=1")
+    assert bili._csrf() == "xyz789"
+    monkeypatch.delenv("BILI_COOKIE")
+    assert bili._csrf() == ""
+
+
+def test_require_login(monkeypatch) -> None:
+    from plugin.plugins.bili_viewer.bili import BiliError, _require_login
+
+    monkeypatch.delenv("BILI_COOKIE", raising=False)
+    try:
+        _require_login()
+        raise AssertionError("should raise")
+    except BiliError as exc:
+        assert exc.code == "NEED_LOGIN"
+
+
+def test_edit_video_requires_cookie(monkeypatch) -> None:
+    from plugin.plugins.bili_viewer.bili import BiliError, edit_video
+
+    monkeypatch.delenv("BILI_COOKIE", raising=False)
+    try:
+        edit_video("BV1xx411c7mD", title="新标题")
+        raise AssertionError("should raise")
+    except BiliError as exc:
+        assert exc.code == "NEED_LOGIN"
+
+
+def test_live_send_requires_cookie(monkeypatch) -> None:
+    from plugin.plugins.bili_viewer.bili import BiliError, live_send_danmaku
+
+    monkeypatch.delenv("BILI_COOKIE", raising=False)
+    try:
+        live_send_danmaku("1", "你好")
+        raise AssertionError("should raise")
+    except BiliError as exc:
+        assert exc.code == "NEED_LOGIN"
+
+
+def test_msg_length_validation(monkeypatch) -> None:
+    from plugin.plugins.bili_viewer.bili import BiliError, live_send_danmaku
+
+    monkeypatch.setenv("BILI_COOKIE", "SESSDATA=abc; bili_jct=tok")
+    try:
+        live_send_danmaku("1", "这" * 40)
+        raise AssertionError("should raise")
+    except BiliError as exc:
+        assert exc.code == "MSG_TOO_LONG"
+    monkeypatch.delenv("BILI_COOKIE", raising=False)
+
+
+def test_no_csrf_for_write(monkeypatch) -> None:
+    from plugin.plugins.bili_viewer.bili import BiliError, live_send_danmaku
+
+    # 有 SESSDATA 但缺 bili_jct：应明确提示缺 CSRF
+    monkeypatch.setenv("BILI_COOKIE", "SESSDATA=abc")
+    try:
+        live_send_danmaku("1", "你好")
+        raise AssertionError("should raise")
+    except BiliError as exc:
+        assert exc.code == "NO_CSRF"
+    monkeypatch.delenv("BILI_COOKIE", raising=False)
