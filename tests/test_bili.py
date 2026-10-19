@@ -757,7 +757,11 @@ def test_cookie_uid_extraction() -> None:
 
 
 def test_live_danmaku_duration_clamped(monkeypatch) -> None:
-    """工具层 clamp duration 到 [1,30]，与实际采集上限一致。"""
+    """工具层 clamp duration 到 [1,30]，与实际采集上限一致。
+
+    真实宿主把 LLM 的 JSON 参数展开为命名参数调用（entry trigger 路径），
+    因此这里以命名参数形态调用；`_` 在真实调用中不含 "parameters" 键。
+    """
     import asyncio
 
     from plugin.plugins.bili_viewer import BiliViewerPlugin, bili
@@ -769,22 +773,25 @@ def test_live_danmaku_duration_clamped(monkeypatch) -> None:
 
     monkeypatch.setattr(bili, "live_danmaku", fake_live_danmaku)
     inst = BiliViewerPlugin(ctx=None)
+
+    # LLM 传了超大的 duration → 收紧到 30
     loop = asyncio.new_event_loop()
     try:
-        r = loop.run_until_complete(inst.bili_live_danmaku(room="1", duration=3600, _={"parameters": {}}))
+        r = loop.run_until_complete(inst.bili_live_danmaku(room="1", duration=3600))
     finally:
         loop.close()
     assert captured["duration"] == 30
     assert r["is_error"] is False
     assert "采集 30 秒" in r["output"]
 
+    # LLM 未提供 duration → 默认 8
     captured.clear()
     loop = asyncio.new_event_loop()
     try:
-        loop.run_until_complete(inst.bili_live_danmaku(room="1", duration=0, _={"parameters": {"duration": 3600}}))
+        loop.run_until_complete(inst.bili_live_danmaku(room="1", duration=0))
     finally:
         loop.close()
-    assert captured["duration"] == 30
+    assert captured["duration"] == 8
 
 
 def test_build_cookie_string_sanitizes() -> None:
