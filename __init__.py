@@ -17,7 +17,7 @@ import re
 import threading
 import time
 
-from plugin.sdk.plugin import NekoPluginBase, lifecycle, llm_tool, neko_plugin
+from plugin.sdk.plugin import NekoPluginBase, lifecycle, llm_tool, neko_plugin, plugin_entry
 
 from . import bili, cdp_cookie, cookie_auto, desktop_deliver, web_ui
 
@@ -847,6 +847,106 @@ class BiliViewerPlugin(NekoPluginBase):
             "is_error": False,
             "result": result,
         }
+
+    # ══════════ 自动路由入口（plugin_entry：TaskExecutor 评估可见） ══════════
+    # llm_tool 走 LLM 函数调用通道；plugin_entry 走 TaskExecutor 的 UserPlugin
+    # 路由通道（评估时 LLM 依据插件 entries 判断"哪个插件能执行该请求"并路由）。
+    # 此前 bili_viewer 只有 llm_tool、无任何 plugin_entry，导致评估判定
+    # "可用插件列表中无支持发送弹幕的插件" → YUI 永远无法路由发弹幕。这里注册
+    # run（通用兜底）与 bili_danmaku（弹幕专用）两个入口修复该问题。
+
+    @plugin_entry(
+        id="run",
+        name="B站全能助手",
+        description=(
+            "B站全能助手（bili_viewer）：感知用户当前正在看的B站直播/视频"
+            "（直播间房间号/视频BV号，编号仅供内部操作，回复用户时请勿复述）；"
+            "向B站直播间或视频发送弹幕；查看视频详情/弹幕/字幕/AI概要/评论、"
+            "直播间信息与实时弹幕、UP主信息与投稿；搜索视频/直播/用户；"
+            "查看和修改自己的稿件；查询B站账号绑定状态。"
+            "用户请求'发弹幕''看视频详情''搜B站''看直播''查UP主''发一条弹幕'等B站相关操作时使用本插件。"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "description": "操作类型：send_live_danmaku（发直播弹幕）/ send_video_danmaku（发视频弹幕）/ query（查询与感知）",
+                },                "room": {"type": "string", "description": "直播间房间号或链接（发直播弹幕时必填）"},
+                "bvid": {"type": "string", "description": "视频BV号（发视频弹幕时必填）"},
+                "text": {"type": "string", "description": "弹幕内容，直播最长 30 字、视频最长 100 字"},
+                "progress": {"type": "integer", "description": "视频弹幕出现的时间点（秒），默认 0 即开头"},
+            },
+            "required": ["action"],
+        },
+        timeout=60.0,
+    )
+    async def _entry_run(self, **kwargs):
+        params = kwargs.get("parameters") or {}
+        action = kwargs.get("action") or params.get("action") or ""
+        room = str(kwargs.get("room") or params.get("room") or "")
+        bvid = str(kwargs.get("bvid") or params.get("bvid") or "")
+        text = str(kwargs.get("text") or params.get("text") or "")
+        try:
+            progress = int(kwargs.get("progress") or params.get("progress") or 0)
+        except (TypeError, ValueError):
+            progress = 0
+        progress = max(0, progress)
+        if action in ("send_live_danmaku", "live_danmaku"):
+            return await self.bili_live_send_danmaku(room=room, text=text)
+        if action in ("send_video_danmaku", "video_danmaku"):
+            return await self.bili_video_send_danmaku(bvid=bvid, text=text, progress=progress)
+        # 兜底：感知当前正在看的内容（若用户请求是 B站相关但未给具体参数）
+        tab = self._ext_tab()
+        if tab:
+            parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
+            if parsed is not None:
+                return {
+                    "output": f"当前正在看：{tab.get('title', '')}（{parsed['type']}）",
+                    "is_error": False,
+                    "result": parsed,
+                }
+        return {
+            "output": "请指定操作：发弹幕（action=send_live_danmaku/send_video_danmaku，需 room/bvid 与 text），或查询B站内容。",
+            "is_error": True,
+            "error": "NO_ACTION",
+        }
+
+    @plugin_entry(
+        id="bili_danmaku",
+        name="发送B站弹幕",
+        description=(
+            "向B站直播间或视频发送弹幕。用户说'发弹幕''发一条弹幕''帮我发弹幕'时使用："
+            "直播弹幕需房间号（room），视频弹幕需BV号（bvid），内容为 text；"
+            "发送后回复用户时无需复述房间号/BV号。需要已绑定B站账号。"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "room": {"type": "string", "description": "直播间房间号或链接（发直播弹幕时必填）"},
+                "bvid": {"type": "string", "description": "视频BV号（发视频弹幕时必填）"},
+                "text": {"type": "string", "description": "弹幕内容，直播最长 30 字、视频最长 100 字"},
+                "progress": {"type": "integer", "description": "视频弹幕出现的时间点（秒），默认 0 即开头"},
+            },
+            "required": ["text"],
+        },
+        timeout=30.0,
+    )
+    async def _entry_danmaku(self, **kwargs):
+        params = kwargs.get("parameters") or {}
+        room = str(kwargs.get("room") or params.get("room") or "")
+        bvid = str(kwargs.get("bvid") or params.get("bvid") or "")
+        text = str(kwargs.get("text") or params.get("text") or "")
+        try:
+            progress = int(kwargs.get("progress") or params.get("progress") or 0)
+        except (TypeError, ValueError):
+            progress = 0
+        progress = max(0, progress)
+        if bvid:
+            return await self.bili_video_send_danmaku(bvid=bvid, text=text, progress=progress)
+        if room:
+            return await self.bili_live_send_danmaku(room=room, text=text)
+        return {"output": "请提供直播间房间号（room）或视频BV号（bvid）与弹幕内容（text）。", "is_error": True, "error": "NO_TARGET"}
 
     # ══════════ 账号绑定（CDP 运行时接入 + 监控） ══════════
 
