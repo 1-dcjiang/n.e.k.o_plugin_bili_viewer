@@ -180,9 +180,10 @@ def _find_debug_port() -> int | None:
 def _launch_debug_browser(name: str) -> int | None:
     """以调试模式启动浏览器（复用原 profile），返回调试端口；失败返回 None。
 
-    不检查进程状态：残留进程（crashpad/后台 chrome.exe 等）不再阻挡接入。
-    Chrome 单实例保护下，若默认 profile 正被实例占用，新进程会自行退出
-    （快速失败、无副作用），此时返回 None 并给出引导即可。
+    只启动**一次**（固定端口 _DEBUG_PORT_BASE），绝不循环换端口反复启动：
+    Chrome 单实例保护下，若默认 profile 正被实例占用，新进程会把启动参数
+    转交给已有实例并自行退出——表现为已有 Chrome 不断弹出 about:blank
+    空白页。因此一旦检测到进程提前退出且端口未就绪，立即放弃，不重试。
     """
     exe = next((p for p in _BROWSER_EXE_PATHS.get(name, ()) if os.path.exists(p)), None)
     if not exe:
@@ -190,26 +191,33 @@ def _launch_debug_browser(name: str) -> int | None:
     root = os.path.join(os.environ.get("LOCALAPPDATA", ""), _BROWSER_DIRS[name])
     if not os.path.isdir(root):
         return None
-    for port in range(_DEBUG_PORT_BASE, _DEBUG_PORT_MAX):
+    port = _DEBUG_PORT_BASE
+    try:
+        proc = subprocess.Popen(
+            [
+                exe,
+                f"--remote-debugging-port={port}",
+                f"--user-data-dir={root}",
+                "--remote-allow-origins=*",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "about:blank",
+            ],
+            creationflags=_POPEN_DETACHED,
+        )
+    except Exception:
+        return None
+    # 短轮询（最多 8s）：正常 1-3s 内端口就绪；进程提前退出（profile 被占）则快速放弃
+    deadline = time.monotonic() + 8.0
+    while time.monotonic() < deadline:
+        time.sleep(0.4)
+        if _http_json(f"http://127.0.0.1:{port}/json/version", timeout=0.4) is not None:
+            return port
         try:
-            subprocess.Popen(
-                [
-                    exe,
-                    f"--remote-debugging-port={port}",
-                    f"--user-data-dir={root}",
-                    "--remote-allow-origins=*",
-                    "about:blank",
-                ],
-                creationflags=_POPEN_DETACHED,
-            )
+            if proc.poll() is not None:
+                return None
         except Exception:
-            continue
-        # 短轮询（最多 8s）：正常 1-3s 内端口就绪；启动失败（profile 被占）则快速放弃
-        for _ in range(16):
-            time.sleep(0.5)
-            if _http_json(f"http://127.0.0.1:{port}/json/version", timeout=0.5) is not None:
-                return port
-        # 该端口启动失败（可能被占），换下一个端口
+            pass
     return None
 
 

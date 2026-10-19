@@ -77,3 +77,54 @@ def test_ensure_launches_when_user_requests(monkeypatch, tmp_path):
     assert port == 9333
     assert launched == ["Chrome"]
     assert "已启动" in detail
+
+
+def _fake_proc(exit_early: bool):
+    class _P:
+        def poll(self):
+            return 0 if exit_early else None
+
+    return _P()
+
+
+def test_launch_tries_only_once_on_profile_busy(monkeypatch, tmp_path):
+    """单实例保护下（进程被转交提前退出、端口不通）：只 Popen 一次，绝不循环换端口反复弹窗。"""
+    cdp_cookie = _cdp()
+    _setup_browser_dirs(monkeypatch, tmp_path)
+    # 假 chrome.exe（必须真实存在，_launch 会 os.path.exists 检查）
+    fake_exe = tmp_path / "fake_chrome.exe"
+    fake_exe.write_bytes(b"MZ")
+    monkeypatch.setattr(cdp_cookie, "_BROWSER_EXE_PATHS", {"Chrome": (str(fake_exe),)})
+    monkeypatch.setattr(cdp_cookie, "_find_debug_port", lambda: None)
+    monkeypatch.setattr(cdp_cookie, "_http_json", lambda url, timeout=1.0: None)  # 端口永不就绪
+    pops = []
+
+    def _fake_popen(cmd, **kw):
+        pops.append(cmd)
+        return _fake_proc(exit_early=True)  # 单实例转交 → 进程立即退出
+
+    monkeypatch.setattr(cdp_cookie.subprocess, "Popen", _fake_popen)
+    port = cdp_cookie._launch_debug_browser("Chrome")
+    assert port is None
+    assert len(pops) == 1  # 只启动一次，无 21 端口风暴
+    assert "--remote-debugging-port=9333" in pops[0]
+
+
+def test_launch_success_returns_port(monkeypatch, tmp_path):
+    """调试实例正常启动（进程存活、端口就绪）→ 返回固定端口 9333。"""
+    cdp_cookie = _cdp()
+    _setup_browser_dirs(monkeypatch, tmp_path)
+    fake_exe = tmp_path / "fake_chrome.exe"
+    fake_exe.write_bytes(b"MZ")
+    monkeypatch.setattr(cdp_cookie, "_BROWSER_EXE_PATHS", {"Chrome": (str(fake_exe),)})
+    monkeypatch.setattr(cdp_cookie, "_http_json", lambda url, timeout=1.0: {"Browser": "ok"})
+    pops = []
+
+    def _fake_popen(cmd, **kw):
+        pops.append(cmd)
+        return _fake_proc(exit_early=False)  # 调试实例保持运行
+
+    monkeypatch.setattr(cdp_cookie.subprocess, "Popen", _fake_popen)
+    port = cdp_cookie._launch_debug_browser("Chrome")
+    assert port == 9333
+    assert len(pops) == 1
