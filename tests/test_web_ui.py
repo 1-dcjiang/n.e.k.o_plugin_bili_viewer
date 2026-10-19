@@ -110,3 +110,21 @@ def test_panel_started_once(monkeypatch, tmp_path):
         assert url2 == url
     finally:
         panel._server.shutdown()
+
+
+def test_panel_stop_releases_port(monkeypatch, tmp_path):
+    """stop() 释放端口后，同一端口可再次启动（插件重载场景）。"""
+    web_ui = _web_ui()
+    panel, url = _start_panel(lambda *_: {"ok": True})
+    port = panel._port
+    panel.stop()
+    # 停止后端口立即可复用（ThreadingHTTPServer 默认 SO_REUSEADDR）
+    panel2 = web_ui.BindPanel(
+        panel._status_fn, panel._bind_fn, ext_fn=panel._ext_fn, port=port
+    )
+    url2, started2 = panel2.ensure_started()
+    try:
+        assert started2 is True
+        assert url2 == f"http://127.0.0.1:{port}/"
+    finally:
+        panel2.stop()

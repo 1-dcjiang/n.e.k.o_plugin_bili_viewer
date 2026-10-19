@@ -170,6 +170,21 @@ class BindPanel:
     def url(self) -> str:
         return f"http://{_PANEL_HOST}:{self._port}/"
 
+    def stop(self) -> None:
+        """关闭面板服务并释放端口（插件重载/关闭时调用，避免旧线程占住 8765）。"""
+        with self._lock:
+            server, self._server = self._server, None
+            self._thread = None
+            if server is not None:
+                try:
+                    server.shutdown()
+                except Exception:
+                    pass
+                try:
+                    server.server_close()
+                except Exception:
+                    pass
+
     @property
     def running(self) -> bool:
         return self._server is not None

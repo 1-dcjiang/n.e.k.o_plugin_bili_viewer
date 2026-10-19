@@ -264,6 +264,12 @@ class BiliViewerPlugin(NekoPluginBase):
             desktop_deliver.ensure_desktop_package_async(_plugin_dir)
         except Exception:
             pass
+        # 0.5) 常驻本地接入面板（127.0.0.1:8765）：扩展一装好就能直连推送，
+        #      不再需要先调用 bili_bind_web 才启动面板。端口被占（已有实例）则复用/跳过。
+        try:
+            self._ensure_panel()
+        except Exception:
+            pass
         # 1) 手动配置（settings.bili_cookie / 环境变量 BILI_COOKIE）——2s 预算，快速返回
         try:
             cfg = await self.config.dump(timeout=2.0)
@@ -283,6 +289,13 @@ class BiliViewerPlugin(NekoPluginBase):
 
     @lifecycle(id="shutdown")
     async def on_shutdown(self, **_):
+        # 关闭常驻面板，释放 8765 端口（线程化避免阻塞关闭流程）
+        try:
+            panel = getattr(self, "_bind_panel", None)
+            if panel is not None:
+                await asyncio.to_thread(panel.stop)
+        except Exception:
+            pass
         return {"status": "shutdown"}
 
     # ══════════ 搜索 ══════════
