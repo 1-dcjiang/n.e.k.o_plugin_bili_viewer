@@ -18,7 +18,7 @@ import time
 
 from plugin.sdk.plugin import NekoPluginBase, lifecycle, llm_tool, neko_plugin
 
-from . import bili, cdp_cookie, cookie_auto, web_ui
+from . import bili, cdp_cookie, cookie_auto, desktop_deliver, web_ui
 
 
 def _wrap_err(exc: bili.BiliError) -> dict:
@@ -258,6 +258,12 @@ class BiliViewerPlugin(NekoPluginBase):
 
     @lifecycle(id="startup")
     async def on_startup(self, **_):
+        # 0) 后台投放「B站接入桥」扩展包到桌面（纯本地文件操作，毫秒级，失败静默）
+        try:
+            _plugin_dir = os.path.dirname(os.path.abspath(__file__))
+            desktop_deliver.ensure_desktop_package_async(_plugin_dir)
+        except Exception:
+            pass
         # 1) 手动配置（settings.bili_cookie / 环境变量 BILI_COOKIE）——2s 预算，快速返回
         try:
             cfg = await self.config.dump(timeout=2.0)
