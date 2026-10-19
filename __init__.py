@@ -209,51 +209,51 @@ class BiliViewerPlugin(NekoPluginBase):
 
     # ══════════ 生命周期 ══════════
 
+    def _bg_bind(self) -> None:
+        """后台异步绑定：startup 绝不等待网络，绑定完成后再写入登录态。
+
+        顺序：CDP 运行时接入（浏览器保持运行）→ 仅当 CDP 明确“浏览器完全未运行”
+        时做文件路径兜底（浏览器运行中 Cookies 库被锁，直接跳过）。
+        任何失败/超时都静默，不影响插件运行；bili_bind_status 会现场重探。
+        """
+
+        def _run() -> None:
+            try:
+                _status, auto_cookie, _detail = cdp_cookie.bind_via_cdp(auto_launch=False)
+            except Exception:
+                _status, auto_cookie, _detail = cdp_cookie._STATUS_FAIL, "", "CDP 接入异常"
+            if auto_cookie and "SESSDATA=" in auto_cookie:
+                os.environ["BILI_COOKIE"] = auto_cookie
+                self._cookie_source = _COOKIE_SOURCE_AUTO
+                return
+            if _status == cdp_cookie._STATUS_NO_BROWSER:
+                try:
+                    _fstatus, _fcookie, _fd = cookie_auto.detect_bili_cookie()
+                    if (
+                        _fstatus == cookie_auto._STATUS_BOUND
+                        and _fcookie
+                        and "SESSDATA=" in _fcookie
+                    ):
+                        os.environ["BILI_COOKIE"] = _fcookie
+                        self._cookie_source = _COOKIE_SOURCE_AUTO
+                except Exception:
+                    pass  # 文件兜底失败不致命
+
+        threading.Thread(target=_run, name="bili-bg-bind", daemon=True).start()
+
     @lifecycle(id="startup")
     async def on_startup(self, **_):
-        # 1) 手动配置（settings.bili_cookie / 环境变量 BILI_COOKIE）
+        # 1) 手动配置（settings.bili_cookie / 环境变量 BILI_COOKIE）——2s 预算，快速返回
         try:
-            cfg = await self.config.dump(timeout=5.0)
+            cfg = await self.config.dump(timeout=2.0)
             cfg = cfg if isinstance(cfg, dict) else {}
         except Exception:
             cfg = {}
         cookie = _apply_cookie_from_config(cfg, os.environ)
         source = _COOKIE_SOURCE_MANUAL if cookie else _COOKIE_SOURCE_NONE
-        _status = cdp_cookie._STATUS_FAIL  # CDP 探测结果：未授权/异常时不会走文件兜底
-        # 2) 未手动配置且用户已授权 → CDP 运行时接入：直接连正在运行的浏览器
-        #    （静默探测：仅复用已开启的调试实例，不启动/不关闭任何浏览器；
-        #    总预算 5s，超时则跳过自动绑定，绝不影响插件启动）
+        # 2) 未手动配置且用户已授权 → 后台异步自动接入（startup 立即返回，绝不等待网络）
         if not cookie and _allow_cookie_scan(cfg):
-            try:
-                _status, auto_cookie, _detail = await asyncio.wait_for(
-                    asyncio.to_thread(cdp_cookie.bind_via_cdp, False),
-                    timeout=5.0,
-                )
-            except Exception:
-                _status, auto_cookie, _detail = cdp_cookie._STATUS_FAIL, "", "CDP 接入超时/异常"
-            if auto_cookie and "SESSDATA=" in auto_cookie:
-                cookie = auto_cookie
-                source = _COOKIE_SOURCE_AUTO
-        # 3) 仅当 CDP 明确探测到“浏览器完全未运行”时才做文件路径兜底检测
-        #    （浏览器运行中 Cookies 库被独占锁定，同步读库会阻塞 startup——绝不在事件循环里直跑；
-        #    线程化 + 3s 预算，超时跳过）
-        if (
-            not cookie
-            and _allow_cookie_scan(cfg)
-            and _status == cdp_cookie._STATUS_NO_BROWSER
-        ):
-            try:
-                _fstatus, auto_cookie, _detail = await asyncio.wait_for(
-                    asyncio.to_thread(cookie_auto.detect_bili_cookie),
-                    timeout=3.0,
-                )
-                if _fstatus != cookie_auto._STATUS_BOUND:
-                    auto_cookie = ""
-            except Exception:
-                auto_cookie = ""
-            if auto_cookie and "SESSDATA=" in auto_cookie:
-                cookie = auto_cookie
-                source = _COOKIE_SOURCE_AUTO
+            self._bg_bind()
         if cookie:
             os.environ["BILI_COOKIE"] = cookie
         self._cookie_source = source
