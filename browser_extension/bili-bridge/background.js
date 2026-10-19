@@ -1,8 +1,9 @@
-// B站接入桥 (bili-bridge) v0.2.0
+// B站接入桥 (bili-bridge) v0.2.1
 // 1) 把 B站登录态直连推送给本机 bili_viewer 插件（POST 127.0.0.1:8765，不上外网）；
 // 2) 把当前活动标签页（URL+标题）实时推送给插件，让 YUI 精确感知你在看什么。
 // 触发时机：安装/浏览器启动立即推送；cookie 变化（onChanged 防抖）；
-// 标签页切换/URL 变化（tabs 监听防抖）；alarms 每分钟兜底（MV3 SW 休眠时由 alarm 唤醒）。
+// 标签页切换/URL 变化（tabs 监听防抖）；alarms 30 秒兜底（MV3 SW 休眠时由 alarm 唤醒）；
+// 推送失败 4 秒快速重试（插件重启后 5 秒内即可恢复感知，不再等下一轮 alarm）。
 
 const PANEL_URL = "http://127.0.0.1:8765";
 
@@ -15,6 +16,8 @@ const KEEP_NAMES = new Set([
 ]);
 
 let pushTimer = null;
+let retryTimer = null;
+let retryCount = 0;
 
 function buildCookieString(cookies) {
   const seen = new Set();
@@ -28,15 +31,27 @@ function buildCookieString(cookies) {
   return items.join("; ");
 }
 
+// 推送失败后 4 秒快速重试（最多约 80 秒），覆盖插件/面板重启的空窗期
+function scheduleRetry() {
+  clearTimeout(retryTimer);
+  if (retryCount > 20) return;
+  retryCount += 1;
+  retryTimer = setTimeout(() => { pushCookie(); pushTab(); }, 4000);
+}
+
 async function postJson(path, body) {
   try {
-    await fetch(`${PANEL_URL}${path}`, {
+    const resp = await fetch(`${PANEL_URL}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+    if (resp && resp.ok) retryCount = 0; // 任一路径成功即视为链路恢复
+    return resp;
   } catch (e) {
-    // 插件未运行/本地面板未启动：静默，下次定时/变化再试
+    // 插件未运行/本地面板未启动：静默，快速重试兜底
+    scheduleRetry();
+    return null;
   }
 }
 
@@ -47,7 +62,7 @@ async function pushCookie() {
     await postJson("/api/extension-cookie", {
       cookie, at: Date.now(), source: "bili-bridge-extension",
     });
-  } catch (e) {}
+  } catch (e) { scheduleRetry(); }
 }
 
 async function pushTab() {
@@ -58,7 +73,7 @@ async function pushTab() {
     await postJson("/api/extension-tab", {
       url: tab.url, title: tab.title || "", at: Date.now(),
     });
-  } catch (e) {}
+  } catch (e) { scheduleRetry(); }
 }
 
 function scheduleCookie() {
@@ -82,7 +97,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.url || changeInfo.title) scheduleTab();
 });
 
-chrome.alarms.create("bili-bridge-push", { periodInMinutes: 1 });
+chrome.alarms.create("bili-bridge-push", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "bili-bridge-push") { pushCookie(); pushTab(); }
 });
