@@ -1013,7 +1013,21 @@ class BiliViewerPlugin(NekoPluginBase):
                 "extension_online": ext_online,
                 "extension_last_seen": int(self._ext_last_seen()),
             }
-        # 未绑定：优先通过 CDP 检测运行中的浏览器（线程化 + 8s 预算，不阻塞事件循环）
+        # 未绑定：扩展通道优先（全程无需关闭/重启浏览器），CDP 仅兜底检测（线程化 + 8s 预算）
+        if ext_online:
+            # 扩展在线但未同步到登录态：引导确认浏览器登录，绝不教任何关闭/退出浏览器操作
+            return {
+                "output": (
+                    "浏览器扩展（B站接入桥）在线，但尚未收到 B站登录态（可能是浏览器未登录，或插件刚重启、"
+                    "扩展正在自动重连）。无需关闭或重启浏览器：请在浏览器里打开 bilibili.com 确认已登录，"
+                    "扩展会自动同步登录态（约 5 秒内）；也可以让我打开接入面板查看扩展通道状态。"
+                ),
+                "is_error": True,
+                "bound": False,
+                "source": _COOKIE_SOURCE_NONE,
+                "extension_online": True,
+                "extension_last_seen": int(self._ext_last_seen()),
+            }
         try:
             status, auto_cookie, detail = await asyncio.wait_for(
                 asyncio.to_thread(cdp_cookie.bind_via_cdp, False),
@@ -1029,7 +1043,7 @@ class BiliViewerPlugin(NekoPluginBase):
         if status == cdp_cookie._STATUS_NOT_LOGGED_IN:
             hint = "浏览器里没有有效的 B站登录态（可能已过期或未登录）：请先打开浏览器登录一次 bilibili.com，再对我说'绑定好了'。"
         elif status == cdp_cookie._STATUS_NO_BROWSER:
-            hint = "已尝试以调试模式启动浏览器但未成功：默认配置的浏览器正在使用中，无法再开一个调试实例。请先完全退出浏览器一次（结束 chrome.exe/msedge.exe，残留后台进程会一并退出），再对我说'接入浏览器'或让我打开接入面板一键接入。"
+            hint = "调试模式浏览器未能启动（默认浏览器正在使用中）。无需关闭浏览器：请确认已安装并重载'B站接入桥'扩展（扩展会随浏览器自动同步登录态），或打开接入面板一键接入，全程不关闭/不重启浏览器。"
         elif status == cdp_cookie._STATUS_FAIL:
             hint = f"接入检测未完成（{detail}）。"
         return {
@@ -1047,9 +1061,8 @@ class BiliViewerPlugin(NekoPluginBase):
     @llm_tool(
         name="bili_bind_account",
         description=(
-            "接入 B站账号（全面 CDP 运行时接入，不依赖进程状态判断）：让插件连接浏览器读取 B站登录态并绑定，"
-            "绝不关闭/重启浏览器，浏览器残留进程不会阻挡接入（会直接尝试以调试模式启动；"
-            "仅当默认配置的浏览器正被占用、无法再开调试实例时才提示先退出一次）。"
+            "接入 B站账号（全面扩展/CDP 运行时接入，不依赖进程状态判断）：优先通过'B站接入桥'扩展通道自动"
+            "同步浏览器登录态，扩展不可用时再尝试调试模式接入，全程绝不关闭/重启浏览器，浏览器残留进程不会阻挡接入。"
             "何时用：用户说'允许你读取浏览器Cookie/接我的B站账号/绑定账号/确认/绑定好了/接入浏览器'时。"
             "参数 allow（必填布尔）：true=用户已授权自动读取（写入一次永久生效），false=拒绝。"
             "若检测到浏览器未登录/登录态过期，会提示用户先登录 bilibili.com。"

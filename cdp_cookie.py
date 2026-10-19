@@ -259,9 +259,8 @@ def ensure_debug_browser(auto_launch: bool = True) -> tuple[int | None, str]:
             return port, f"已启动 {name} 调试实例（浏览器保持运行）"
         return None, (
             f"{name} 正在使用中且未开启接入端口：默认配置的 {exe_name} 已在运行，"
-            "无法再开一个调试实例。接入无需删除任何东西：请先完全退出浏览器一次"
-            "（任务管理器结束 chrome.exe/msedge.exe 即可，残留后台进程也会一并退出），"
-            "再对我说'接入浏览器'或刷新接入面板点'一键接入'。"
+            "无法再开一个调试实例。无需关闭或重启浏览器：请确认已安装并重载'B站接入桥'扩展"
+            "（扩展会随浏览器自动同步登录态，无需任何关闭操作），或刷新接入面板查看扩展通道状态。"
         )
     return None, "未找到 Chrome/Edge 浏览器"
 

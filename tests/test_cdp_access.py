@@ -45,7 +45,7 @@ def test_ensure_never_kills_running_browser(monkeypatch, tmp_path):
     port, detail = cdp_cookie.ensure_debug_browser(auto_launch=True)
     assert port is None
     assert "taskkill" not in detail and killed == []  # 没有发起任何结束进程操作
-    assert "请先完全退出浏览器一次" in detail  # 提示一次性设置引导
+    assert "无需关闭或重启浏览器" in detail  # 全程不关闭浏览器，引导扩展通道
 
 
 def test_ensure_silent_probe_does_not_launch(monkeypatch, tmp_path):

@@ -44,9 +44,8 @@ _PAGE = """<!DOCTYPE html>
   <div class="row"><span>当前标签</span><span id="curtab" class="tip">—</span></div>
 </div>
 <button id="btn" onclick="doBind()">一键接入（启动调试浏览器并读取 B站登录态）</button>
-<div class="tip">说明：接入不会关闭/删除你的浏览器。若默认浏览器正被占用无法再开调试实例，
-面板会提示先完全退出一次（结束 chrome.exe/msedge.exe，残留后台进程会一并退出），
-然后回到这里再点一次即可。</div>
+<div class="tip">说明：接入不会关闭/删除你的浏览器，全程无需退出浏览器。若默认浏览器正被占用无法再开调试实例，
+优先使用"B站接入桥"扩展通道（扩展随浏览器自动同步登录态），或刷新本页查看扩展通道状态即可。</div>
 <div id="log"></div>
 <script>
 async function refresh(){
