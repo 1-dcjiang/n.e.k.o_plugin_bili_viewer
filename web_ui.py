@@ -14,6 +14,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 _PANEL_HOST = "127.0.0.1"
 _PANEL_PORT = 8765
+
+_EXT_ONLINE_WINDOW = 120.0  # 扩展最近一次推送超过该秒数视为离线
 _PANEL_URL = f"http://{_PANEL_HOST}:{_PANEL_PORT}/"
 
 _PAGE = """<!DOCTYPE html>
@@ -73,11 +75,7 @@ setInterval(refresh, 3000); refresh();
 
 
 class _PanelHandler(BaseHTTPRequestHandler):
-    """面板 HTTP 处理器；绑定动作由外部注入（线程安全）。"""
-
-    # 由 BindPanel 在实例化时注入
-    status_fn = None  # () -> dict
-    bind_fn = None    # () -> dict
+    """面板 HTTP 处理器；绑定/扩展回调由 BindPanel 挂到 server 实例属性上注入。"""
 
     def log_message(self, *_args):  # 静默默认访问日志
         pass
@@ -94,31 +92,62 @@ class _PanelHandler(BaseHTTPRequestHandler):
     def _json(self, code: int, payload: dict) -> None:
         self._send(code, "application/json; charset=utf-8", json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
+    def _read_json_body(self) -> dict:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length <= 0 or length > 65536:
+                return {}
+            return json.loads(self.rfile.read(length).decode("utf-8", "replace"))
+        except Exception:
+            return {}
+
     # -- routes --
     def do_GET(self) -> None:
+        status_fn = self.server.status_fn
         if self.path.startswith("/api/status"):
-            payload = dict(self.status_fn() or {})
+            payload = dict(status_fn() or {})
             self._json(200, payload)
+            return
+        if self.path.startswith("/api/extension-status"):
+            payload = dict(status_fn() or {})
+            self._json(200, {
+                "online": bool(payload.get("extension_online")),
+                "last_seen": payload.get("extension_last_seen"),
+                "bound": bool(payload.get("bound")),
+            })
             return
         self._send(200, "text/html; charset=utf-8", _PAGE.encode("utf-8"))
 
     def do_POST(self) -> None:
         if self.path.startswith("/api/bind"):
             try:
-                payload = dict(self.bind_fn() or {})
+                payload = dict(self.server.bind_fn() or {})
             except Exception as exc:  # 绑定动作绝不让面板崩溃
                 payload = {"ok": False, "detail": f"接入异常：{exc}"}
+            self._json(200, payload)
+            return
+        if self.path.startswith("/api/extension-cookie"):
+            body = self._read_json_body()
+            try:
+                payload = dict(self.server.ext_fn(body.get("cookie", ""), int(body.get("at", 0) or 0)) or {})
+            except Exception as exc:
+                payload = {"ok": False, "detail": f"扩展推送处理异常：{exc}"}
             self._json(200, payload)
             return
         self._json(404, {"error": "not found"})
 
 
 class BindPanel:
-    """懒启动的单例面板：ensure_started() 返回 (url, started_now)。"""
+    """懒启动的单例面板：ensure_started() 返回 (url, started_now)。
 
-    def __init__(self, status_fn, bind_fn) -> None:
+    port 可覆盖（默认 8765），测试场景传入随机端口避免冲突。
+    """
+
+    def __init__(self, status_fn, bind_fn, ext_fn=None, port: int = _PANEL_PORT) -> None:
         self._status_fn = status_fn
         self._bind_fn = bind_fn
+        self._ext_fn = ext_fn or (lambda _cookie, _at: {"ok": False, "detail": "扩展通道未启用"})
+        self._port = port
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -126,18 +155,20 @@ class BindPanel:
     def ensure_started(self) -> tuple[str, bool]:
         with self._lock:
             if self._server is not None:
-                return _PANEL_URL, False
-            _PanelHandler.status_fn = self._status_fn
-            _PanelHandler.bind_fn = self._bind_fn
-            server = ThreadingHTTPServer((_PANEL_HOST, _PANEL_PORT), _PanelHandler)
+                return self.url(), False
+            server = ThreadingHTTPServer((_PANEL_HOST, self._port), _PanelHandler)
+            # 回调挂到 server 实例属性（每请求 handler 通过 self.server 取，避免类属性 self 绑定）
+            server.status_fn = self._status_fn
+            server.bind_fn = self._bind_fn
+            server.ext_fn = self._ext_fn
             thread = threading.Thread(target=server.serve_forever, name="bili-bind-panel", daemon=True)
             thread.start()
             self._server = server
             self._thread = thread
-            return _PANEL_URL, True
+            return self.url(), True
 
     def url(self) -> str:
-        return _PANEL_URL
+        return f"http://{_PANEL_HOST}:{self._port}/"
 
     @property
     def running(self) -> bool:

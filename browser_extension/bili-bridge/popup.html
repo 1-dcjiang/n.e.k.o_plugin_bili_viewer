@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>B站接入桥</title>
+<style>
+  body{width:260px;font-family:'Microsoft YaHei',sans-serif;padding:14px;background:#1a1a2e;color:#eee;margin:0}
+  h1{font-size:15px;color:#8ecae6;margin:0 0 10px}
+  .row{display:flex;justify-content:space-between;padding:6px 0;font-size:13px}
+  .ok{color:#7ae582;font-weight:bold} .bad{color:#ef476f}
+  .tip{font-size:11px;color:#999;margin-top:10px;line-height:1.6}
+</style>
+</head>
+<body>
+<h1>🅱️ B站接入桥</h1>
+<div class="row"><span>推送状态</span><span id="st">检测中…</span></div>
+<div class="row"><span>最近推送</span><span id="at">—</span></div>
+<div class="tip">本扩展仅把 B站登录态推送到本机 127.0.0.1 的 N.E.K.O bili_viewer 插件，不会上传到任何外部网络。登录/退出 B站时会自动同步。</div>
+<script src="popup.js"></script>
+</body>
+</html>

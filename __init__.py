@@ -43,6 +43,7 @@ _CONFIG_ALLOW_SCAN_KEY = "allow_cookie_scan"
 
 _COOKIE_SOURCE_MANUAL = "manual"
 _COOKIE_SOURCE_AUTO = "auto"
+_COOKIE_SOURCE_EXTENSION = "extension"
 _COOKIE_SOURCE_NONE = "none"
 
 
@@ -775,17 +776,39 @@ class BiliViewerPlugin(NekoPluginBase):
 
     # ── 网页接入面板回调（由 web_ui.BindPanel 注入调用，运行在面板线程） ──
 
+    def _ext_last_seen(self) -> float:
+        return float(getattr(self, "_ext_last_seen_ts", 0) or 0)
+
+    def _receive_ext_cookie(self, cookie: str, at: int) -> dict:
+        """接收浏览器扩展（B站接入桥）推送的登录态：写入环境变量并标记来源。
+
+        仅接受 127.0.0.1 本机来源（面板服务本身只监听本机）；cookie 不上传不写日志。
+        扩展推送的 at 为空（首次握手）时用当前时间。
+        """
+        ts = float(at) if at and at > 0 else time.time()
+        self._ext_last_seen_ts = ts
+        cookie = str(cookie or "").strip()
+        if "SESSDATA=" in cookie:
+            os.environ["BILI_COOKIE"] = cookie
+            self._cookie_source = _COOKIE_SOURCE_EXTENSION
+            return {"ok": True, "bound": True, "detail": "已通过浏览器扩展接入 B站登录态"}
+        return {"ok": True, "bound": False, "detail": "扩展已推送，但浏览器中没有有效 B站登录态"}
+
     def _panel_status(self) -> dict:
-        """面板状态接口：浏览器接入状态 + B站绑定状态（纯本地，无网络）。"""
+        """面板状态接口：浏览器接入状态 + B站绑定状态 + 扩展通道状态（纯本地，无网络）。"""
         cookie = os.environ.get("BILI_COOKIE", "") or ""
         source = getattr(self, "_cookie_source", _COOKIE_SOURCE_NONE)
         monitor = getattr(self, "_browser_monitor", None) or self._monitor_browser()
+        ext_online = (time.time() - self._ext_last_seen()) < web_ui._EXT_ONLINE_WINDOW
         return {
             "ok": True,
             "browser": monitor.get("detail", "未接入"),
             "browser_ok": bool(monitor.get("connected")),
             "bound": "SESSDATA=" in cookie,
             "cookie_manual": source == _COOKIE_SOURCE_MANUAL,
+            "cookie_source": source,
+            "extension_online": ext_online,
+            "extension_last_seen": int(self._ext_last_seen()),
             "uname": "",
         }
 
@@ -801,7 +824,7 @@ class BiliViewerPlugin(NekoPluginBase):
     def _ensure_panel(self) -> tuple[str, bool]:
         panel = getattr(self, "_bind_panel", None)
         if panel is None:
-            panel = web_ui.BindPanel(self._panel_status, self._panel_bind)
+            panel = web_ui.BindPanel(self._panel_status, self._panel_bind, ext_fn=self._receive_ext_cookie)
             self._bind_panel = panel
         return panel.ensure_started()
 
@@ -810,10 +833,11 @@ class BiliViewerPlugin(NekoPluginBase):
         description=(
             "打开 B站接入面板（本地网页）：YUI 或用户通过网页完成浏览器接入与 B站绑定，"
             "完全绕开本地进程状态判断——浏览器残留进程（crashpad/后台 chrome.exe 等）不再阻挡接入。"
-            "何时用：用户说'通过网页接入浏览器/网页方式绑定/打开接入面板/自动绑定又不行'时。"
+            "面板同时显示'浏览器扩展（B站接入桥）'通道状态：若已安装扩展并登录 B站，登录态会自动直连同步，无需任何操作。"
+            "何时用：用户说'通过网页接入浏览器/网页方式绑定/打开接入面板/自动绑定又不行/扩展装了吗'时。"
             "面板功能：一键启动调试浏览器并读取 B站登录态（不关闭/不删除任何东西）、"
-            "实时显示浏览器接入与绑定状态。调用后返回本地面板地址，提示用户打开并点'一键接入'；"
-            "若浏览器已开启接入端口则已自动绑定。"
+            "实时显示浏览器接入、扩展通道与绑定状态。调用后返回本地面板地址，提示用户打开并点'一键接入'；"
+            "若浏览器已开启接入端口或扩展已在线则已自动绑定。"
         ),
         parameters={"type": "object", "properties": {}, "required": []},
         timeout=20.0,
@@ -854,15 +878,19 @@ class BiliViewerPlugin(NekoPluginBase):
         except Exception:
             pass
         self._browser_monitor = monitor
+        ext_online = (time.time() - self._ext_last_seen()) < web_ui._EXT_ONLINE_WINDOW
+        ext_text = "浏览器扩展（B站接入桥）在线，登录态自动同步" if ext_online else "浏览器扩展未在线（可打开接入面板查看/一键接入）"
         m_text = "浏览器已接入（调试实例在线）" if monitor.get("connected") else monitor.get("detail", "浏览器未接入")
         if cookie and "SESSDATA=" in cookie:
             return {
-                "output": f"当前 B站账号已绑定（来源：{summary}）。{m_text}",
+                "output": f"当前 B站账号已绑定（来源：{summary}）。{m_text}。{ext_text}",
                 "is_error": False,
                 "bound": True,
                 "source": source,
                 "browser_connected": monitor.get("connected"),
                 "browser_detail": monitor.get("detail"),
+                "extension_online": ext_online,
+                "extension_last_seen": int(self._ext_last_seen()),
             }
         # 未绑定：优先通过 CDP 检测运行中的浏览器（线程化 + 8s 预算，不阻塞事件循环）
         try:
@@ -891,6 +919,8 @@ class BiliViewerPlugin(NekoPluginBase):
             "detect_status": status,
             "browser_connected": monitor.get("connected"),
             "browser_detail": monitor.get("detail"),
+            "extension_online": ext_online,
+            "extension_last_seen": int(self._ext_last_seen()),
         }
 
     @llm_tool(

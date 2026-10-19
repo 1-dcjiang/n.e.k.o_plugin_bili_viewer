@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "B站接入桥 (bili-bridge)",
+  "version": "0.1.0",
+  "description": "把 B站登录态安全地交给本机 N.E.K.O bili_viewer 插件：仅推送至 127.0.0.1 本机服务，Cookie 不上传任何外部网络。",
+  "permissions": ["cookies", "storage", "alarms"],
+  "host_permissions": [
+    "*://*.bilibili.com/*",
+    "http://127.0.0.1:8765/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "B站接入桥"
+  }
+}
