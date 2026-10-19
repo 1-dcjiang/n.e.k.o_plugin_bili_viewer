@@ -17,7 +17,7 @@ import time
 
 from plugin.sdk.plugin import NekoPluginBase, lifecycle, llm_tool, neko_plugin
 
-from . import bili, cookie_auto
+from . import bili, cdp_cookie, cookie_auto
 
 
 def _wrap_err(exc: bili.BiliError) -> dict:
@@ -710,33 +710,37 @@ class BiliViewerPlugin(NekoPluginBase):
         name="bili_bind_status",
         description=(
             "查看当前 B站账号绑定状态。何时用：用户问'你绑定B站了吗/为什么看不到弹幕/账号接上了吗'时，"
-            "或 YUI 需要自查登录态是否可用。返回：绑定来源（手动配置/自动读取浏览器 Cookie/未绑定）、"
-            "Cookie 包含哪些凭证（不泄露内容）、未绑定时给出下一步建议（关闭浏览器/先登录 B站）。"
+            "或 YUI 需要自查登录态是否可用。返回：绑定来源（CDP 运行时接入/手动配置/自动读取/未绑定）、"
+            "Cookie 包含哪些凭证（不泄露内容）、未绑定时给出下一步建议（重新登录/允许重启浏览器接入）。"
         ),
         parameters={"type": "object", "properties": {}, "required": []},
-        timeout=10.0,
+        timeout=15.0,
     )
     async def bili_bind_status(self, **_):
         cookie = os.environ.get("BILI_COOKIE", "") or ""
         source = getattr(self, "_cookie_source", _COOKIE_SOURCE_NONE)
         summary = _cookie_summary(cookie)
         if cookie and "SESSDATA=" in cookie:
-            output = f"当前 B站账号已绑定（来源：{'自动读取浏览器 Cookie' if source == _COOKIE_SOURCE_AUTO else '手动配置'}），{summary}。"
+            output = f"当前 B站账号已绑定（来源：{summary}）。"
             return {"output": output, "is_error": False, "bound": True, "source": source}
-        if source == _COOKIE_SOURCE_AUTO:
-            return {"output": "已启用自动读取浏览器 Cookie，但当前未检测到 B站登录态。", "is_error": True, "bound": False, "source": source}
-        # 未绑定：尝试自动检测并报告原因
+        # 未绑定：优先通过 CDP 检测运行中的浏览器
         try:
-            status, auto_cookie, detail = cookie_auto.detect_bili_cookie()
+            status, auto_cookie, detail = cdp_cookie.bind_via_cdp(force_restart=False)
         except Exception:
-            status, auto_cookie, detail = cookie_auto._STATUS_FAIL, "", cookie_auto.STATUS_TEXT[cookie_auto._STATUS_FAIL]
-        if auto_cookie:
+            status, auto_cookie, detail = cdp_cookie._STATUS_FAIL, "", "CDP 检测异常"
+        if auto_cookie and "SESSDATA=" in auto_cookie:
             os.environ["BILI_COOKIE"] = auto_cookie
             self._cookie_source = _COOKIE_SOURCE_AUTO
-            return {"output": "已自动绑定 B站账号（读取浏览器 Cookie）。", "is_error": False, "bound": True, "source": _COOKIE_SOURCE_AUTO}
+            return {"output": f"已自动绑定 B站账号（{detail}）。", "is_error": False, "bound": True, "source": _COOKIE_SOURCE_AUTO}
+        hint = ""
+        if status == cdp_cookie._STATUS_NOT_LOGGED_IN:
+            hint = "浏览器里没有有效的 B站登录态（可能已过期或未登录）：请先打开浏览器登录一次 bilibili.com，再对我说'绑定好了'。"
+        elif status == cdp_cookie._STATUS_NO_BROWSER:
+            hint = "浏览器未开启接入端口。若浏览器正在运行且你同意，可对我说'允许重启浏览器接入并绑定'。"
+        elif status == cdp_cookie._STATUS_FAIL:
+            hint = f"接入检测未完成（{detail}）。"
         return {
-            "output": f"未绑定 B站账号。原因：{detail}。"
-            + ("若用户同意，可调用 bili_bind_account(allow=true) 授权自动读取浏览器 Cookie。" if not _allow_cookie_scan({}) else ""),
+            "output": f"未绑定 B站账号。{hint}",
             "is_error": True,
             "bound": False,
             "source": _COOKIE_SOURCE_NONE,
@@ -746,24 +750,24 @@ class BiliViewerPlugin(NekoPluginBase):
     @llm_tool(
         name="bili_bind_account",
         description=(
-            "接入 B站账号：授权插件自动读取本机浏览器（Chrome/Edge）已登录的 B站 Cookie 并绑定。"
-            "何时用：用户说'允许你读取浏览器Cookie/接我的B站账号/绑定账号/确认'时。"
+            "接入 B站账号（运行时接入优先）：让插件通过 CDP 直接读取正在运行的浏览器（Chrome/Edge）"
+            "的 B站登录态并绑定，无需关闭浏览器。"
+            "何时用：用户说'允许你读取浏览器Cookie/接我的B站账号/绑定账号/确认/绑定好了'时。"
             "参数 allow（必填布尔）：true=用户已授权自动读取（写入一次永久生效），false=拒绝。"
-            "参数 force_close（可选布尔）：true=用户同意由插件自动结束浏览器进程（chrome.exe/msedge.exe）"
-            "再重新检测绑定，适合浏览器窗口关了但后台进程仍在（Cookie 被锁）的场景；"
-            "注意会关闭浏览器所有窗口（未保存内容可能丢失），仅在用户明确同意时传 true。"
-            "授权后立即检测：浏览器已关闭时直接绑定；浏览器运行中且未同意自动关闭时，"
-            "提示用户关闭浏览器或同意自动关闭后重试。这是本地操作，无网络传输，Cookie 不上传不写日志。"
+            "参数 force_close（可选布尔）：true=用户同意由插件重启浏览器（结束进程后以调试模式重新打开，"
+            "原标签页会恢复）以建立接入通道；仅在用户明确同意时传 true。"
+            "若检测到浏览器未登录/登录态过期，会提示用户先登录 bilibili.com。"
+            "这是本地操作：CDP 仅绑定 127.0.0.1，Cookie 不上传、不写日志。"
         ),
         parameters={
             "type": "object",
             "properties": {
                 "allow": {"type": "boolean", "description": "用户是否允许自动读取浏览器 Cookie"},
-                "force_close": {"type": "boolean", "description": "用户是否同意插件自动结束浏览器进程后重试（可选，默认 false）"},
+                "force_close": {"type": "boolean", "description": "用户是否同意插件重启浏览器建立接入通道（可选，默认 false）"},
             },
             "required": ["allow"],
         },
-        timeout=60.0,
+        timeout=90.0,
     )
     async def bili_bind_account(self, *, allow: bool = False, force_close: bool = False, **_):
         params = _.get("parameters") or {}
@@ -784,23 +788,41 @@ class BiliViewerPlugin(NekoPluginBase):
             await self.config.update({_CONFIG_SECTION: new_section})
         except Exception:
             pass  # 授权写入失败不阻塞本次绑定（下次启动需重新授权）
+        # 1) CDP 运行时接入（浏览器无需关闭；未开调试端口时按需重启）
         try:
-            status, cookie, detail = cookie_auto.detect_bili_cookie()
+            status, cookie, detail = cdp_cookie.bind_via_cdp(force_restart=force_close)
         except Exception:
-            status, cookie, detail = cookie_auto._STATUS_FAIL, "", cookie_auto.STATUS_TEXT[cookie_auto._STATUS_FAIL]
-        if status == cookie_auto._STATUS_LOCKED and force_close:
-            # 用户同意自动关闭浏览器：结束进程后重试绑定
-            try:
-                status, cookie, detail = cookie_auto.detect_after_kill()
-            except Exception:
-                status, cookie, detail = cookie_auto._STATUS_FAIL, "", cookie_auto.STATUS_TEXT[cookie_auto._STATUS_FAIL]
-        if cookie:
+            status, cookie, detail = cdp_cookie._STATUS_FAIL, "", "CDP 接入异常"
+        if cookie and "SESSDATA=" in cookie:
             os.environ["BILI_COOKIE"] = cookie
             self._cookie_source = _COOKIE_SOURCE_AUTO
-            return {"output": f"已授权并自动绑定 B站账号（{detail}）。", "is_error": False, "bound": True, "source": _COOKIE_SOURCE_AUTO}
+            return {"output": f"已授权并绑定 B站账号（{detail}）。", "is_error": False, "bound": True, "source": _COOKIE_SOURCE_AUTO}
+        # 2) 兜底：文件路径读取（浏览器已关闭时）
+        if status == cdp_cookie._STATUS_NO_BROWSER:
+            try:
+                _file_cookie, _file_detail = cookie_auto.detect_bili_cookie()[1:3]
+            except Exception:
+                _file_cookie, _file_detail = "", cookie_auto.STATUS_TEXT[cookie_auto._STATUS_FAIL]
+            if _file_cookie and "SESSDATA=" in _file_cookie:
+                os.environ["BILI_COOKIE"] = _file_cookie
+                self._cookie_source = _COOKIE_SOURCE_AUTO
+                return {"output": f"已授权并绑定 B站账号（{_file_detail}）。", "is_error": False, "bound": True, "source": _COOKIE_SOURCE_AUTO}
+        if status == cdp_cookie._STATUS_NOT_LOGGED_IN:
+            return {
+                "output": "授权已记录。当前浏览器中没有有效的 B站登录态（可能未登录或已过期）：请先在浏览器里打开 bilibili.com 扫码登录，登录好后对我说'绑定好了'。",
+                "is_error": True,
+                "bound": False,
+                "detect_status": status,
+            }
+        if status == cdp_cookie._STATUS_NO_BROWSER and not force_close:
+            return {
+                "output": "浏览器未开启接入通道。若你同意插件重启浏览器（原标签页会恢复）以接入，可对我说'允许重启浏览器接入并绑定'。",
+                "is_error": True,
+                "bound": False,
+                "detect_status": status,
+            }
         return {
-            "output": f"授权已记录（下次启动自动生效）。当前检测：{detail}"
-            + ("。若同意由插件自动关闭浏览器后重试，可对我说'允许自动关闭浏览器并绑定'。" if status == cookie_auto._STATUS_LOCKED else ""),
+            "output": f"绑定未完成。{detail}",
             "is_error": True,
             "bound": False,
             "detect_status": status,
