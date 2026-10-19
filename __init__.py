@@ -854,6 +854,11 @@ class BiliViewerPlugin(NekoPluginBase):
     # 此前 bili_viewer 只有 llm_tool、无任何 plugin_entry，导致评估判定
     # "可用插件列表中无支持发送弹幕的插件" → YUI 永远无法路由发弹幕。这里注册
     # run（通用兜底）与 bili_danmaku（弹幕专用）两个入口修复该问题。
+    #
+    # 【重要】方法名禁止以下划线开头：宿主 collect_entries() 会跳过所有
+    # `_` 前缀的实例方法（plugin/sdk/shared/core/base.py），导致执行侧
+    # "Entry 'xxx' not found"（v0.6.22 教训）。entry_run / entry_danmaku 的
+    # id 由 plugin_entry(id=...) 指定，方法名仅需避开下划线前缀即可。
 
     @plugin_entry(
         id="run",
@@ -881,7 +886,7 @@ class BiliViewerPlugin(NekoPluginBase):
         },
         timeout=60.0,
     )
-    async def _entry_run(self, **kwargs):
+    async def entry_run(self, **kwargs):
         params = kwargs.get("parameters") or {}
         action = kwargs.get("action") or params.get("action") or ""
         room = str(kwargs.get("room") or params.get("room") or "")
@@ -932,7 +937,7 @@ class BiliViewerPlugin(NekoPluginBase):
         },
         timeout=30.0,
     )
-    async def _entry_danmaku(self, **kwargs):
+    async def entry_danmaku(self, **kwargs):
         params = kwargs.get("parameters") or {}
         room = str(kwargs.get("room") or params.get("room") or "")
         bvid = str(kwargs.get("bvid") or params.get("bvid") or "")

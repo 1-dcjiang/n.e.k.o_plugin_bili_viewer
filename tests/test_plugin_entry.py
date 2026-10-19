@@ -20,7 +20,7 @@ def _entry_metas():
     from plugin.sdk.shared.constants import EVENT_META_ATTR
 
     cls = _plugin_cls()
-    return {name: getattr(getattr(cls, name), EVENT_META_ATTR) for name in ("_entry_run", "_entry_danmaku")}
+    return {name: getattr(getattr(cls, name), EVENT_META_ATTR) for name in ("entry_run", "entry_danmaku")}
 
 
 def test_plugin_entry_registered() -> None:
@@ -32,7 +32,7 @@ def test_plugin_entry_registered() -> None:
 
 def test_plugin_entry_input_schema() -> None:
     """入口必须暴露弹幕相关参数（room/bvid/text），供评估 LLM 生成参数。"""
-    meta = _entry_metas()["_entry_danmaku"]
+    meta = _entry_metas()["entry_danmaku"]
     schema = dict(getattr(meta, "input_schema", None) or {})
     props = schema.get("properties") or {}
     assert "room" in props and "bvid" in props and "text" in props
@@ -63,7 +63,7 @@ def test_entry_danmaku_routes_to_video() -> None:
     plugin.bili_video_send_danmaku = fake_video
     plugin.bili_live_send_danmaku = fake_live
 
-    result = asyncio.run(plugin._entry_danmaku(bvid="BV1xx", text="喵", progress=5))
+    result = asyncio.run(plugin.entry_danmaku(bvid="BV1xx", text="喵", progress=5))
     assert calls == [("video", "BV1xx", "喵", 5)]
     assert result["is_error"] is False
 
@@ -86,7 +86,7 @@ def test_entry_danmaku_routes_to_live() -> None:
     plugin.bili_video_send_danmaku = fake_video
     plugin.bili_live_send_danmaku = fake_live
 
-    result = asyncio.run(plugin._entry_danmaku(room="123456", text="冲鸭"))
+    result = asyncio.run(plugin.entry_danmaku(room="123456", text="冲鸭"))
     assert calls == [("live", "123456", "冲鸭")]
     assert result["is_error"] is False
 
@@ -99,7 +99,7 @@ def test_entry_danmaku_no_target() -> None:
     plugin.bili_video_send_danmaku = lambda **_: None
     plugin.bili_live_send_danmaku = lambda **_: None
 
-    result = asyncio.run(plugin._entry_danmaku(text="喵"))
+    result = asyncio.run(plugin.entry_danmaku(text="喵"))
     assert result["is_error"] is True
     assert result["error"] == "NO_TARGET"
 
@@ -118,10 +118,30 @@ def test_entry_run_dispatches_danmaku() -> None:
     plugin.bili_video_send_danmaku = fake_video
 
     result = asyncio.run(
-        plugin._entry_run(
+        plugin.entry_run(
             action="send_video_danmaku",
             parameters={"bvid": "BV1ab", "text": "来了", "progress": 3},
         )
     )
     assert calls == [("video", "BV1ab", "来了", 3)]
     assert result["is_error"] is False
+
+
+def test_collect_entries_contains_plugin_entries() -> None:
+    """宿主执行侧必须能在 collect_entries() 中看到 run/bili_danmaku。
+
+    回归：v0.6.22 把入口方法命名为 _entry_run/_entry_danmaku（下划线前缀），
+    宿主 collect_entries()（plugin/sdk/shared/core/base.py）会跳过所有
+    `_` 前缀实例方法，导致 TaskExecutor 评估路由成功但执行侧报
+    "Entry 'run' not found"（发弹幕链路断裂）。本测试锁定修复：
+    方法名必须避开下划线前缀，且 id 以 plugin_entry(id=...) 为准。
+    """
+    plugin = object.__new__(_plugin_cls())
+    plugin._dynamic_entries = {}
+    plugin._routers = []
+    collected = plugin.collect_entries(wrap_with_hooks=True)
+    assert "run" in collected
+    assert "bili_danmaku" in collected
+    assert collected["run"].meta.id == "run"
+    assert collected["bili_danmaku"].meta.id == "bili_danmaku"
+    assert collected["bili_danmaku"].meta.event_type == "plugin_entry"
