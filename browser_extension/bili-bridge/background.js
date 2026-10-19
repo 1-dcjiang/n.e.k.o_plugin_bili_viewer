@@ -9,10 +9,9 @@ const PANEL_URL = "http://127.0.0.1:8765";
 // 与插件 cdp_cookie._KEEP_NAMES 保持一致的 B站凭证名
 const KEEP_NAMES = new Set([
   "SESSDATA", "bili_jct", "DedeUserID", "DedeUserID__ckMd5",
-  "buvid3", "buvid4", "bili_ticket", "bili_ticket_expires",
-  "b_nut", "b_lsid", "buvid_fp", "buvid_fp_plain", "buvid_fp_proxy",
-  "sid", "CURRENT_FNVAL", "CURRENT_QUALITY",
-  "fingerprint", "fingerprint3",
+  "buvid3", "buvid4", "b_nut", "CURRENT_FNVAL",
+  "bili_ticket", "bili_ticket_expires", "sid",
+  "fingerprint", "fingerprintp", "buvid_fp",
 ]);
 
 let pushTimer = null;

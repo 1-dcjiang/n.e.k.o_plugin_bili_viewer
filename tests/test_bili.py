@@ -746,6 +746,47 @@ def test_cookie_summary_no_leak() -> None:
     assert _cookie_summary("buvid3=xx") == "已配置（无登录态字段）"
 
 
+def test_cookie_uid_extraction() -> None:
+    from plugin.plugins.bili_viewer import _cookie_uid
+
+    assert _cookie_uid("") == ""
+    assert _cookie_uid("buvid3=xx") == ""
+    assert _cookie_uid("DedeUserID=123456; SESSDATA=a") == "123456"
+    assert _cookie_uid("SESSDATA=a; DedeUserID=98765; bili_jct=b") == "98765"
+    assert _cookie_uid("DedeUserID=abc") == ""  # 非数字不误取
+
+
+def test_live_danmaku_duration_clamped(monkeypatch) -> None:
+    """工具层 clamp duration 到 [1,30]，与实际采集上限一致。"""
+    import asyncio
+
+    from plugin.plugins.bili_viewer import BiliViewerPlugin, bili
+
+    captured: dict = {}
+    def fake_live_danmaku(room, duration=8):
+        captured["duration"] = duration
+        return []
+
+    monkeypatch.setattr(bili, "live_danmaku", fake_live_danmaku)
+    inst = BiliViewerPlugin(ctx=None)
+    loop = asyncio.new_event_loop()
+    try:
+        r = loop.run_until_complete(inst.bili_live_danmaku(room="1", duration=3600, _={"parameters": {}}))
+    finally:
+        loop.close()
+    assert captured["duration"] == 30
+    assert r["is_error"] is False
+    assert "采集 30 秒" in r["output"]
+
+    captured.clear()
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(inst.bili_live_danmaku(room="1", duration=0, _={"parameters": {"duration": 3600}}))
+    finally:
+        loop.close()
+    assert captured["duration"] == 30
+
+
 def test_build_cookie_string_sanitizes() -> None:
     from plugin.plugins.bili_viewer.cookie_auto import build_cookie_string
 

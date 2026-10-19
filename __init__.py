@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import threading
 import time
 
@@ -88,6 +89,14 @@ def _cookie_summary(cookie: str) -> str:
     if not marks:
         return "已配置（无登录态字段）"
     return "含 " + "、".join(marks)
+
+
+def _cookie_uid(cookie: str) -> str:
+    """从 Cookie 提取 DedeUserID（账号 uid），无则返回空串。纯函数便于测试。"""
+    if not cookie:
+        return ""
+    m = re.search(r"(?:^|;\s*)DedeUserID=(\d+)", cookie)
+    return m.group(1) if m else ""
 
 
 def _sync_text(parsed: dict) -> str | None:
@@ -555,6 +564,7 @@ class BiliViewerPlugin(NekoPluginBase):
             duration = int(duration if duration else params.get("duration") or 8)
         except (TypeError, ValueError):
             duration = 8
+        duration = max(1, min(duration, 30))  # 与 bili.live_danmaku 内部上限一致
         if not room:
             return {"output": "请提供直播房间号或直播间链接。", "is_error": True, "error": "NO_ROOM"}
         try:
@@ -852,6 +862,7 @@ class BiliViewerPlugin(NekoPluginBase):
         monitor = getattr(self, "_browser_monitor", None) or self._monitor_browser()
         ext_online = (time.time() - self._ext_last_seen()) < web_ui._EXT_ONLINE_WINDOW
         tab = self._ext_tab()
+        uid = _cookie_uid(cookie)
         return {
             "ok": True,
             "browser": monitor.get("detail", "未接入"),
@@ -862,7 +873,7 @@ class BiliViewerPlugin(NekoPluginBase):
             "extension_online": ext_online,
             "extension_last_seen": int(self._ext_last_seen()),
             "current_tab": tab,
-            "uname": "",
+            "uname": f"uid {uid}" if uid else "",
         }
 
     def _panel_bind(self) -> dict:
