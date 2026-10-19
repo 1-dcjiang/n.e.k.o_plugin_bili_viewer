@@ -208,7 +208,17 @@ class BiliViewerPlugin(NekoPluginBase):
             cfg = {}
         cookie = _apply_cookie_from_config(cfg, os.environ)
         source = _COOKIE_SOURCE_MANUAL if cookie else _COOKIE_SOURCE_NONE
-        # 2) 未手动配置且用户已授权 → 自动检测浏览器（Chrome/Edge）已登录的 B站 Cookie
+        # 2) 未手动配置且用户已授权 → CDP 运行时接入：直接连正在运行的浏览器
+        #    （静默探测：仅复用已开启的调试实例，不启动/不关闭任何浏览器）
+        if not cookie and _allow_cookie_scan(cfg):
+            try:
+                _status, auto_cookie, _detail = cdp_cookie.bind_via_cdp(force_restart=False, auto_launch=False)
+            except Exception:
+                _status, auto_cookie, _detail = cdp_cookie._STATUS_FAIL, "", "CDP 接入异常"
+            if auto_cookie and "SESSDATA=" in auto_cookie:
+                cookie = auto_cookie
+                source = _COOKIE_SOURCE_AUTO
+        # 3) CDP 不可用且浏览器已关闭 → 文件路径兜底检测
         if not cookie and _allow_cookie_scan(cfg):
             status, auto_cookie, _detail = cookie_auto.detect_bili_cookie()
             if auto_cookie:
