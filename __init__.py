@@ -1003,11 +1003,19 @@ class BiliViewerPlugin(NekoPluginBase):
         ext_text = "浏览器扩展（B站接入桥）在线，登录态自动同步" if ext_online else "浏览器扩展未在线（可打开接入面板查看/一键接入）"
         m_text = "浏览器已接入（调试实例在线）" if monitor.get("connected") else monitor.get("detail", "浏览器未接入")
         if cookie and "SESSDATA=" in cookie:
+            has_csrf = "bili_jct=" in cookie
+            csrf_note = ""
+            if not has_csrf:
+                csrf_note = (
+                    "；⚠ 注意：Cookie 缺少 bili_jct（CSRF token），发弹幕/改稿件会失败——"
+                    "请在浏览器里退出并重新登录一次 bilibili.com 以刷新凭证（无需关闭浏览器，扩展会自动同步）"
+                )
             return {
-                "output": f"当前 B站账号已绑定（来源：{summary}）。{m_text}。{ext_text}",
+                "output": f"当前 B站账号已绑定（来源：{summary}）。{m_text}。{ext_text}{csrf_note}",
                 "is_error": False,
                 "bound": True,
                 "source": source,
+                "has_csrf": has_csrf,
                 "browser_connected": monitor.get("connected"),
                 "browser_detail": monitor.get("detail"),
                 "extension_online": ext_online,
