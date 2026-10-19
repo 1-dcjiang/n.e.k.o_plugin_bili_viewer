@@ -217,6 +217,58 @@ def test_no_csrf_for_write(monkeypatch) -> None:
     monkeypatch.delenv("BILI_COOKIE", raising=False)
 
 
+def test_video_send_danmaku_requires_cookie(monkeypatch) -> None:
+    from plugin.plugins.bili_viewer.bili import BiliError, send_video_danmaku
+
+    monkeypatch.delenv("BILI_COOKIE", raising=False)
+    try:
+        send_video_danmaku("BV1xx411c7mD", "你好")
+        raise AssertionError("should raise")
+    except BiliError as exc:
+        assert exc.code == "NEED_LOGIN"
+
+
+def test_video_send_danmaku_posts_with_cid(monkeypatch) -> None:
+    """视频弹幕：解析第一P cid，带 csrf 表单投递，progress 毫秒换算。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_COOKIE", "SESSDATA=abc; bili_jct=tok")
+    posted: dict = {}
+
+    def _fake_video_info(bvid):
+        assert bvid == "BV1xx411c7mD"
+        return {"title": "测试", "pages": [{"cid": 10086}, {"cid": 20086}]}
+
+    def _fake_post(url, form):
+        assert url.endswith("/x/v2/dm/post")
+        posted.update(url=url, form=form)
+        return {"code": 0, "message": "0"}
+
+    monkeypatch.setattr(bili, "video_info", _fake_video_info)
+    monkeypatch.setattr(bili, "_http_post", _fake_post)
+    try:
+        result = bili.send_video_danmaku("BV1xx411c7mD", "前排围观", progress_ms=45000)
+    finally:
+        monkeypatch.delenv("BILI_COOKIE", raising=False)
+    assert result["ok"] is True
+    assert posted["form"]["oid"] == 10086  # 第一P cid
+    assert posted["form"]["msg"] == "前排围观"
+    assert posted["form"]["progress"] == 45000
+    assert posted["form"]["csrf"] == "tok"
+
+
+def test_video_send_danmaku_msg_limit(monkeypatch) -> None:
+    from plugin.plugins.bili_viewer.bili import BiliError, send_video_danmaku
+
+    monkeypatch.setenv("BILI_COOKIE", "SESSDATA=abc; bili_jct=tok")
+    try:
+        send_video_danmaku("BV1xx411c7mD", "这" * 120)
+        raise AssertionError("should raise")
+    except BiliError as exc:
+        assert exc.code == "MSG_TOO_LONG"
+    monkeypatch.delenv("BILI_COOKIE", raising=False)
+
+
 def test_live_info_fallback_uses_wbi(monkeypatch) -> None:
     """get_info 风控时回退到 getInfoByRoom，且必须带 wbi 签名。"""
     from plugin.plugins.bili_viewer import bili

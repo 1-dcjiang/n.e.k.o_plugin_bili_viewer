@@ -1098,6 +1098,54 @@ def live_send_danmaku(room: str, text: str) -> dict:
     return {"ok": True, "room_id": room_id, "text": text, "server": data.get("message") or ""}
 
 
+def send_video_danmaku(bvid: str, text: str, progress_ms: int = 0) -> dict:
+    """向视频投递一条普通弹幕（默认出现在视频开头时间点）。需 BILI_COOKIE 登录态。
+
+    参数：
+        bvid：视频 BV 号（自动解析到第一P 的 cid）。
+        text：弹幕内容（最长 100 字）。
+        progress_ms：弹幕出现的时间点（毫秒，0=开头）。
+    """
+    _require_login()
+    text = (text or "").strip()
+    if not text:
+        raise BiliError("弹幕内容为空", "EMPTY_MSG")
+    if len(text) > 100:
+        raise BiliError("视频弹幕最长 100 个字符", "MSG_TOO_LONG")
+    csrf = _csrf()
+    if not csrf:
+        raise BiliError("Cookie 缺少 bili_jct（CSRF token），无法发送弹幕", "NO_CSRF")
+    bvid = _parse_bvid(bvid)
+    info = video_info(bvid)
+    pages = info.get("pages") or []
+    if not pages:
+        raise BiliError("该视频没有可用的分P信息", "NO_CID")
+    cid = pages[0]["cid"]
+    try:
+        progress_ms = int(progress_ms)
+    except (TypeError, ValueError):
+        progress_ms = 0
+    progress_ms = max(0, progress_ms)
+    form = {
+        "type": "1",
+        "oid": int(cid),
+        "msg": text,
+        "progress": int(progress_ms),
+        "mode": "1",
+        "color": "16777215",
+        "fontsize": "25",
+        "pool": "0",
+        "csrf": csrf,
+        "csrf_token": csrf,
+        "platform": "web",
+    }
+    try:
+        data = _http_post(_API + "/x/v2/dm/post", form)
+    except BiliError as exc:
+        raise BiliError("视频弹幕发送失败：" + exc.message, "SEND_FAILED") from exc
+    return {"ok": True, "bvid": bvid, "cid": int(cid), "text": text, "progress_ms": int(progress_ms), "server": data.get("message") or ""}
+
+
 # ══════════════ 当前观看感知（前台窗口标题，通用） ══════════════
 
 _BROWSER_MARKERS = ("chrome", "edge", "firefox", "opera", "brave", "browser", "safari", "360")

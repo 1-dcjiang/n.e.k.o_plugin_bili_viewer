@@ -802,6 +802,50 @@ class BiliViewerPlugin(NekoPluginBase):
             return _wrap_err(exc)
         return {"output": f"已向直播间 {result['room_id']} 发送弹幕：{result['text']}", "is_error": False, "result": result}
 
+    @llm_tool(
+        name="bili_video_send_danmaku",
+        description=(
+            "向 B站视频发送一条弹幕（投到视频时间轴）。何时用：用户在视频页要求'给这个视频发弹幕/"
+            "发一条弹幕'时，配合实时感知推送的 BV 号直接使用。"
+            "参数 bvid：视频 BV 号；text：弹幕内容（最长 100 字）；"
+            "progress：弹幕出现的时间点（秒，可选，默认 0 即视频开头）。"
+            "这是写操作：需要配置 BILI_COOKIE（含 bili_jct 与 SESSDATA）环境变量，"
+            "且仅在用户明确确认后调用。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "bvid": {"type": "string", "description": "视频 BV 号"},
+                "text": {"type": "string", "description": "要发送的弹幕内容，最长 100 字"},
+                "progress": {"type": "integer", "description": "弹幕出现的时间点（秒），默认 0"},
+            },
+            "required": ["bvid", "text"],
+        },
+        timeout=30.0,
+    )
+    async def bili_video_send_danmaku(self, *, bvid: str = "", text: str = "", progress: int = 0, **_):
+        params = _.get("parameters") or {}
+        bvid = (bvid or params.get("bvid") or "").strip()
+        text = (text or params.get("text") or "").strip()
+        try:
+            progress = int(progress if progress else params.get("progress") or 0)
+        except (TypeError, ValueError):
+            progress = 0
+        progress = max(0, progress)
+        if not bvid:
+            return {"output": "请提供视频 BV 号。", "is_error": True, "error": "NO_BVID"}
+        if not text:
+            return {"output": "请提供要发送的弹幕内容。", "is_error": True, "error": "EMPTY_MSG"}
+        try:
+            result = bili.send_video_danmaku(bvid, text, progress_ms=progress * 1000)
+        except bili.BiliError as exc:
+            return _wrap_err(exc)
+        return {
+            "output": f"已向视频 {result['bvid']} 发送弹幕：{result['text']}（时间点 {result['progress_ms'] // 1000} 秒）",
+            "is_error": False,
+            "result": result,
+        }
+
     # ══════════ 账号绑定（CDP 运行时接入 + 监控） ══════════
 
     def _monitor_browser(self) -> dict:
