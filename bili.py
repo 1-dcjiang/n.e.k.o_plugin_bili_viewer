@@ -1141,6 +1141,50 @@ def _strip_browser_suffix(title: str) -> str:
     return _BROWSER_TITLE_SUFFIX_RE.sub("", title).strip()
 
 
+_URL_BVID_RE = re.compile(r"/video/(BV[a-zA-Z0-9]+)")
+_URL_AV_RE = re.compile(r"/video/av(\d+)")
+_URL_LIVE_RE = re.compile(r"live\.bilibili\.com/(\d+)")
+_URL_EP_RE = re.compile(r"bangumi/play/ep(\d+)")
+_URL_SS_RE = re.compile(r"bangumi/play/ss(\d+)")
+
+
+def parse_bili_url(url: str, title: str = "") -> dict | None:
+    """从浏览器扩展推送的活动标签页 URL 解析 B站内容。纯函数，可测试。
+
+    返回与 parse_window_title 兼容的 dict（is_bili=True），并附带 bvid / room_id /
+    ep / ss 精确标识；非 B站 URL 返回 None。
+    """
+    url = (url or "").strip()
+    if not url:
+        return None
+    low = url.lower()
+    if "bilibili.com" not in low and "b23.tv" not in low:
+        return None
+    subject = (title or "").strip()
+    m = _BILI_TITLE_SUFFIX_RE.match(subject)
+    if m and m.group(1).strip():
+        subject = m.group(1).strip()
+    base = {"app": "browser-ext", "window": title, "is_browser": True, "site": "bilibili", "subject": subject}
+    m = _URL_LIVE_RE.search(low)
+    if m:
+        return {**base, "kind": "live", "is_bili": True, "room_id": m.group(1)}
+    m = _URL_BVID_RE.search(url)  # BV 号区分大小写，需在原始 URL 上匹配
+    if m:
+        return {**base, "kind": "video", "is_bili": True, "bvid": m.group(1)}
+    m = _URL_AV_RE.search(low)
+    if m:
+        return {**base, "kind": "video", "is_bili": True, "aid": m.group(1)}
+    m = _URL_EP_RE.search(low)
+    if m:
+        return {**base, "kind": "bangumi", "is_bili": True, "ep": m.group(1)}
+    m = _URL_SS_RE.search(low)
+    if m:
+        return {**base, "kind": "bangumi", "is_bili": True, "ss": m.group(1)}
+    if "live" in low:
+        return {**base, "kind": "live", "is_bili": True}
+    return {**base, "kind": "web", "is_bili": True}
+
+
 def parse_window_title(title: str, exe: str = "") -> dict:
     """解析前台窗口标题与进程名，识别应用/站点/页面主题。纯函数，可测试。
 
@@ -1346,15 +1390,46 @@ def pick_now_watching() -> dict | None:
     return best
 
 
-def now_watching() -> dict:
-    """感知用户当前在看什么：枚举可见窗口选最优（排除聊天客户端/终端）；
-    B站视频/直播自动匹配信息。无可用窗口时回退读取前台窗口。"""
-    parsed = pick_now_watching()
+def now_watching(tab: dict | None = None) -> dict:
+    """感知用户当前在看什么：扩展推送的活动标签页（精确）优先，否则枚举可见窗口。
+
+    tab：浏览器扩展推送的 {url, title, at}。B站标签页按 URL 精确解析（bvid/room_id
+    直接匹配详情，无需搜索）；非 B站标签页按标题通用解析。无扩展数据时回退窗口感知。
+    """
+    parsed: dict | None = None
+    if tab and isinstance(tab, dict):
+        url = str(tab.get("url") or "")
+        title = str(tab.get("title") or "")
+        parsed = parse_bili_url(url, title)
+        if parsed is not None:
+            parsed["from"] = "extension-tab"
+        else:
+            parsed = parse_window_title(title, "chrome.exe")
+            parsed["from"] = "extension-tab"
+    if parsed is None:
+        parsed = pick_now_watching()
     if parsed is None:
         fg = _foreground_window()
         parsed = parse_window_title(fg["title"], fg["exe"])
     out = dict(parsed)
-    if parsed["kind"] == "video" and parsed["subject"]:
+    # 精确匹配：扩展 tab 带 bvid → 直接取视频详情；live → 取直播间信息
+    bvid = parsed.get("bvid")
+    if bvid:
+        try:
+            info = video_info(bvid)
+            out["video"] = {
+                "bvid": bvid,
+                "title": info["title"],
+                "owner_name": info["owner_name"],
+                "view": info["view"],
+                "danmaku": info["danmaku"],
+                "duration": _fmt_duration(info["duration"]),
+                "pubdate": _fmt_time(info["pubdate"]),
+                "desc": (info["desc"] or "")[:200],
+            }
+        except BiliError:
+            out["video"] = None
+    elif parsed.get("kind") == "video" and parsed.get("subject"):
         try:
             results = search(parsed["subject"], "video", limit=3)
         except BiliError:
@@ -1376,6 +1451,22 @@ def now_watching() -> dict:
                 }
             except BiliError:
                 out["video"] = None
+    if parsed.get("kind") == "live":
+        room_id = parsed.get("room_id")
+        if room_id:
+            try:
+                info = live_info(room_id)
+                out["live"] = {
+                    "room_id": room_id,
+                    "title": info.get("title") or "",
+                    "uname": info.get("uname") or "",
+                    "status_text": info.get("status_text") or "",
+                    "online": info.get("online") or 0,
+                    "area": info.get("area") or "",
+                    "parent_area": info.get("parent_area") or "",
+                }
+            except BiliError:
+                out["live"] = None
     return out
 
 
@@ -1385,6 +1476,14 @@ def format_now_watching(info: dict) -> str:
         return "没有检测到前台窗口，无法感知当前内容。"
     if info.get("is_bili"):
         head = "用户正在看 B站" + ("直播" if kind == "live" else "视频") + "："
+        if kind == "live" and info.get("live"):
+            li = info["live"]
+            lines = [
+                head + f"「{li['title'] or info.get('subject') or '未知直播间'}」",
+                f"主播：{li.get('uname') or '未知'} ｜ 状态：{li.get('status_text')} ｜ 在线：{li.get('online')} 人",
+                f"分区：{li.get('parent_area') or ''} / {li.get('area') or ''} ｜ 房间号 {li.get('room_id')}",
+            ]
+            return "\n".join(lines)
         if kind == "live":
             return head + "「" + (info.get("subject") or "未知直播间") + "」（窗口：%s）" % info.get("window")
         if info.get("video"):

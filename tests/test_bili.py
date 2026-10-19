@@ -416,6 +416,83 @@ def test_now_watching_bili_search_fails(monkeypatch) -> None:
     assert "match" not in info and "video" not in info
 
 
+# ══════════ 扩展标签页精确感知（parse_bili_url / now_watching(tab=)） ══════════
+
+
+def test_parse_bili_url_video():
+    from plugin.plugins.bili_viewer.bili import parse_bili_url
+
+    p = parse_bili_url("https://www.bilibili.com/video/BV1GJ411x7h7?p=2", "原神 PV_哔哩哔哩_bilibili")
+    assert p is not None and p["is_bili"] is True
+    assert p["kind"] == "video" and p["bvid"] == "BV1GJ411x7h7"
+    assert p["subject"] == "原神 PV"
+
+
+def test_parse_bili_url_live():
+    from plugin.plugins.bili_viewer.bili import parse_bili_url
+
+    p = parse_bili_url("https://live.bilibili.com/123456", "直播中：测试-哔哩哔哩直播")
+    assert p is not None and p["is_bili"] is True
+    assert p["kind"] == "live" and p["room_id"] == "123456"
+
+
+def test_parse_bili_url_bangumi_and_shortlink():
+    from plugin.plugins.bili_viewer.bili import parse_bili_url
+
+    ep = parse_bili_url("https://www.bilibili.com/bangumi/play/ep123456", "番剧_哔哩哔哩_bilibili")
+    assert ep is not None and ep["kind"] == "bangumi" and ep["ep"] == "123456"
+    b23 = parse_bili_url("https://b23.tv/abc123", "测试")
+    assert b23 is not None and b23["is_bili"] is True
+
+
+def test_parse_bili_url_non_bili_returns_none():
+    from plugin.plugins.bili_viewer.bili import parse_bili_url
+
+    assert parse_bili_url("https://www.zhihu.com/question/1", "知乎") is None
+    assert parse_bili_url("", "") is None
+
+
+def test_now_watching_prefers_extension_tab(monkeypatch):
+    """扩展标签页优先：bvid 直接精确匹配视频详情，无需窗口/搜索。"""
+    from plugin.plugins.bili_viewer import bili
+
+    called = {}
+
+    def _fake_video_info(bvid):
+        called["bvid"] = bvid
+        return {"title": "精确视频", "owner_name": "UP", "view": 10, "danmaku": 2,
+                "duration": 3600, "pubdate": 1700000000, "desc": "描述"}
+
+    monkeypatch.setattr(bili, "video_info", _fake_video_info)
+    monkeypatch.setattr(bili, "pick_now_watching", lambda: {"kind": "unknown"})  # 不应被调用
+    info = bili.now_watching(tab={"url": "https://www.bilibili.com/video/BV1GJ411x7h7", "title": "精确视频_哔哩哔哩_bilibili", "at": 0})
+    assert info["from"] == "extension-tab"
+    assert info["kind"] == "video" and info["bvid"] == "BV1GJ411x7h7"
+    assert called.get("bvid") == "BV1GJ411x7h7"
+    assert info["video"]["title"] == "精确视频"
+
+
+def test_now_watching_extension_tab_live(monkeypatch):
+    """扩展标签页直播：room_id 直接匹配直播间信息。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setattr(bili, "live_info", lambda room: {"title": "测试直播间", "uname": "主播",
+                                                         "status_text": "直播中", "online": 88,
+                                                         "area": "网游", "parent_area": "游戏"})
+    info = bili.now_watching(tab={"url": "https://live.bilibili.com/666", "title": "测试直播间-哔哩哔哩直播", "at": 0})
+    assert info["kind"] == "live" and info["room_id"] == "666"
+    assert info["live"]["title"] == "测试直播间" and info["live"]["online"] == 88
+
+
+def test_now_watching_extension_tab_non_bili_uses_title(monkeypatch):
+    """非 B站标签页：按标题通用解析（site 识别）。"""
+    from plugin.plugins.bili_viewer import bili
+
+    info = bili.now_watching(tab={"url": "https://www.zhihu.com/question/1", "title": "如何评价XX - 知乎 - Google Chrome", "at": 0})
+    assert info["from"] == "extension-tab"
+    assert info["site"] == "zhihu" and info["is_bili"] is False
+
+
 # ══════════ 实时感知同步（后台注入） ══════════
 
 

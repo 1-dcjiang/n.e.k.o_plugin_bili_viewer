@@ -168,7 +168,14 @@ class BiliViewerPlugin(NekoPluginBase):
                 except Exception:
                     pass
             try:
-                parsed = bili.pick_now_watching()
+                tab = self._ext_tab()
+                if tab:
+                    # 扩展标签页：本地 URL 解析（零网络），精确感知当前 B站页面
+                    parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
+                    if parsed is None:
+                        parsed = bili.parse_window_title(tab.get("title", ""), "chrome.exe")
+                else:
+                    parsed = bili.pick_now_watching()
             except Exception:
                 # 感知单次失败不退出线程：等待后重试，避免同步永久失效
                 threading.Event().wait(_SYNC_POLL_INTERVAL)
@@ -648,7 +655,8 @@ class BiliViewerPlugin(NekoPluginBase):
     )
     async def bili_now_watching(self, **_):
         try:
-            info = bili.now_watching()
+            tab = self._ext_tab()
+            info = bili.now_watching(tab=tab)
         except bili.BiliError as exc:
             return _wrap_err(exc)
         return {"output": bili.format_now_watching(info), "is_error": False, "watching": info}
@@ -813,12 +821,37 @@ class BiliViewerPlugin(NekoPluginBase):
             return {"ok": True, "bound": True, "detail": "已通过浏览器扩展接入 B站登录态"}
         return {"ok": True, "bound": False, "detail": "扩展已推送，但浏览器中没有有效 B站登录态"}
 
+    def _receive_ext_tab(self, url: str, title: str, at: int) -> dict:
+        """接收浏览器扩展推送的当前活动标签页（URL + 标题），供精确感知。
+
+        tab 数据仅本地使用：驱动 bili_now_watching 与同步 watcher 的精确感知，
+        不上传、不写日志。
+        """
+        ts = float(at) if at and at > 0 else time.time()
+        self._ext_last_seen_ts = ts
+        self._ext_tab = {
+            "url": str(url or "").strip(),
+            "title": str(title or "").strip(),
+            "at": ts,
+        }
+        return {"ok": True, "detail": "已记录当前活动标签页"}
+
+    def _ext_tab(self) -> dict | None:
+        """返回新鲜（120s 内）的扩展标签页数据；无或过期返回 None。"""
+        tab = getattr(self, "_ext_tab", None)
+        if not tab:
+            return None
+        if time.time() - float(tab.get("at") or 0) > web_ui._EXT_ONLINE_WINDOW:
+            return None
+        return tab
+
     def _panel_status(self) -> dict:
         """面板状态接口：浏览器接入状态 + B站绑定状态 + 扩展通道状态（纯本地，无网络）。"""
         cookie = os.environ.get("BILI_COOKIE", "") or ""
         source = getattr(self, "_cookie_source", _COOKIE_SOURCE_NONE)
         monitor = getattr(self, "_browser_monitor", None) or self._monitor_browser()
         ext_online = (time.time() - self._ext_last_seen()) < web_ui._EXT_ONLINE_WINDOW
+        tab = self._ext_tab()
         return {
             "ok": True,
             "browser": monitor.get("detail", "未接入"),
@@ -828,6 +861,7 @@ class BiliViewerPlugin(NekoPluginBase):
             "cookie_source": source,
             "extension_online": ext_online,
             "extension_last_seen": int(self._ext_last_seen()),
+            "current_tab": tab,
             "uname": "",
         }
 
@@ -843,7 +877,12 @@ class BiliViewerPlugin(NekoPluginBase):
     def _ensure_panel(self) -> tuple[str, bool]:
         panel = getattr(self, "_bind_panel", None)
         if panel is None:
-            panel = web_ui.BindPanel(self._panel_status, self._panel_bind, ext_fn=self._receive_ext_cookie)
+            panel = web_ui.BindPanel(
+                self._panel_status,
+                self._panel_bind,
+                ext_fn=self._receive_ext_cookie,
+                tab_fn=self._receive_ext_tab,
+            )
             self._bind_panel = panel
         return panel.ensure_started()
 

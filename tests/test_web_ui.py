@@ -128,3 +128,34 @@ def test_panel_stop_releases_port(monkeypatch, tmp_path):
         assert url2 == f"http://127.0.0.1:{port}/"
     finally:
         panel2.stop()
+
+
+def test_panel_extension_tab_endpoint(monkeypatch, tmp_path):
+    """扩展标签页端点：POST /api/extension-tab → tab_fn 回调收到 url/title/at。"""
+    web_ui = _web_ui()
+    received = []
+
+    def tab_fn(url, title, at):
+        received.append((url, title, at))
+        return {"ok": True}
+
+    panel = web_ui.BindPanel(
+        lambda *_: {"ok": True},
+        lambda *_: {"ok": True},
+        ext_fn=lambda *_: {"ok": True},
+        tab_fn=tab_fn,
+        port=_free_port(),
+    )
+    _url, started = panel.ensure_started()
+    assert started is True
+    port = panel._port
+    try:
+        r = _http_json(
+            f"http://127.0.0.1:{port}/api/extension-tab",
+            "POST",
+            {"url": "https://www.bilibili.com/video/BV1GJ411x7h7", "title": "测试_哔哩哔哩", "at": 123456},
+        )
+        assert r.get("ok") is True
+        assert received == [("https://www.bilibili.com/video/BV1GJ411x7h7", "测试_哔哩哔哩", 123456)]
+    finally:
+        panel.stop()
