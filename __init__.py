@@ -219,24 +219,39 @@ class BiliViewerPlugin(NekoPluginBase):
             cfg = {}
         cookie = _apply_cookie_from_config(cfg, os.environ)
         source = _COOKIE_SOURCE_MANUAL if cookie else _COOKIE_SOURCE_NONE
+        _status = cdp_cookie._STATUS_FAIL  # CDP 探测结果：未授权/异常时不会走文件兜底
         # 2) 未手动配置且用户已授权 → CDP 运行时接入：直接连正在运行的浏览器
         #    （静默探测：仅复用已开启的调试实例，不启动/不关闭任何浏览器；
-        #    总预算 6s，超时则跳过自动绑定，绝不影响插件启动）
+        #    总预算 5s，超时则跳过自动绑定，绝不影响插件启动）
         if not cookie and _allow_cookie_scan(cfg):
             try:
                 _status, auto_cookie, _detail = await asyncio.wait_for(
                     asyncio.to_thread(cdp_cookie.bind_via_cdp, False),
-                    timeout=6.0,
+                    timeout=5.0,
                 )
             except Exception:
                 _status, auto_cookie, _detail = cdp_cookie._STATUS_FAIL, "", "CDP 接入超时/异常"
             if auto_cookie and "SESSDATA=" in auto_cookie:
                 cookie = auto_cookie
                 source = _COOKIE_SOURCE_AUTO
-        # 3) CDP 不可用且浏览器已关闭 → 文件路径兜底检测
-        if not cookie and _allow_cookie_scan(cfg):
-            status, auto_cookie, _detail = cookie_auto.detect_bili_cookie()
-            if auto_cookie:
+        # 3) 仅当 CDP 明确探测到“浏览器完全未运行”时才做文件路径兜底检测
+        #    （浏览器运行中 Cookies 库被独占锁定，同步读库会阻塞 startup——绝不在事件循环里直跑；
+        #    线程化 + 3s 预算，超时跳过）
+        if (
+            not cookie
+            and _allow_cookie_scan(cfg)
+            and _status == cdp_cookie._STATUS_NO_BROWSER
+        ):
+            try:
+                _fstatus, auto_cookie, _detail = await asyncio.wait_for(
+                    asyncio.to_thread(cookie_auto.detect_bili_cookie),
+                    timeout=3.0,
+                )
+                if _fstatus != cookie_auto._STATUS_BOUND:
+                    auto_cookie = ""
+            except Exception:
+                auto_cookie = ""
+            if auto_cookie and "SESSDATA=" in auto_cookie:
                 cookie = auto_cookie
                 source = _COOKIE_SOURCE_AUTO
         if cookie:
