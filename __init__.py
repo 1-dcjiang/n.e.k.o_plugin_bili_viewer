@@ -107,12 +107,13 @@ def _sync_text(parsed: dict) -> str | None:
     if parsed.get("is_bili"):
         label = "直播" if kind == "live" else "视频"
         subject = parsed.get("subject") or "未知内容"
-        # 附带精确标识：直播给房间号（YUI 可直接发弹幕/查详情）、视频给 BV 号
+        # 附带精确标识：直播给房间号（YUI 可直接发弹幕/查详情）、视频给 BV 号。
+        # 明确指示这些编号仅供内部操作（发弹幕/查详情），不要向用户复述出来。
         extra = ""
         if kind == "live" and parsed.get("room_id"):
-            extra = f"，房间号 {parsed['room_id']}"
+            extra = f"，房间号 {parsed['room_id']}（该编号仅供发弹幕等内部操作，请勿向用户复述）"
         elif kind == "video" and parsed.get("bvid"):
-            extra = f"，BV号 {parsed['bvid']}"
+            extra = f"，BV号 {parsed['bvid']}（该编号仅供发弹幕等内部操作，请勿向用户复述）"
         return f"（实时感知：用户当前正在看 B站{label}「{subject}」{extra}）"
     if parsed.get("site"):
         return f"（实时感知：用户当前正在用 {parsed['site']}，页面「{parsed.get('subject') or '未知'}」）"
@@ -660,7 +661,8 @@ class BiliViewerPlugin(NekoPluginBase):
             "'我现在在看XX/我切视频了/跟着我看/看看我现在在干嘛/我正开着什么'时。"
             "返回 app（进程）、window（窗口标题）、site（站点：bilibili/zhihu/weibo/youtube/steam 等）、"
             "subject（页面/窗口主题）、kind（video/live/web/app）；若在 B站视频/直播页会自动匹配视频详情"
-            "（标题/UP主/播放/弹幕/BV号/简介）。"
+            "（标题/UP主/播放/弹幕/BV号/简介）。注意：BV号/房间号等编号仅供发弹幕/查详情等内部操作使用，"
+            "回复用户时无需复述编号本身。"
         ),
         parameters={
             "type": "object",
@@ -776,7 +778,7 @@ class BiliViewerPlugin(NekoPluginBase):
             "配合 bili_live_danmaku 采集实时弹幕、理解后再回复。"
             "参数 room：房间号或链接；text：弹幕内容（最长 30 字）。"
             "这是写操作：需要配置 BILI_COOKIE（含 bili_jct 与 SESSDATA）环境变量，"
-            "且仅在用户明确确认后调用。"
+            "且仅在用户明确确认后调用。发送后回复用户时无需复述房间号。"
         ),
         parameters={
             "type": "object",
@@ -810,7 +812,7 @@ class BiliViewerPlugin(NekoPluginBase):
             "参数 bvid：视频 BV 号；text：弹幕内容（最长 100 字）；"
             "progress：弹幕出现的时间点（秒，可选，默认 0 即视频开头）。"
             "这是写操作：需要配置 BILI_COOKIE（含 bili_jct 与 SESSDATA）环境变量，"
-            "且仅在用户明确确认后调用。"
+            "且仅在用户明确确认后调用。发送后回复用户时无需复述 BV 号。"
         ),
         parameters={
             "type": "object",
