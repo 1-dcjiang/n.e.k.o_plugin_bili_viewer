@@ -1,11 +1,12 @@
-"""bili_viewer 自动绑定：读取本机 Chrome/Edge 已登录的 B站 Cookie。
+"""bili_viewer 自动绑定：读取本机 Chrome/Edge 已登录的 B站 Cookie（文件路径兜底）。
+
+说明：主路径为 CDP 运行时接入（见 cdp_cookie.py，浏览器保持运行、绝不关闭）。
+本模块仅在浏览器完全未运行时作为文件路径兜底检测，用于读取 v10 加密的 Cookie
+（Chrome v20 App-Bound 加密离线不可解，届时以 CDP 为准）。
 
 - 仅本地读取（浏览器 Cookies 数据库），无网络传输、不写日志、不上传；
 - 解密走 Windows 系统 API（Crypt32 DPAPI + BCrypt AES-256-GCM），零第三方依赖；
-- 浏览器运行中 Cookies 文件被浏览器独占锁定时返回 "locked"，提示用户关闭浏览器后重试；
-- 浏览器窗口关闭但后台进程仍在运行（Chrome 后台应用 / Edge 启动增强）也会判定为 "locked"，
-  提示用户在任务管理器结束 chrome.exe/msedge.exe 进程；
-- 浏览器已关闭但数据库仍打不开时返回 "fail"（数据库异常/权限不足），不再误报为 "locked"；
+- 浏览器运行中 Cookies 文件被独占锁定时返回 "locked"（提示直接让 YUI 接入浏览器，无需关闭）；
 - 浏览器未登录 B站时返回 "not_logged_in"（只有游客 Cookie，无 SESSDATA 则无登录态）。
 """
 
@@ -17,14 +18,10 @@ import json
 import os
 import sqlite3
 import subprocess
-import time
 from ctypes import wintypes
 
 __all__ = [
     "detect_bili_cookie",
-    "detect_after_kill",
-    "bind_and_restart_browser",
-    "kill_browser_processes",
     "AUTO_COOKIE_SOURCES",
     "STATUS_TEXT",
 ]
@@ -55,7 +52,7 @@ _STATUS_FAIL = "fail"             # 其他失败（数据库异常/解密异常�
 
 STATUS_TEXT = {
     _STATUS_BOUND: "已自动绑定 B站账号（自动读取浏览器 Cookie）",
-    _STATUS_LOCKED: "浏览器进程仍在运行，Cookie 被锁定。若窗口已关闭仍提示此错误，请打开任务管理器结束 chrome.exe / msedge.exe 进程（Chrome 后台应用、Edge 启动增强会让进程常驻），然后重启客户端或再确认一次",
+    _STATUS_LOCKED: "浏览器进程仍在运行，Cookie 文件被独占锁定。已无需关闭浏览器——直接让 YUI 接入浏览器（CDP 运行时读取）即可",
     _STATUS_NOT_LOGGED_IN: "浏览器未登录 B站（没有登录态 Cookie），请先在浏览器登录一次 bilibili.com",
     _STATUS_NO_BROWSER: "未在本机找到 Chrome/Edge 浏览器数据",
     _STATUS_FAIL: "浏览器已关闭但 Cookie 数据库仍无法读取（可能损坏或权限不足），请修复浏览器数据或改用手动配置",
@@ -69,113 +66,6 @@ AUTO_COOKIE_SOURCES: tuple[tuple[str, str], ...] = (
 
 # 各浏览器对应的进程名（用于区分"浏览器真的在运行"与"数据库异常"）
 _BROWSER_EXES: dict[str, str] = {"Chrome": "chrome.exe", "Edge": "msedge.exe"}
-
-# 各浏览器的可执行文件常见路径（用于自动重启并恢复会话）
-_BROWSER_EXE_PATHS: dict[str, tuple[str, ...]] = {
-    "Chrome": (
-        os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
-        os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
-    ),
-    "Edge": (
-        os.path.expandvars(r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"),
-        os.path.expandvars(r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"),
-    ),
-}
-
-# 自动关闭时结束的进程（含崩溃处理进程 crashpad_handler，避免残留）
-_KILL_NAMES: tuple[str, ...] = ("chrome.exe", "msedge.exe", "crashpad_handler.exe")
-
-# subprocess 标志：DETACHED_PROCESS | CREATE_NO_WINDOW（自动重启浏览器时不弹黑窗、不阻塞）
-_POPEN_DETACHED = 0x00000008 | 0x08000000
-
-
-def _relaunch_browser(name: str) -> bool:
-    """用原浏览器的可执行文件重启并恢复上次会话。"""
-    for path in _BROWSER_EXE_PATHS.get(name, ()):
-        if os.path.exists(path):
-            try:
-                subprocess.Popen(
-                    [path, "--restore-last-session"],
-                    creationflags=_POPEN_DETACHED,
-                )
-                return True
-            except Exception:
-                continue
-    return False
-
-
-def kill_browser_processes(names: tuple[str, ...] = _KILL_NAMES) -> tuple[bool, str]:
-    """结束浏览器相关进程（taskkill /F /T）。返回 (是否结束过进程, 说明)。
-
-    仅结束 Chrome/Edge 及其崩溃处理进程；进程不存在时 taskkill 返回非 0，不视为失败。
-    """
-    killed_any = False
-    details: list[str] = []
-    for name in names:
-        try:
-            proc = subprocess.run(
-                ["taskkill", "/F", "/T", "/IM", name],
-                capture_output=True,
-                text=True,
-                encoding="gbk",  # Windows 中文系统 taskkill 输出为 GBK
-                errors="replace",
-                timeout=10,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            if proc.returncode == 0:
-                killed_any = True
-                details.append(f"{name} 已结束")
-        except Exception:
-            continue
-    if killed_any:
-        return True, "已自动结束浏览器进程：" + "；".join(details)
-    return False, "未发现需要结束的浏览器进程"
-
-
-def detect_after_kill(times: int = 4, delay: float = 1.0) -> tuple[str, str, str]:
-    """先结束浏览器进程（Chrome/Edge），再重新检测绑定。
-
-    进程结束后文件锁释放需要一点时间，因此带重试；返回与 detect_bili_cookie 相同的
-    (status, cookie_string, detail)。
-    """
-    killed, msg = kill_browser_processes()
-    if not killed:
-        return _STATUS_NO_BROWSER, "", msg
-    for _ in range(max(1, times)):
-        status, cookie, detail = detect_bili_cookie()
-        if status != _STATUS_LOCKED:
-            return status, cookie, detail
-        time.sleep(delay)
-    return _STATUS_LOCKED, "", STATUS_TEXT[_STATUS_LOCKED]
-
-
-def bind_and_restart_browser(times: int = 4, delay: float = 1.0) -> tuple[str, str, str]:
-    """YUI 一键接管：结束浏览器进程 → 读取并绑定 Cookie → 自动重启浏览器恢复会话。
-
-    适用于用户正在用浏览器（Cookie 被锁）且同意由插件临时关闭的场景：
-    - 关闭前记录哪些浏览器在运行；
-    - 读取完成（无论是否绑到）后自动用原浏览器重启并恢复上次会话，用户无感。
-    返回与 detect_bili_cookie 相同的 (status, cookie_string, detail)。
-    """
-    running = [name for name, _ in AUTO_COOKIE_SOURCES if _browser_process_running(_BROWSER_EXES.get(name, name))]
-    killed, msg = kill_browser_processes()
-    if not killed:
-        # 没有可关闭的浏览器进程：直接检测
-        status, cookie, detail = detect_bili_cookie()
-        return status, cookie, detail
-    status = _STATUS_LOCKED
-    cookie, detail = "", ""
-    for _ in range(max(1, times)):
-        status, cookie, detail = detect_bili_cookie()
-        if status != _STATUS_LOCKED:
-            break
-        time.sleep(delay)
-    # 自动把刚才关闭的浏览器拉回来（恢复会话）
-    relaunched = [name for name in running if _relaunch_browser(name)]
-    if not relaunched:
-        # 重启失败：至少告知用户如何手动恢复
-        detail = f"{detail}（已自动关闭浏览器；自动重启未成功，可手动重新打开浏览器）"
-    return status, cookie, detail
 
 
 def _browser_process_running(exe_name: str) -> bool:

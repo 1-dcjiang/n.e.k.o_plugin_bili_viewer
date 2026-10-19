@@ -2,14 +2,14 @@
 enabled = true
 auto_start = true
 
-# ── B站账号接入（推荐方式：自动绑定）────────────────────────────
-# 推荐让 YUI 自动读取本机浏览器（Chrome/Edge）已登录的 B站 Cookie 并绑定：
+# ── B站账号接入（推荐方式：CDP 运行时自动接入）────────────────────
+# 插件通过 CDP 直接连接正在运行的浏览器（Chrome/Edge），读取 B站登录态并绑定：
 #   1. 先在浏览器里登录一次 bilibili.com（扫码/账号均可）
 #   2. 对 YUI 说"允许你读取浏览器 Cookie 绑定 B站账号"，YUI 会调用 bili_bind_account(allow=true)
-#   3. 浏览器进程常驻导致 Cookie 被锁时，可对 YUI 说"允许自动关闭浏览器并绑定"，
-#      插件会自动结束 chrome.exe/msedge.exe 再重试（会关闭浏览器窗口，需你明确同意）
-#   4. 或手动在任务管理器结束 Chrome/Edge 进程后重启 N.E.K.O 客户端
-# 自动读取为本地操作，Cookie 不上传、不写日志、不发给 AI。
+#   3. 之后插件启动即自动静默接入（不关闭/不重启浏览器），并持续监控浏览器接入状态
+#   4. 若浏览器为普通模式（未开启接入端口）：先完全退出浏览器一次，再对 YUI 说"接入浏览器"，
+#      插件将把浏览器以调试模式重新打开（原标签页恢复）并自动完成绑定
+# 读取为本地操作，Cookie 不上传、不写日志、不发给 AI。
 #
 # ── 手动配置（备选）────────────────────────────────────────────
 # 也可把浏览器 F12 → Application → Cookies → bilibili.com 复制的整串 Cookie
@@ -17,5 +17,5 @@ auto_start = true
 # 手动配置优先级高于自动读取。
 [settings]
 bili_cookie = ""
-# 是否允许插件自动读取浏览器 Cookie（true=允许；YUI 询问时回复"允许"即可自动置为 true）
+# 是否允许插件自动接入浏览器读取 Cookie（true=允许；YUI 询问时回复"允许"即可自动置为 true）
 allow_cookie_scan = false

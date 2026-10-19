@@ -223,11 +223,12 @@ def _launch_debug_browser(name: str) -> int | None:
     return None
 
 
-def ensure_debug_browser(force_restart: bool = False, auto_launch: bool = True) -> tuple[int | None, str]:
+def ensure_debug_browser(auto_launch: bool = True) -> tuple[int | None, str]:
     """确保存在可用的调试浏览器实例，返回 (port, detail)。
 
+    全面接入语义：绝不自动关闭/重启浏览器。
     - 已有调试实例 → 直接复用；
-    - 浏览器在运行但无调试端口：force_restart=True 时结束进程并以调试模式重启；
+    - 浏览器在运行但无调试端口：返回一次性设置引导（不自动杀进程）；
     - 浏览器未运行：auto_launch=True 时以调试模式启动（用户主动请求接入的场景）；
       auto_launch=False 时仅探测，不启动任何浏览器（插件自动启动探测用，避免弹窗打扰）。
     """
@@ -238,20 +239,9 @@ def ensure_debug_browser(force_restart: bool = False, auto_launch: bool = True) 
         exe_name = _BROWSER_EXES[name]
         if not os.path.isdir(os.path.join(os.environ.get("LOCALAPPDATA", ""), _BROWSER_DIRS[name])):
             continue
-        if _browser_running(exe_name) and not force_restart:
-            return None, f"{name} 正在运行但未开启调试端口；需要重启浏览器接入（用户同意后自动处理）"
-        if force_restart and _browser_running(exe_name):
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/IM", exe_name],
-                capture_output=True,
-                text=True,
-                encoding="gbk",
-                errors="replace",
-                timeout=10,
-                creationflags=_POPEN_DETACHED,
-            )
-            time.sleep(1.0)
-        if not auto_launch and not _browser_running(exe_name):
+        if _browser_running(exe_name):
+            return None, f"{name} 正在运行但未开启接入端口。接入无需关闭浏览器：首次请先完全退出 {name}（任务管理器确认无 {exe_name} 进程），再对我说'接入浏览器'即可自动完成"
+        if not auto_launch:
             return None, f"{name} 未运行且未开启接入端口（本次为静默探测，不启动浏览器）"
         port = _launch_debug_browser(name)
         if port is not None:
@@ -319,13 +309,13 @@ def get_bili_cookie_via_cdp(port: int) -> tuple[str, str, str]:
         return _STATUS_FAIL, "", f"CDP 读取失败：{str(exc)[:80]}"
 
 
-def bind_via_cdp(force_restart: bool = False, auto_launch: bool = True) -> tuple[str, str, str]:
+def bind_via_cdp(auto_launch: bool = True) -> tuple[str, str, str]:
     """一键接入正在使用的浏览器：确保调试实例 → CDP 读取 B站 Cookie 并绑定。
 
     auto_launch=False 时仅复用已开启的调试实例（静默探测），不主动启动浏览器。
     返回 (status, cookie_string, detail)。
     """
-    port, detail = ensure_debug_browser(force_restart=force_restart, auto_launch=auto_launch)
+    port, detail = ensure_debug_browser(auto_launch=auto_launch)
     if port is None:
         return _STATUS_NO_BROWSER, "", detail
     return get_bili_cookie_via_cdp(port)
