@@ -18,7 +18,7 @@ import time
 
 from plugin.sdk.plugin import NekoPluginBase, lifecycle, llm_tool, neko_plugin
 
-from . import bili, cdp_cookie, cookie_auto
+from . import bili, cdp_cookie, cookie_auto, web_ui
 
 
 def _wrap_err(exc: bili.BiliError) -> dict:
@@ -209,35 +209,49 @@ class BiliViewerPlugin(NekoPluginBase):
 
     # ══════════ 生命周期 ══════════
 
-    def _bg_bind(self) -> None:
-        """后台异步绑定：startup 绝不等待网络，绑定完成后再写入登录态。
+    def _run_bind(self, auto_launch: bool) -> dict:
+        """执行一次浏览器接入绑定（同步），返回面板可读的结果字典。
 
         顺序：CDP 运行时接入（浏览器保持运行）→ 仅当 CDP 明确“浏览器完全未运行”
         时做文件路径兜底（浏览器运行中 Cookies 库被锁，直接跳过）。
-        任何失败/超时都静默，不影响插件运行；bili_bind_status 会现场重探。
+        auto_launch=True（用户主动/面板点击）时允许启动调试实例；False（启动静默
+        探测）时绝不启动浏览器。任何失败都静默降级，bili_bind_status 会现场重探。
         """
+        result: dict = {"ok": False, "detail": "未接入"}
+        try:
+            _status, auto_cookie, _detail = cdp_cookie.bind_via_cdp(auto_launch=auto_launch)
+        except Exception:
+            _status, auto_cookie, _detail = cdp_cookie._STATUS_FAIL, "", "CDP 接入异常"
+        result["detail"] = _detail or "未接入"
+        if auto_cookie and "SESSDATA=" in auto_cookie:
+            os.environ["BILI_COOKIE"] = auto_cookie
+            self._cookie_source = _COOKIE_SOURCE_AUTO
+            result.update({"ok": True, "bound": True, "detail": f"已自动接入 B站登录态（{_detail}）"})
+            return result
+        if _status == cdp_cookie._STATUS_NO_BROWSER:
+            try:
+                _fstatus, _fcookie, _fd = cookie_auto.detect_bili_cookie()
+                if (
+                    _fstatus == cookie_auto._STATUS_BOUND
+                    and _fcookie
+                    and "SESSDATA=" in _fcookie
+                ):
+                    os.environ["BILI_COOKIE"] = _fcookie
+                    self._cookie_source = _COOKIE_SOURCE_AUTO
+                    result.update({"ok": True, "bound": True, "detail": f"已从浏览器数据自动读取 B站登录态（{_fd}）"})
+                    return result
+            except Exception:
+                pass  # 文件兜底失败不致命
+        return result
+
+    def _bg_bind(self) -> None:
+        """后台异步绑定：startup 绝不等待网络，绑定完成后再写入登录态。"""
 
         def _run() -> None:
             try:
-                _status, auto_cookie, _detail = cdp_cookie.bind_via_cdp(auto_launch=False)
+                self._run_bind(auto_launch=False)
             except Exception:
-                _status, auto_cookie, _detail = cdp_cookie._STATUS_FAIL, "", "CDP 接入异常"
-            if auto_cookie and "SESSDATA=" in auto_cookie:
-                os.environ["BILI_COOKIE"] = auto_cookie
-                self._cookie_source = _COOKIE_SOURCE_AUTO
-                return
-            if _status == cdp_cookie._STATUS_NO_BROWSER:
-                try:
-                    _fstatus, _fcookie, _fd = cookie_auto.detect_bili_cookie()
-                    if (
-                        _fstatus == cookie_auto._STATUS_BOUND
-                        and _fcookie
-                        and "SESSDATA=" in _fcookie
-                    ):
-                        os.environ["BILI_COOKIE"] = _fcookie
-                        self._cookie_source = _COOKIE_SOURCE_AUTO
-                except Exception:
-                    pass  # 文件兜底失败不致命
+                pass  # 后台绑定失败不影响插件
 
         threading.Thread(target=_run, name="bili-bg-bind", daemon=True).start()
 
@@ -759,6 +773,65 @@ class BiliViewerPlugin(NekoPluginBase):
         except Exception as exc:
             return {"connected": False, "detail": f"浏览器接入监控异常：{str(exc)[:60]}", "at": time.time()}
 
+    # ── 网页接入面板回调（由 web_ui.BindPanel 注入调用，运行在面板线程） ──
+
+    def _panel_status(self) -> dict:
+        """面板状态接口：浏览器接入状态 + B站绑定状态（纯本地，无网络）。"""
+        cookie = os.environ.get("BILI_COOKIE", "") or ""
+        source = getattr(self, "_cookie_source", _COOKIE_SOURCE_NONE)
+        monitor = getattr(self, "_browser_monitor", None) or self._monitor_browser()
+        return {
+            "ok": True,
+            "browser": monitor.get("detail", "未接入"),
+            "browser_ok": bool(monitor.get("connected")),
+            "bound": "SESSDATA=" in cookie,
+            "cookie_manual": source == _COOKIE_SOURCE_MANUAL,
+            "uname": "",
+        }
+
+    def _panel_bind(self) -> dict:
+        """面板“一键接入”：用户点击即授权启动调试实例并读取登录态。"""
+        result = self._run_bind(auto_launch=True)
+        try:
+            self._browser_monitor = self._monitor_browser()
+        except Exception:
+            pass
+        return result
+
+    def _ensure_panel(self) -> tuple[str, bool]:
+        panel = getattr(self, "_bind_panel", None)
+        if panel is None:
+            panel = web_ui.BindPanel(self._panel_status, self._panel_bind)
+            self._bind_panel = panel
+        return panel.ensure_started()
+
+    @llm_tool(
+        name="bili_bind_web",
+        description=(
+            "打开 B站接入面板（本地网页）：YUI 或用户通过网页完成浏览器接入与 B站绑定，"
+            "完全绕开本地进程状态判断——浏览器残留进程（crashpad/后台 chrome.exe 等）不再阻挡接入。"
+            "何时用：用户说'通过网页接入浏览器/网页方式绑定/打开接入面板/自动绑定又不行'时。"
+            "面板功能：一键启动调试浏览器并读取 B站登录态（不关闭/不删除任何东西）、"
+            "实时显示浏览器接入与绑定状态。调用后返回本地面板地址，提示用户打开并点'一键接入'；"
+            "若浏览器已开启接入端口则已自动绑定。"
+        ),
+        parameters={"type": "object", "properties": {}, "required": []},
+        timeout=20.0,
+    )
+    async def bili_bind_web(self, **_):
+        url, started = self._ensure_panel()
+        # 顺带触发一次后台静默接入（仅复用已开启的调试端口，不启动浏览器）
+        self._bg_bind()
+        return {
+            "output": (
+                f"已打开 B站接入面板：{url}。请在浏览器打开该地址，点'一键接入'完成绑定；"
+                "若浏览器已开启接入端口则已自动绑定，刷新面板可见状态。"
+            ),
+            "is_error": False,
+            "panel_url": url,
+            "started_now": started,
+        }
+
     @llm_tool(
         name="bili_bind_status",
         description=(
@@ -807,7 +880,7 @@ class BiliViewerPlugin(NekoPluginBase):
         if status == cdp_cookie._STATUS_NOT_LOGGED_IN:
             hint = "浏览器里没有有效的 B站登录态（可能已过期或未登录）：请先打开浏览器登录一次 bilibili.com，再对我说'绑定好了'。"
         elif status == cdp_cookie._STATUS_NO_BROWSER:
-            hint = "浏览器未开启接入端口。接入无需关闭浏览器：首次请先完全退出浏览器一次，再对我说'接入浏览器'即可自动完成。"
+            hint = "已尝试以调试模式启动浏览器但未成功：默认配置的浏览器正在使用中，无法再开一个调试实例。请先完全退出浏览器一次（结束 chrome.exe/msedge.exe，残留后台进程会一并退出），再对我说'接入浏览器'或让我打开接入面板一键接入。"
         elif status == cdp_cookie._STATUS_FAIL:
             hint = f"接入检测未完成（{detail}）。"
         return {
@@ -823,12 +896,11 @@ class BiliViewerPlugin(NekoPluginBase):
     @llm_tool(
         name="bili_bind_account",
         description=(
-            "接入 B站账号（全面 CDP 运行时接入）：让插件直接连接正在运行的浏览器（Chrome/Edge）读取 B站登录态并绑定，"
-            "绝不关闭/重启浏览器；绑定后保持监控浏览器接入状态。"
+            "接入 B站账号（全面 CDP 运行时接入，不依赖进程状态判断）：让插件连接浏览器读取 B站登录态并绑定，"
+            "绝不关闭/重启浏览器，浏览器残留进程不会阻挡接入（会直接尝试以调试模式启动；"
+            "仅当默认配置的浏览器正被占用、无法再开调试实例时才提示先退出一次）。"
             "何时用：用户说'允许你读取浏览器Cookie/接我的B站账号/绑定账号/确认/绑定好了/接入浏览器'时。"
             "参数 allow（必填布尔）：true=用户已授权自动读取（写入一次永久生效），false=拒绝。"
-            "若浏览器未开启接入端口（普通模式运行），插件不会动你的浏览器，只会提示：先完全退出浏览器一次，"
-            "再说'接入浏览器'，插件将以调试模式重新打开并自动完成绑定（原标签页恢复）。"
             "若检测到浏览器未登录/登录态过期，会提示用户先登录 bilibili.com。"
             "这是本地操作：CDP 仅绑定 127.0.0.1，Cookie 不上传、不写日志。"
         ),

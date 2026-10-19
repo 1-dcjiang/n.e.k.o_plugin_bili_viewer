@@ -30,7 +30,7 @@ def test_ensure_reuses_existing_debug_port(monkeypatch, tmp_path):
 
 
 def test_ensure_never_kills_running_browser(monkeypatch, tmp_path):
-    """浏览器普通模式运行且无端口：绝不结束进程，仅给一次性设置引导。"""
+    """浏览器占用中且无端口：绝不结束进程，尝试启动失败后仅给一次性设置引导。"""
     cdp_cookie = _cdp()
     _setup_browser_dirs(monkeypatch, tmp_path)
     killed = []
@@ -40,16 +40,16 @@ def test_ensure_never_kills_running_browser(monkeypatch, tmp_path):
         return type("P", (), {"returncode": 0})()
 
     monkeypatch.setattr(cdp_cookie, "_find_debug_port", lambda: None)
-    monkeypatch.setattr(cdp_cookie, "_browser_running", lambda name: True)
+    monkeypatch.setattr(cdp_cookie, "_launch_debug_browser", lambda name: None)  # profile 被占用 → 启动失败
     monkeypatch.setattr(cdp_cookie.subprocess, "run", _fake_kill)
     port, detail = cdp_cookie.ensure_debug_browser(auto_launch=True)
     assert port is None
     assert "taskkill" not in detail and killed == []  # 没有发起任何结束进程操作
-    assert "首次请先完全退出" in detail  # 提示一次性设置引导
+    assert "请先完全退出浏览器一次" in detail  # 提示一次性设置引导
 
 
 def test_ensure_silent_probe_does_not_launch(monkeypatch, tmp_path):
-    """auto_launch=False（插件启动静默探测）：浏览器未运行时不启动任何浏览器。"""
+    """auto_launch=False（插件启动静默探测）：无论浏览器状态如何都不启动任何浏览器。"""
     cdp_cookie = _cdp()
     _setup_browser_dirs(monkeypatch, tmp_path)
     launched = []
@@ -59,7 +59,6 @@ def test_ensure_silent_probe_does_not_launch(monkeypatch, tmp_path):
         return 9333
 
     monkeypatch.setattr(cdp_cookie, "_find_debug_port", lambda: None)
-    monkeypatch.setattr(cdp_cookie, "_browser_running", lambda name: False)
     monkeypatch.setattr(cdp_cookie, "_launch_debug_browser", _fake_launch)
     port, detail = cdp_cookie.ensure_debug_browser(auto_launch=False)
     assert port is None
@@ -68,12 +67,11 @@ def test_ensure_silent_probe_does_not_launch(monkeypatch, tmp_path):
 
 
 def test_ensure_launches_when_user_requests(monkeypatch, tmp_path):
-    """用户主动请求接入（auto_launch=True）且浏览器未运行 → 启动调试实例。"""
+    """用户主动请求接入（auto_launch=True）且无调试端口 → 直接尝试启动调试实例（不检查进程）。"""
     cdp_cookie = _cdp()
     _setup_browser_dirs(monkeypatch, tmp_path)
     launched = []
     monkeypatch.setattr(cdp_cookie, "_find_debug_port", lambda: None)
-    monkeypatch.setattr(cdp_cookie, "_browser_running", lambda name: False)
     monkeypatch.setattr(cdp_cookie, "_launch_debug_browser", lambda name: (launched.append(name) or 9333))
     port, detail = cdp_cookie.ensure_debug_browser(auto_launch=True)
     assert port == 9333

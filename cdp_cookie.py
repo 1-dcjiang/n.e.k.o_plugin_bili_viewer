@@ -170,22 +170,6 @@ def _http_json(url: str, timeout: float = 5.0) -> dict | None:
         return None
 
 
-def _browser_running(exe_name: str) -> bool:
-    try:
-        proc = subprocess.run(
-            ["tasklist", "/FI", f"IMAGENAME eq {exe_name}", "/FO", "CSV", "/NH"],
-            capture_output=True,
-            text=True,
-            encoding="gbk",
-            errors="replace",
-            timeout=5,
-            creationflags=_POPEN_DETACHED,
-        )
-        return exe_name.lower() in proc.stdout.lower()
-    except Exception:
-        return True
-
-
 def _find_debug_port() -> int | None:
     for port in range(_DEBUG_PORT_BASE, _DEBUG_PORT_MAX):
         if _http_json(f"http://127.0.0.1:{port}/json/version", timeout=1.0) is not None:
@@ -194,7 +178,12 @@ def _find_debug_port() -> int | None:
 
 
 def _launch_debug_browser(name: str) -> int | None:
-    """以调试模式启动浏览器（复用原 profile），返回调试端口；失败返回 None。"""
+    """以调试模式启动浏览器（复用原 profile），返回调试端口；失败返回 None。
+
+    不检查进程状态：残留进程（crashpad/后台 chrome.exe 等）不再阻挡接入。
+    Chrome 单实例保护下，若默认 profile 正被实例占用，新进程会自行退出
+    （快速失败、无副作用），此时返回 None 并给出引导即可。
+    """
     exe = next((p for p in _BROWSER_EXE_PATHS.get(name, ()) if os.path.exists(p)), None)
     if not exe:
         return None
@@ -215,9 +204,10 @@ def _launch_debug_browser(name: str) -> int | None:
             )
         except Exception:
             continue
-        for _ in range(40):
+        # 短轮询（最多 8s）：正常 1-3s 内端口就绪；启动失败（profile 被占）则快速放弃
+        for _ in range(16):
             time.sleep(0.5)
-            if _http_json(f"http://127.0.0.1:{port}/json/version") is not None:
+            if _http_json(f"http://127.0.0.1:{port}/json/version", timeout=0.5) is not None:
                 return port
         # 该端口启动失败（可能被占），换下一个端口
     return None
@@ -226,11 +216,14 @@ def _launch_debug_browser(name: str) -> int | None:
 def ensure_debug_browser(auto_launch: bool = True) -> tuple[int | None, str]:
     """确保存在可用的调试浏览器实例，返回 (port, detail)。
 
-    全面接入语义：绝不自动关闭/重启浏览器。
+    全面接入语义：绝不自动关闭/重启浏览器；**不做进程状态判断**——
+    残留进程不再阻挡接入（直接尝试以调试模式启动，Chrome 单实例保护会
+    自行拒绝 profile 已被占用的情况，插件只做快速尝试与降级提示）。
     - 已有调试实例 → 直接复用；
-    - 浏览器在运行但无调试端口：返回一次性设置引导（不自动杀进程）；
-    - 浏览器未运行：auto_launch=True 时以调试模式启动（用户主动请求接入的场景）；
-      auto_launch=False 时仅探测，不启动任何浏览器（插件自动启动探测用，避免弹窗打扰）。
+    - 无调试实例：
+      auto_launch=True（用户主动请求接入/在网页面板点击接入）→ 直接尝试启动调试实例；
+      若 profile 正被占用导致启动失败 → 返回一次性设置引导；
+      auto_launch=False（插件启动静默探测）→ 仅探测已开端口，不启动任何浏览器。
     """
     port = _find_debug_port()
     if port is not None:
@@ -239,13 +232,17 @@ def ensure_debug_browser(auto_launch: bool = True) -> tuple[int | None, str]:
         exe_name = _BROWSER_EXES[name]
         if not os.path.isdir(os.path.join(os.environ.get("LOCALAPPDATA", ""), _BROWSER_DIRS[name])):
             continue
-        if _browser_running(exe_name):
-            return None, f"{name} 正在运行但未开启接入端口。接入无需关闭浏览器：首次请先完全退出 {name}（任务管理器确认无 {exe_name} 进程），再对我说'接入浏览器'即可自动完成"
         if not auto_launch:
-            return None, f"{name} 未运行且未开启接入端口（本次为静默探测，不启动浏览器）"
+            return None, f"{name} 未开启接入端口（本次为静默探测，不启动浏览器）"
         port = _launch_debug_browser(name)
         if port is not None:
             return port, f"已启动 {name} 调试实例（浏览器保持运行）"
+        return None, (
+            f"{name} 正在使用中且未开启接入端口：默认配置的 {exe_name} 已在运行，"
+            "无法再开一个调试实例。接入无需删除任何东西：请先完全退出浏览器一次"
+            "（任务管理器结束 chrome.exe/msedge.exe 即可，残留后台进程也会一并退出），"
+            "再对我说'接入浏览器'或刷新接入面板点'一键接入'。"
+        )
     return None, "未找到 Chrome/Edge 浏览器"
 
 
