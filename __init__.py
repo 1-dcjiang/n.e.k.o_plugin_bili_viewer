@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import threading
 import time
@@ -219,12 +220,16 @@ class BiliViewerPlugin(NekoPluginBase):
         cookie = _apply_cookie_from_config(cfg, os.environ)
         source = _COOKIE_SOURCE_MANUAL if cookie else _COOKIE_SOURCE_NONE
         # 2) 未手动配置且用户已授权 → CDP 运行时接入：直接连正在运行的浏览器
-        #    （静默探测：仅复用已开启的调试实例，不启动/不关闭任何浏览器）
+        #    （静默探测：仅复用已开启的调试实例，不启动/不关闭任何浏览器；
+        #    总预算 6s，超时则跳过自动绑定，绝不影响插件启动）
         if not cookie and _allow_cookie_scan(cfg):
             try:
-                _status, auto_cookie, _detail = cdp_cookie.bind_via_cdp(auto_launch=False)
+                _status, auto_cookie, _detail = await asyncio.wait_for(
+                    asyncio.to_thread(cdp_cookie.bind_via_cdp, False),
+                    timeout=6.0,
+                )
             except Exception:
-                _status, auto_cookie, _detail = cdp_cookie._STATUS_FAIL, "", "CDP 接入异常"
+                _status, auto_cookie, _detail = cdp_cookie._STATUS_FAIL, "", "CDP 接入超时/异常"
             if auto_cookie and "SESSDATA=" in auto_cookie:
                 cookie = auto_cookie
                 source = _COOKIE_SOURCE_AUTO
@@ -754,10 +759,10 @@ class BiliViewerPlugin(NekoPluginBase):
         cookie = os.environ.get("BILI_COOKIE", "") or ""
         source = getattr(self, "_cookie_source", _COOKIE_SOURCE_NONE)
         summary = _cookie_summary(cookie)
-        # 浏览器接入监控（最近一次探测结果 + 现场刷新）
+        # 浏览器接入监控（最近一次探测结果 + 现场刷新；线程化避免阻塞事件循环）
         monitor = getattr(self, "_browser_monitor", None) or self._monitor_browser()
         try:
-            monitor = self._monitor_browser()
+            monitor = await asyncio.wait_for(asyncio.to_thread(self._monitor_browser), timeout=6.0)
         except Exception:
             pass
         self._browser_monitor = monitor
@@ -771,11 +776,14 @@ class BiliViewerPlugin(NekoPluginBase):
                 "browser_connected": monitor.get("connected"),
                 "browser_detail": monitor.get("detail"),
             }
-        # 未绑定：优先通过 CDP 检测运行中的浏览器
+        # 未绑定：优先通过 CDP 检测运行中的浏览器（线程化 + 8s 预算，不阻塞事件循环）
         try:
-            status, auto_cookie, detail = cdp_cookie.bind_via_cdp(auto_launch=False)
+            status, auto_cookie, detail = await asyncio.wait_for(
+                asyncio.to_thread(cdp_cookie.bind_via_cdp, False),
+                timeout=8.0,
+            )
         except Exception:
-            status, auto_cookie, detail = cdp_cookie._STATUS_FAIL, "", "CDP 检测异常"
+            status, auto_cookie, detail = cdp_cookie._STATUS_FAIL, "", "CDP 检测超时/异常"
         if auto_cookie and "SESSDATA=" in auto_cookie:
             os.environ["BILI_COOKIE"] = auto_cookie
             self._cookie_source = _COOKIE_SOURCE_AUTO
@@ -835,11 +843,15 @@ class BiliViewerPlugin(NekoPluginBase):
             await self.config.update({_CONFIG_SECTION: new_section})
         except Exception:
             pass  # 授权写入失败不阻塞本次绑定（下次启动需重新授权）
-        # 1) CDP 运行时接入：直接连正在运行的浏览器（用户主动请求时允许启动调试实例，绝不杀进程）
+        # 1) CDP 运行时接入：直接连正在运行的浏览器（用户主动请求时允许启动调试实例，绝不杀进程；
+        #    线程化 + 10s 预算，避免阻塞事件循环）
         try:
-            status, cookie, detail = cdp_cookie.bind_via_cdp(auto_launch=True)
+            status, cookie, detail = await asyncio.wait_for(
+                asyncio.to_thread(cdp_cookie.bind_via_cdp, True),
+                timeout=10.0,
+            )
         except Exception:
-            status, cookie, detail = cdp_cookie._STATUS_FAIL, "", "CDP 接入异常"
+            status, cookie, detail = cdp_cookie._STATUS_FAIL, "", "CDP 接入超时/异常"
         if cookie and "SESSDATA=" in cookie:
             os.environ["BILI_COOKIE"] = cookie
             self._cookie_source = _COOKIE_SOURCE_AUTO

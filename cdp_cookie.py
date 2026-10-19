@@ -71,7 +71,7 @@ _KEEP_NAMES = (
 # ══════════ 极简 WebSocket 客户端（仅客户端帧 + 文本） ══════════
 
 
-def _ws_connect(ws_url: str, timeout: float = 10.0):
+def _ws_connect(ws_url: str, timeout: float = 5.0):
     u = ws_url.replace("ws://", "http://").replace("wss://", "https://")
     parsed = urllib.parse.urlsplit(u)
     host, port = parsed.hostname, parsed.port or 80
@@ -111,7 +111,7 @@ def _ws_send(sock, payload: bytes) -> None:
     sock.sendall(header + mask + masked)
 
 
-def _ws_recv(sock, timeout: float = 15.0) -> bytes:
+def _ws_recv(sock, timeout: float = 4.0) -> bytes:
     sock.settimeout(timeout)
 
     def _read_exact(n: int) -> bytes:
@@ -143,7 +143,7 @@ def _ws_recv(sock, timeout: float = 15.0) -> bytes:
     return data
 
 
-def _cdp_call(ws_url: str, method: str, params: dict | None = None, timeout: float = 20.0) -> dict:
+def _cdp_call(ws_url: str, method: str, params: dict | None = None, timeout: float = 4.0) -> dict:
     sock = _ws_connect(ws_url)
     try:
         _ws_send(sock, json.dumps({"id": 1, "method": method, "params": params or {}}).encode())
@@ -188,7 +188,7 @@ def _browser_running(exe_name: str) -> bool:
 
 def _find_debug_port() -> int | None:
     for port in range(_DEBUG_PORT_BASE, _DEBUG_PORT_MAX):
-        if _http_json(f"http://127.0.0.1:{port}/json/version") is not None:
+        if _http_json(f"http://127.0.0.1:{port}/json/version", timeout=1.0) is not None:
             return port
     return None
 
@@ -280,13 +280,13 @@ def get_bili_cookie_via_cdp(port: int) -> tuple[str, str, str]:
     Network.getAllCookies 作为 page 会话兜底。
     """
     try:
-        ver = _http_json(f"http://127.0.0.1:{port}/json/version", timeout=5)
+        ver = _http_json(f"http://127.0.0.1:{port}/json/version", timeout=3)
         if not ver or not ver.get("webSocketDebuggerUrl"):
             return _STATUS_FAIL, "", "调试端口无响应"
         browser_ws = ver["webSocketDebuggerUrl"]
 
         def _try(ws: str, method: str) -> str:
-            msg = _cdp_call(ws, method, timeout=20)
+            msg = _cdp_call(ws, method, timeout=3.0)
             if msg.get("error"):
                 return ""
             cookies = msg.get("result", {}).get("cookies", []) or []
@@ -296,7 +296,7 @@ def get_bili_cookie_via_cdp(port: int) -> tuple[str, str, str]:
         if "SESSDATA=" not in cookie:
             cookie = _try(browser_ws, "Browser.getCookies")  # 旧版 Chrome 兼容
         if "SESSDATA=" not in cookie:
-            targets = _http_json(f"http://127.0.0.1:{port}/json/list", timeout=5) or []
+            targets = _http_json(f"http://127.0.0.1:{port}/json/list", timeout=3) or []
             page = next((t for t in targets if t.get("type") == "page"), None)
             if page and page.get("webSocketDebuggerUrl"):
                 cookie = _try(page["webSocketDebuggerUrl"], "Network.getAllCookies")
