@@ -648,6 +648,22 @@ def test_sync_text_live_marks_live() -> None:
     assert t is not None and "B站直播" in t
 
 
+def test_sync_text_live_carries_room_id() -> None:
+    """直播感知文本必须带房间号，YUI 才能直接发弹幕/查详情。"""
+    from plugin.plugins.bili_viewer import _sync_text
+
+    t = _sync_text({"kind": "live", "is_bili": True, "subject": "点播我的卡组", "room_id": "1426057300"})
+    assert t is not None and "房间号 1426057300" in t and "点播我的卡组" in t
+
+
+def test_sync_text_video_carries_bvid() -> None:
+    """视频感知文本带 BV 号，YUI 可直接查详情/弹幕。"""
+    from plugin.plugins.bili_viewer import _sync_text
+
+    t = _sync_text({"kind": "video", "is_bili": True, "subject": "原神 PV", "bvid": "BV1GJ411x7h7"})
+    assert t is not None and "BV号 BV1GJ411x7h7" in t
+
+
 def test_watcher_not_started_without_host(monkeypatch) -> None:
     """无宿主 ctx（测试环境）不启动后台线程。"""
     from plugin.plugins.bili_viewer import BiliViewerPlugin

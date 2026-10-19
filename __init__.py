@@ -107,7 +107,13 @@ def _sync_text(parsed: dict) -> str | None:
     if parsed.get("is_bili"):
         label = "直播" if kind == "live" else "视频"
         subject = parsed.get("subject") or "未知内容"
-        return f"（实时感知：用户当前正在看 B站{label}「{subject}」）"
+        # 附带精确标识：直播给房间号（YUI 可直接发弹幕/查详情）、视频给 BV 号
+        extra = ""
+        if kind == "live" and parsed.get("room_id"):
+            extra = f"，房间号 {parsed['room_id']}"
+        elif kind == "video" and parsed.get("bvid"):
+            extra = f"，BV号 {parsed['bvid']}"
+        return f"（实时感知：用户当前正在看 B站{label}「{subject}」{extra}）"
     if parsed.get("site"):
         return f"（实时感知：用户当前正在用 {parsed['site']}，页面「{parsed.get('subject') or '未知'}」）"
     if kind == "web":
