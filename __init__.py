@@ -749,19 +749,27 @@ class BiliViewerPlugin(NekoPluginBase):
             "接入 B站账号：授权插件自动读取本机浏览器（Chrome/Edge）已登录的 B站 Cookie 并绑定。"
             "何时用：用户说'允许你读取浏览器Cookie/接我的B站账号/绑定账号/确认'时。"
             "参数 allow（必填布尔）：true=用户已授权自动读取（写入一次永久生效），false=拒绝。"
-            "授权后立即检测：浏览器关闭时可直接绑定；浏览器运行中 Cookie 被浏览器锁定，"
-            "会提示用户先关闭 Chrome/Edge 再重试。这是本地读取，无网络传输，Cookie 不上传不写日志。"
+            "参数 force_close（可选布尔）：true=用户同意由插件自动结束浏览器进程（chrome.exe/msedge.exe）"
+            "再重新检测绑定，适合浏览器窗口关了但后台进程仍在（Cookie 被锁）的场景；"
+            "注意会关闭浏览器所有窗口（未保存内容可能丢失），仅在用户明确同意时传 true。"
+            "授权后立即检测：浏览器已关闭时直接绑定；浏览器运行中且未同意自动关闭时，"
+            "提示用户关闭浏览器或同意自动关闭后重试。这是本地操作，无网络传输，Cookie 不上传不写日志。"
         ),
         parameters={
             "type": "object",
-            "properties": {"allow": {"type": "boolean", "description": "用户是否允许自动读取浏览器 Cookie"}},
+            "properties": {
+                "allow": {"type": "boolean", "description": "用户是否允许自动读取浏览器 Cookie"},
+                "force_close": {"type": "boolean", "description": "用户是否同意插件自动结束浏览器进程后重试（可选，默认 false）"},
+            },
             "required": ["allow"],
         },
-        timeout=20.0,
+        timeout=60.0,
     )
-    async def bili_bind_account(self, *, allow: bool = False, **_):
+    async def bili_bind_account(self, *, allow: bool = False, force_close: bool = False, **_):
         params = _.get("parameters") or {}
         allow = bool(allow) if isinstance(allow, bool) else bool(params.get("allow"))
+        if isinstance(force_close, bool) is False:
+            force_close = bool(params.get("force_close"))
         if not allow:
             return {"output": "已保持不读取浏览器 Cookie（仅手动配置可用）。", "is_error": False, "allowed": False}
         # 写入授权（保留已有 settings 其他键）
@@ -780,12 +788,19 @@ class BiliViewerPlugin(NekoPluginBase):
             status, cookie, detail = cookie_auto.detect_bili_cookie()
         except Exception:
             status, cookie, detail = cookie_auto._STATUS_FAIL, "", cookie_auto.STATUS_TEXT[cookie_auto._STATUS_FAIL]
+        if status == cookie_auto._STATUS_LOCKED and force_close:
+            # 用户同意自动关闭浏览器：结束进程后重试绑定
+            try:
+                status, cookie, detail = cookie_auto.detect_after_kill()
+            except Exception:
+                status, cookie, detail = cookie_auto._STATUS_FAIL, "", cookie_auto.STATUS_TEXT[cookie_auto._STATUS_FAIL]
         if cookie:
             os.environ["BILI_COOKIE"] = cookie
             self._cookie_source = _COOKIE_SOURCE_AUTO
             return {"output": f"已授权并自动绑定 B站账号（{detail}）。", "is_error": False, "bound": True, "source": _COOKIE_SOURCE_AUTO}
         return {
-            "output": f"授权已记录（下次启动自动生效）。当前检测：{detail}。若浏览器正在运行，请关闭 Chrome/Edge 后重启客户端，或再对我说一次'确认'重新检测。",
+            "output": f"授权已记录（下次启动自动生效）。当前检测：{detail}"
+            + ("。若同意由插件自动关闭浏览器后重试，可对我说'允许自动关闭浏览器并绑定'。" if status == cookie_auto._STATUS_LOCKED else ""),
             "is_error": True,
             "bound": False,
             "detect_status": status,

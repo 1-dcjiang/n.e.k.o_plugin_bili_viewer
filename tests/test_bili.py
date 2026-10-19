@@ -699,3 +699,56 @@ def test_detect_db_error_when_browser_closed(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(cookie_auto, "_browser_process_running", lambda name: False)  # 浏览器已关
     status, cookie, _ = cookie_auto.detect_bili_cookie()
     assert status == cookie_auto._STATUS_FAIL and cookie == ""
+
+
+def test_kill_browser_processes_uses_taskkill(monkeypatch) -> None:
+    """kill_browser_processes 用 taskkill /F /T 结束浏览器进程，且指定 GBK 编码避免中文系统乱码。"""
+    from plugin.plugins.bili_viewer import cookie_auto
+
+    calls: list[list[str]] = []
+    kw_seen: list[dict] = []
+    fake = type("P", (), {"returncode": 0})()
+    monkeypatch.setattr(
+        cookie_auto.subprocess,
+        "run",
+        lambda cmd, **kw: (calls.append(cmd) or kw_seen.append(kw) or fake),
+    )
+    ok, msg = cookie_auto.kill_browser_processes(("chrome.exe", "msedge.exe"))
+    assert ok and "已自动结束" in msg
+    assert calls == [["taskkill", "/F", "/T", "/IM", "chrome.exe"], ["taskkill", "/F", "/T", "/IM", "msedge.exe"]]
+    assert all(k.get("encoding") == "gbk" and k.get("errors") == "replace" for k in kw_seen)
+
+
+def test_kill_browser_processes_no_match(monkeypatch) -> None:
+    """没有浏览器进程时 taskkill 返回非 0 → 不视为失败。"""
+    from plugin.plugins.bili_viewer import cookie_auto
+
+    fake = type("P", (), {"returncode": 128})()
+    monkeypatch.setattr(cookie_auto.subprocess, "run", lambda cmd, **kw: fake)
+    ok, msg = cookie_auto.kill_browser_processes(("chrome.exe",))
+    assert not ok and "未发现" in msg
+
+
+def test_detect_after_kill_retries(monkeypatch) -> None:
+    """自动关闭后：第一次仍 locked，重试后绑定成功。"""
+    from plugin.plugins.bili_viewer import cookie_auto
+
+    monkeypatch.setattr(cookie_auto, "kill_browser_processes", lambda names=(): (True, "已结束"))
+    seq = [cookie_auto._STATUS_LOCKED, cookie_auto._STATUS_BOUND]
+    monkeypatch.setattr(
+        cookie_auto,
+        "detect_bili_cookie",
+        lambda: (seq.pop(0), "SESSDATA=abc; bili_jct=xyz", "ok"),
+    )
+    status, cookie, _ = cookie_auto.detect_after_kill(times=3, delay=0)
+    assert status == cookie_auto._STATUS_BOUND and "SESSDATA" in cookie
+
+
+def test_detect_after_kill_still_locked(monkeypatch) -> None:
+    """自动关闭并重试后仍 locked → 返回锁定状态。"""
+    from plugin.plugins.bili_viewer import cookie_auto
+
+    monkeypatch.setattr(cookie_auto, "kill_browser_processes", lambda names=(): (True, "已结束"))
+    monkeypatch.setattr(cookie_auto, "detect_bili_cookie", lambda: (cookie_auto._STATUS_LOCKED, "", "锁"))
+    status, cookie, _ = cookie_auto.detect_after_kill(times=2, delay=0)
+    assert status == cookie_auto._STATUS_LOCKED and cookie == ""

@@ -6,8 +6,9 @@ auto_start = true
 # 推荐让 YUI 自动读取本机浏览器（Chrome/Edge）已登录的 B站 Cookie 并绑定：
 #   1. 先在浏览器里登录一次 bilibili.com（扫码/账号均可）
 #   2. 对 YUI 说"允许你读取浏览器 Cookie 绑定 B站账号"，YUI 会调用 bili_bind_account(allow=true)
-#   3. 之后关闭 Chrome/Edge，重启 N.E.K.O 客户端即可自动绑定（授权只确认一次，永久生效）
-# 注意：浏览器运行中 Cookie 文件被浏览器独占锁定，插件读不到；需先关闭浏览器再重启客户端。
+#   3. 浏览器进程常驻导致 Cookie 被锁时，可对 YUI 说"允许自动关闭浏览器并绑定"，
+#      插件会自动结束 chrome.exe/msedge.exe 再重试（会关闭浏览器窗口，需你明确同意）
+#   4. 或手动在任务管理器结束 Chrome/Edge 进程后重启 N.E.K.O 客户端
 # 自动读取为本地操作，Cookie 不上传、不写日志、不发给 AI。
 #
 # ── 手动配置（备选）────────────────────────────────────────────

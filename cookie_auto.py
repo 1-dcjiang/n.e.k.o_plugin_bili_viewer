@@ -17,9 +17,10 @@ import json
 import os
 import sqlite3
 import subprocess
+import time
 from ctypes import wintypes
 
-__all__ = ["detect_bili_cookie", "AUTO_COOKIE_SOURCES", "STATUS_TEXT"]
+__all__ = ["detect_bili_cookie", "detect_after_kill", "kill_browser_processes", "AUTO_COOKIE_SOURCES", "STATUS_TEXT"]
 
 # 需要保留的 Cookie 名称（含登录态与风控所需）
 _KEEP_NAMES = (
@@ -62,6 +63,54 @@ AUTO_COOKIE_SOURCES: tuple[tuple[str, str], ...] = (
 # 各浏览器对应的进程名（用于区分"浏览器真的在运行"与"数据库异常"）
 _BROWSER_EXES: dict[str, str] = {"Chrome": "chrome.exe", "Edge": "msedge.exe"}
 
+# 自动关闭时结束的进程（含崩溃处理进程 crashpad_handler，避免残留）
+_KILL_NAMES: tuple[str, ...] = ("chrome.exe", "msedge.exe", "crashpad_handler.exe")
+
+
+def kill_browser_processes(names: tuple[str, ...] = _KILL_NAMES) -> tuple[bool, str]:
+    """结束浏览器相关进程（taskkill /F /T）。返回 (是否结束过进程, 说明)。
+
+    仅结束 Chrome/Edge 及其崩溃处理进程；进程不存在时 taskkill 返回非 0，不视为失败。
+    """
+    killed_any = False
+    details: list[str] = []
+    for name in names:
+        try:
+            proc = subprocess.run(
+                ["taskkill", "/F", "/T", "/IM", name],
+                capture_output=True,
+                text=True,
+                encoding="gbk",  # Windows 中文系统 taskkill 输出为 GBK
+                errors="replace",
+                timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if proc.returncode == 0:
+                killed_any = True
+                details.append(f"{name} 已结束")
+        except Exception:
+            continue
+    if killed_any:
+        return True, "已自动结束浏览器进程：" + "；".join(details)
+    return False, "未发现需要结束的浏览器进程"
+
+
+def detect_after_kill(times: int = 4, delay: float = 1.0) -> tuple[str, str, str]:
+    """先结束浏览器进程（Chrome/Edge），再重新检测绑定。
+
+    进程结束后文件锁释放需要一点时间，因此带重试；返回与 detect_bili_cookie 相同的
+    (status, cookie_string, detail)。
+    """
+    killed, msg = kill_browser_processes()
+    if not killed:
+        return _STATUS_NO_BROWSER, "", msg
+    for _ in range(max(1, times)):
+        status, cookie, detail = detect_bili_cookie()
+        if status != _STATUS_LOCKED:
+            return status, cookie, detail
+        time.sleep(delay)
+    return _STATUS_LOCKED, "", STATUS_TEXT[_STATUS_LOCKED]
+
 
 def _browser_process_running(exe_name: str) -> bool:
     """检测浏览器进程是否在运行（窗口关闭但后台进程仍在运行也算运行）。
@@ -73,6 +122,8 @@ def _browser_process_running(exe_name: str) -> bool:
             ["tasklist", "/FI", f"IMAGENAME eq {exe_name}", "/FO", "CSV", "/NH"],
             capture_output=True,
             text=True,
+            encoding="gbk",  # Windows 中文系统 tasklist 输出为 GBK
+            errors="replace",
             timeout=5,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
