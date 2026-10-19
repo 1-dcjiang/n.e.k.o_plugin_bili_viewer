@@ -40,6 +40,7 @@ _PAGE = """<!DOCTYPE html>
 <div class="card">
   <div class="row"><span>浏览器调试实例</span><span id="browser" class="warn">检测中…</span></div>
   <div class="row"><span>B站登录态</span><span id="bili" class="warn">检测中…</span></div>
+  <div class="row"><span>写权限(CSRF)</span><span id="csrf" class="warn">—</span></div>
   <div class="row"><span>登录账号</span><span id="uname">—</span></div>
   <div class="row"><span>当前标签</span><span id="curtab" class="tip">—</span></div>
 </div>
@@ -55,6 +56,10 @@ async function refresh(){
     document.getElementById('browser').className = s.browser_ok ? 'ok' : 'warn';
     document.getElementById('bili').textContent = s.bound ? '已绑定（自动接入）' : (s.cookie_manual ? '已绑定（手动配置）' : '未绑定');
     document.getElementById('bili').className = s.bound || s.cookie_manual ? 'ok' : 'bad';
+    const c = document.getElementById('csrf');
+    if (s.has_csrf === true) { c.textContent = '就绪（可发弹幕）'; c.className = 'ok'; }
+    else if (s.has_csrf === false) { c.textContent = '缺失，需重新登录 B站'; c.className = 'bad'; }
+    else { c.textContent = '—'; c.className = 'warn'; }
     document.getElementById('uname').textContent = s.uname || '—';
     const t = s.current_tab && s.current_tab.url;
     document.getElementById('curtab').textContent = t ? (s.current_tab.title || s.current_tab.url).slice(0, 40) : '—';

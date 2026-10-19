@@ -915,11 +915,13 @@ class BiliViewerPlugin(NekoPluginBase):
         ext_online = (time.time() - self._ext_last_seen()) < web_ui._EXT_ONLINE_WINDOW
         tab = self._ext_tab()
         uid = _cookie_uid(cookie)
+        has_csrf = "bili_jct=" in cookie
         return {
             "ok": True,
             "browser": monitor.get("detail", "未接入"),
             "browser_ok": bool(monitor.get("connected")),
             "bound": "SESSDATA=" in cookie,
+            "has_csrf": has_csrf,
             "cookie_manual": source == _COOKIE_SOURCE_MANUAL,
             "cookie_source": source,
             "extension_online": ext_online,
