@@ -282,28 +282,33 @@ def get_bili_cookie_via_cdp(port: int) -> tuple[str, str, str]:
     """通过 CDP 从运行中的浏览器读取 B站 Cookie。
 
     返回 (status, cookie_string, detail)：bound / not_logged_in / fail。
+
+    注意：Chrome 155+ 已移除 Browser.getCookies（-32601），改用 Storage.getCookies；
+    Network.getAllCookies 作为 page 会话兜底。
     """
     try:
         ver = _http_json(f"http://127.0.0.1:{port}/json/version", timeout=5)
         if not ver or not ver.get("webSocketDebuggerUrl"):
             return _STATUS_FAIL, "", "调试端口无响应"
         browser_ws = ver["webSocketDebuggerUrl"]
-        msg = _cdp_call(browser_ws, "Browser.getCookies", timeout=20)
-        if msg.get("error"):
-            return _STATUS_FAIL, "", "CDP 调用失败：" + str(msg["error"])
-        cookies = msg.get("result", {}).get("cookies", []) or []
-        cookie = _extract_bili_cookie(cookies)
+
+        def _try(ws: str, method: str) -> str:
+            msg = _cdp_call(ws, method, timeout=20)
+            if msg.get("error"):
+                return ""
+            cookies = msg.get("result", {}).get("cookies", []) or []
+            return _extract_bili_cookie(cookies)
+
+        cookie = _try(browser_ws, "Storage.getCookies")
+        if "SESSDATA=" not in cookie:
+            cookie = _try(browser_ws, "Browser.getCookies")  # 旧版 Chrome 兼容
+        if "SESSDATA=" not in cookie:
+            targets = _http_json(f"http://127.0.0.1:{port}/json/list", timeout=5) or []
+            page = next((t for t in targets if t.get("type") == "page"), None)
+            if page and page.get("webSocketDebuggerUrl"):
+                cookie = _try(page["webSocketDebuggerUrl"], "Network.getAllCookies")
         if "SESSDATA=" in cookie:
             return _STATUS_BOUND, cookie, "已从运行中的浏览器读取 B站登录态"
-        # 兜底：page 会话的 Network.getAllCookies（个别版本 Browser.getCookies 返回空）
-        targets = _http_json(f"http://127.0.0.1:{port}/json/list", timeout=5) or []
-        page = next((t for t in targets if t.get("type") == "page"), None)
-        if page and page.get("webSocketDebuggerUrl"):
-            msg2 = _cdp_call(page["webSocketDebuggerUrl"], "Network.getAllCookies", timeout=20)
-            cookies2 = msg2.get("result", {}).get("cookies", []) or []
-            cookie2 = _extract_bili_cookie(cookies2)
-            if "SESSDATA=" in cookie2:
-                return _STATUS_BOUND, cookie2, "已从运行中的浏览器读取 B站登录态"
         if cookie:
             return _STATUS_NOT_LOGGED_IN, cookie, "浏览器中有游客 Cookie 但无登录态（SESSDATA 缺失或已过期）"
         return _STATUS_NOT_LOGGED_IN, "", "浏览器中未找到 B站 Cookie（登录态缺失或已过期）"
