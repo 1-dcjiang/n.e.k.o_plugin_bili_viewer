@@ -171,9 +171,19 @@ def _http_json(url: str, timeout: float = 5.0) -> dict | None:
 
 
 def _find_debug_port() -> int | None:
-    for port in range(_DEBUG_PORT_BASE, _DEBUG_PORT_MAX):
-        if _http_json(f"http://127.0.0.1:{port}/json/version", timeout=1.0) is not None:
+    """并发探测 21 个调试端口（每端口 0.5s 预算），避免串行 21s 阻塞面板状态。"""
+    import concurrent.futures
+
+    def _probe(port: int) -> int | None:
+        if _http_json(f"http://127.0.0.1:{port}/json/version", timeout=0.5) is not None:
             return port
+        return None
+
+    ports = list(range(_DEBUG_PORT_BASE, _DEBUG_PORT_MAX))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        for found in pool.map(_probe, ports):
+            if found is not None:
+                return found
     return None
 
 
@@ -198,7 +208,9 @@ def _launch_debug_browser(name: str) -> int | None:
                 exe,
                 f"--remote-debugging-port={port}",
                 f"--user-data-dir={root}",
-                "--remote-allow-origins=*",
+                # 仅放行本机来源（本插件 WS 客户端 Origin=http://localhost）；
+                # 绝不用 --remote-allow-origins=*，否则任意网页可劫持 CDP 读取全部站点 Cookie。
+                "--remote-allow-origins=http://localhost",
                 "--no-first-run",
                 "--no-default-browser-check",
                 "about:blank",

@@ -829,7 +829,7 @@ class BiliViewerPlugin(NekoPluginBase):
         """
         ts = float(at) if at and at > 0 else time.time()
         self._ext_last_seen_ts = ts
-        self._ext_tab = {
+        self._ext_tab_data = {
             "url": str(url or "").strip(),
             "title": str(title or "").strip(),
             "at": ts,
@@ -838,7 +838,7 @@ class BiliViewerPlugin(NekoPluginBase):
 
     def _ext_tab(self) -> dict | None:
         """返回新鲜（120s 内）的扩展标签页数据；无或过期返回 None。"""
-        tab = getattr(self, "_ext_tab", None)
+        tab = getattr(self, "_ext_tab_data", None)
         if not tab:
             return None
         if time.time() - float(tab.get("at") or 0) > web_ui._EXT_ONLINE_WINDOW:

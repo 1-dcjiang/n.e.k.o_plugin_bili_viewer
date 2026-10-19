@@ -62,20 +62,25 @@ async function pushTab() {
   } catch (e) {}
 }
 
-function schedulePush(fn) {
+function scheduleCookie() {
   clearTimeout(pushTimer);
-  pushTimer = setTimeout(() => { pushCookie(); pushTab(); }, 800);
+  pushTimer = setTimeout(() => { pushCookie(); }, 800);
+}
+
+function scheduleTab() {
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(() => { pushTab(); }, 800);
 }
 
 chrome.cookies.onChanged.addListener((changeInfo) => {
   const c = changeInfo && changeInfo.cookie;
-  if (c && c.domain && c.domain.includes("bilibili")) schedulePush();
+  if (c && c.domain && c.domain.includes("bilibili")) scheduleCookie();
 });
 
 // 标签页切换 / URL 变化：防抖后推送当前活动标签页
-chrome.tabs.onActivated.addListener(() => schedulePush());
+chrome.tabs.onActivated.addListener(() => scheduleTab());
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.url || changeInfo.title) schedulePush();
+  if (changeInfo.url || changeInfo.title) scheduleTab();
 });
 
 chrome.alarms.create("bili-bridge-push", { periodInMinutes: 1 });

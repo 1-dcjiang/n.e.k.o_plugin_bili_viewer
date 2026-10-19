@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import socket
 import time
+import urllib.error
 import urllib.request
 
 
@@ -157,5 +158,59 @@ def test_panel_extension_tab_endpoint(monkeypatch, tmp_path):
         )
         assert r.get("ok") is True
         assert received == [("https://www.bilibili.com/video/BV1GJ411x7h7", "测试_哔哩哔哩", 123456)]
+    finally:
+        panel.stop()
+
+
+def test_panel_post_origin_blocked(monkeypatch, tmp_path):
+    """CSRF 防护：恶意网页 Origin 的 POST 被 403 拒绝；扩展 Origin 放行。"""
+    web_ui = _web_ui()
+    received = []
+
+    def tab_fn(url, title, at):
+        received.append(url)
+        return {"ok": True}
+
+    panel = web_ui.BindPanel(
+        lambda *_: {"ok": True},
+        lambda *_: {"ok": True},
+        ext_fn=lambda *_: {"ok": True},
+        tab_fn=tab_fn,
+        port=_free_port(),
+    )
+    panel.ensure_started()
+    port = panel._port
+
+    def _post_with_origin(path: str, payload: dict, origin: str):
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Origin", origin)
+        return urllib.request.urlopen(req, timeout=10)
+
+    try:
+        # 恶意网页 Origin → 403，回调不触发
+        try:
+            with _post_with_origin("/api/extension-tab", {"url": "https://evil.example", "title": "x", "at": 1}, "https://evil.example"):
+                assert False, "恶意 Origin 应被拒绝"
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 403
+        assert received == []
+        # 扩展 Origin → 200 且回调触发
+        with _post_with_origin(
+            "/api/extension-tab",
+            {"url": "https://www.bilibili.com/video/BV1GJ411x7h7", "title": "t", "at": 2},
+            "chrome-extension://abcdefgh",
+        ) as resp:
+            assert resp.status == 200
+        assert received == ["https://www.bilibili.com/video/BV1GJ411x7h7"]
+        # 无 Origin（本地进程/curl）→ 放行
+        with _post_with_origin(
+            "/api/extension-tab",
+            {"url": "https://live.bilibili.com/666", "title": "live", "at": 3},
+            "",
+        ) as resp:
+            assert resp.status == 200
+        assert len(received) == 2
     finally:
         panel.stop()

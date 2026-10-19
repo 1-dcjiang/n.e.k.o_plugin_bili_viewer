@@ -657,6 +657,37 @@ def test_watcher_not_started_without_host(monkeypatch) -> None:
     assert inst._sync_thread is None
 
 
+def test_ext_tab_property_does_not_shadow_method(monkeypatch) -> None:
+    """扩展 tab 推送后 _ext_tab() 仍可调用（防止实例属性遮蔽方法的回归）。
+
+    历史 bug：_receive_ext_tab 写 self._ext_tab 属性会遮蔽 def _ext_tab 方法，
+    导致 watcher/感知调用 self._ext_tab() 抛 TypeError、感知静默退化。
+    """
+    import time as _t
+
+    from plugin.plugins.bili_viewer import BiliViewerPlugin
+
+    monkeypatch.delenv("BILLI_SYNC_DISABLE", raising=False)
+    inst = BiliViewerPlugin(ctx=None)
+    now = int(_t.time())
+    inst._receive_ext_tab("https://www.bilibili.com/video/BV1GJ411x7h7", "测试_哔哩哔哩", now)
+    tab = inst._ext_tab()
+    assert tab is not None
+    assert tab["url"].endswith("BV1GJ411x7h7")
+    assert tab["title"] == "测试_哔哩哔哩"
+    assert tab["at"] == float(now)
+
+
+def test_ext_tab_expires_after_window(monkeypatch) -> None:
+    """超过 120s 新鲜窗口后 _ext_tab() 返回 None。"""
+    from plugin.plugins.bili_viewer import BiliViewerPlugin
+
+    monkeypatch.delenv("BILLI_SYNC_DISABLE", raising=False)
+    inst = BiliViewerPlugin(ctx=None)
+    inst._receive_ext_tab("https://www.bilibili.com/video/BV1GJ411x7h7", "测试", int(__import__("time").time()) - 200)
+    assert inst._ext_tab() is None
+
+
 def test_watcher_not_started_when_disabled(monkeypatch) -> None:
     from plugin.plugins.bili_viewer import BiliViewerPlugin
 

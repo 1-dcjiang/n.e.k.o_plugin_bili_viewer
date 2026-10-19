@@ -41,6 +41,7 @@ _PAGE = """<!DOCTYPE html>
   <div class="row"><span>浏览器调试实例</span><span id="browser" class="warn">检测中…</span></div>
   <div class="row"><span>B站登录态</span><span id="bili" class="warn">检测中…</span></div>
   <div class="row"><span>登录账号</span><span id="uname">—</span></div>
+  <div class="row"><span>当前标签</span><span id="curtab" class="tip">—</span></div>
 </div>
 <button id="btn" onclick="doBind()">一键接入（启动调试浏览器并读取 B站登录态）</button>
 <div class="tip">说明：接入不会关闭/删除你的浏览器。若默认浏览器正被占用无法再开调试实例，
@@ -56,6 +57,8 @@ async function refresh(){
     document.getElementById('bili').textContent = s.bound ? '已绑定（自动接入）' : (s.cookie_manual ? '已绑定（手动配置）' : '未绑定');
     document.getElementById('bili').className = s.bound || s.cookie_manual ? 'ok' : 'bad';
     document.getElementById('uname').textContent = s.uname || '—';
+    const t = s.current_tab && s.current_tab.url;
+    document.getElementById('curtab').textContent = t ? (s.current_tab.title || s.current_tab.url).slice(0, 40) : '—';
   }catch(e){ document.getElementById('log').textContent = '状态刷新失败：' + e; }
 }
 async function doBind(){
@@ -101,6 +104,30 @@ class _PanelHandler(BaseHTTPRequestHandler):
         except Exception:
             return {}
 
+    def _origin_allowed(self) -> bool:
+        """来源校验：只接受本机面板、浏览器扩展与无来源（本地进程/curl）。
+
+        恶意网页可通过 text/plain 的简单请求把伪造 cookie/tab 推送到本机
+        127.0.0.1:8765（CSRF 式覆盖绑定），因此有 Origin/Referer 时必须放行
+        可信来源，其余一律拒绝。
+        """
+        origin = (self.headers.get("Origin") or "").strip().rstrip("/")
+        if origin:
+            panel_origin = f"http://{_PANEL_HOST}:{self.server.server_address[1]}"
+            if origin == panel_origin:
+                return True
+            if origin.startswith("chrome-extension://") or origin.startswith("edge-extension://"):
+                return True
+            return False
+        referer = (self.headers.get("Referer") or "").strip()
+        if referer:
+            if referer.startswith(f"http://{_PANEL_HOST}:{self.server.server_address[1]}/"):
+                return True
+            if referer.startswith("chrome-extension://") or referer.startswith("edge-extension://"):
+                return True
+            return False
+        return True  # 无来源（本地进程/脚本）视为可信
+
     # -- routes --
     def do_GET(self) -> None:
         status_fn = self.server.status_fn
@@ -119,6 +146,9 @@ class _PanelHandler(BaseHTTPRequestHandler):
         self._send(200, "text/html; charset=utf-8", _PAGE.encode("utf-8"))
 
     def do_POST(self) -> None:
+        if not self._origin_allowed():
+            self._json(403, {"error": "origin not allowed"})
+            return
         if self.path.startswith("/api/bind"):
             try:
                 payload = dict(self.server.bind_fn() or {})
