@@ -1094,7 +1094,7 @@ def live_send_danmaku(room: str, text: str) -> dict:
     try:
         data = _http_post(_LIVE_API + "/xlive/web-room/v1/dms/send", signed)
     except BiliError as exc:
-        raise BiliError("弹幕发送失败：" + exc.message, "SEND_FAILED") from exc
+        raise BiliError("弹幕发送失败：" + exc.message, "SEND_FAILED:" + exc.code) from exc
     return {"ok": True, "room_id": room_id, "text": text, "server": data.get("message") or ""}
 
 
@@ -1139,10 +1139,15 @@ def send_video_danmaku(bvid: str, text: str, progress_ms: int = 0) -> dict:
         "csrf_token": csrf,
         "platform": "web",
     }
+    # 新版发送接口要求 wbi 签名（缺失会触发 -352 风控"请求错误"）
+    try:
+        form = _wbi_sign(form, _get_mixin_key())
+    except BiliError:
+        pass  # 签名失败不致命，回退裸请求
     try:
         data = _http_post(_API + "/x/v2/dm/post", form)
     except BiliError as exc:
-        raise BiliError("视频弹幕发送失败：" + exc.message, "SEND_FAILED") from exc
+        raise BiliError("视频弹幕发送失败：" + exc.message, "SEND_FAILED:" + exc.code) from exc
     return {"ok": True, "bvid": bvid, "cid": int(cid), "text": text, "progress_ms": int(progress_ms), "server": data.get("message") or ""}
 
 

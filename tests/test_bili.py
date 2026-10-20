@@ -229,7 +229,7 @@ def test_video_send_danmaku_requires_cookie(monkeypatch) -> None:
 
 
 def test_video_send_danmaku_posts_with_cid(monkeypatch) -> None:
-    """视频弹幕：解析第一P cid，带 csrf 表单投递，progress 毫秒换算。"""
+    """视频弹幕：解析第一P cid，带 csrf 表单投递，progress 毫秒换算，WBI 签名。"""
     from plugin.plugins.bili_viewer import bili
 
     monkeypatch.setenv("BILI_COOKIE", "SESSDATA=abc; bili_jct=tok")
@@ -246,6 +246,7 @@ def test_video_send_danmaku_posts_with_cid(monkeypatch) -> None:
 
     monkeypatch.setattr(bili, "video_info", _fake_video_info)
     monkeypatch.setattr(bili, "_http_post", _fake_post)
+    monkeypatch.setattr(bili, "_get_mixin_key", lambda: "mixin-key")
     try:
         result = bili.send_video_danmaku("BV1xx411c7mD", "前排围观", progress_ms=45000)
     finally:
@@ -255,6 +256,34 @@ def test_video_send_danmaku_posts_with_cid(monkeypatch) -> None:
     assert posted["form"]["msg"] == "前排围观"
     assert posted["form"]["progress"] == 45000
     assert posted["form"]["csrf"] == "tok"
+    # WBI 签名：wts 与 w_rid 必须存在（缺失触发 -352 风控）
+    assert posted["form"]["wts"] is not None
+    assert posted["form"]["w_rid"] is not None
+
+
+def test_video_send_danmaku_keeps_biz_code(monkeypatch) -> None:
+    """视频弹幕：API 业务失败时保留原始 BIZ code（如 BIZ_-352），供面板诊断定位风控。"""
+    from plugin.plugins.bili_viewer import bili
+    from plugin.plugins.bili_viewer.bili import BiliError
+
+    monkeypatch.setenv("BILI_COOKIE", "SESSDATA=abc; bili_jct=tok")
+
+    def _fake_video_info(bvid):
+        return {"title": "测试", "pages": [{"cid": 10086}]}
+
+    def _fake_post(url, form):
+        raise BiliError("请求错误", "BIZ_-352")
+
+    monkeypatch.setattr(bili, "video_info", _fake_video_info)
+    monkeypatch.setattr(bili, "_http_post", _fake_post)
+    try:
+        send_video_danmaku = bili.send_video_danmaku
+        send_video_danmaku("BV1xx411c7mD", "666")
+        raise AssertionError("should raise")
+    except BiliError as exc:
+        assert exc.code == "SEND_FAILED:BIZ_-352"
+    finally:
+        monkeypatch.delenv("BILI_COOKIE", raising=False)
 
 
 def test_video_send_danmaku_msg_limit(monkeypatch) -> None:
