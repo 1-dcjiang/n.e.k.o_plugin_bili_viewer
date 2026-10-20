@@ -204,6 +204,31 @@ def test_msg_length_validation(monkeypatch) -> None:
     monkeypatch.delenv("BILI_COOKIE", raising=False)
 
 
+def test_live_send_danmaku_uses_msg_send(monkeypatch) -> None:
+    """直播弹幕走 /msg/send（xlive/web-room/v1/dms/send 已废弃返回 404，v0.6.29）。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_COOKIE", "SESSDATA=abc; bili_jct=tok")
+    posted: dict = {}
+
+    def _fake_post(url, form):
+        assert url.endswith("/msg/send")
+        posted.update(url=url, form=form)
+        return {"code": 0, "message": "0"}
+
+    monkeypatch.setattr(bili, "_http_post", _fake_post)
+    monkeypatch.setattr(bili, "_resolve_room", lambda room: {"room_id": 1025219})
+    try:
+        result = bili.live_send_danmaku("1025219", "美味的食材")
+    finally:
+        monkeypatch.delenv("BILI_COOKIE", raising=False)
+    assert result["ok"] is True
+    assert posted["form"]["roomid"] == 1025219
+    assert posted["form"]["msg"] == "美味的食材"
+    assert posted["form"]["csrf"] == "tok"
+    assert posted["form"]["csrf_token"] == "tok"
+
+
 def test_no_csrf_for_write(monkeypatch) -> None:
     from plugin.plugins.bili_viewer.bili import BiliError, live_send_danmaku
 
