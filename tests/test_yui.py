@@ -264,6 +264,28 @@ def test_autonomy_disabled_env(monkeypatch) -> None:
     assert fake_ctx.pushed == []
 
 
+def test_autonomy_popular_cache_throttle(monkeypatch) -> None:
+    """v0.7.1 复查优化：无跟随目标时 popular 拉取 60s 缓存，轮询不重复打 B站 API。"""
+    from plugin.plugins.bili_viewer import BiliViewerPlugin, bili
+
+    calls = {"n": 0}
+
+    def fake_popular(limit=3):
+        calls["n"] += 1
+        return [{"bvid": "BV1xx411c7mD", "title": "热门视频", "uname": "u"}]
+
+    monkeypatch.setattr(bili, "popular", fake_popular)
+    inst = BiliViewerPlugin(ctx=None)
+    k1, t1, i1 = inst._yui_resolve_target(None)
+    assert (k1, t1) == ("video", "BV1xx411c7mD")
+    k2, t2, _ = inst._yui_resolve_target(None)
+    assert (k2, t2) == ("video", "BV1xx411c7mD")
+    assert calls["n"] == 1  # 第二次命中缓存
+    inst._yui_popular_ts = 0  # 缓存过期
+    inst._yui_resolve_target(None)
+    assert calls["n"] == 2
+
+
 # ══════════ bili 层：评论/动态写操作 ══════════
 
 

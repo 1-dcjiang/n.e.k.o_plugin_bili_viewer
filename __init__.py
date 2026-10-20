@@ -350,17 +350,28 @@ class BiliViewerPlugin(NekoPluginBase):
             pass  # 唤醒失败不中断轮询
 
     def _yui_resolve_target(self, parsed: dict | None) -> tuple[str | None, str | None, dict]:
-        """解析自主运营目标：用户在 B站 → 跟随用户；否则自主挑选热门视频。"""
+        """解析自主运营目标：用户在 B站 → 跟随用户；否则自主挑选热门视频。
+
+        热门拉取做 60s 缓存（v0.7.1 复查优化）：无跟随目标时后台每 2.5s 轮询一次，
+        若每次都打 /popular 会高频请求 B站，既浪费资源也可能触发风控。
+        """
         if parsed and parsed.get("is_bili"):
             kind = parsed.get("kind")
             if kind == "live" and parsed.get("room_id"):
                 return "live", str(parsed["room_id"]), {"title": parsed.get("subject") or "", "source": "follow"}
             if kind == "video" and parsed.get("bvid"):
                 return "video", parsed["bvid"], {"title": parsed.get("subject") or "", "source": "follow"}
-        try:
-            items = bili.popular(limit=3)
-        except Exception:
-            return None, None, {}
+        now = time.time()
+        cached = getattr(self, "_yui_popular_cache", None)
+        cache_ts = getattr(self, "_yui_popular_ts", 0.0)
+        items = cached if (cache_ts and now - cache_ts < 60.0 and cached) else None
+        if items is None:
+            try:
+                items = bili.popular(limit=3)
+            except Exception:
+                items = []
+            self._yui_popular_cache = items
+            self._yui_popular_ts = now
         for v in items:
             bvid = v.get("bvid", "")
             if bvid:
