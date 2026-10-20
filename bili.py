@@ -1061,7 +1061,12 @@ def edit_video(bvid: str, title: str | None = None, desc: str | None = None, tag
 
 
 def live_send_danmaku(room: str, text: str) -> dict:
-    """向直播间发送一条弹幕。需 BILI_COOKIE 登录态（含 bili_jct）。"""
+    """向直播间发送一条弹幕。需 BILI_COOKIE 登录态（含 bili_jct）。
+
+    注意：msg/send 的 roomid 必须是页面显示的房间号（URL 上的数字，
+    与 B站 Web 端一致），不能用 room_init 解析出的真实 room_id——
+    两者不一致时弹幕会发进错误房间（v0.6.30）。
+    """
     _require_login()
     text = (text or "").strip()
     if not text:
@@ -1071,10 +1076,14 @@ def live_send_danmaku(room: str, text: str) -> dict:
     csrf = _csrf()
     if not csrf:
         raise BiliError("Cookie 缺少 bili_jct（CSRF token），无法发送弹幕", "NO_CSRF")
-    resolved = _resolve_room(room)
-    room_id = resolved["room_id"]
+    page_room = room.strip()
+    m = _ROOM_RE.search(page_room)
+    if m:
+        page_room = m.group(1)
+    if not page_room.isdigit():
+        raise BiliError("请输入直播房间号或直播间链接（如 live.bilibili.com/12345）", "BAD_ROOM")
     form = {
-        "roomid": room_id,
+        "roomid": int(page_room),
         "msg": text,
         "csrf": csrf,
         "csrf_token": csrf,
@@ -1090,7 +1099,7 @@ def live_send_danmaku(room: str, text: str) -> dict:
         data = _http_post(_LIVE_API + "/msg/send", form)
     except BiliError as exc:
         raise BiliError("弹幕发送失败：" + exc.message, "SEND_FAILED:" + exc.code) from exc
-    return {"ok": True, "room_id": room_id, "text": text, "server": data.get("message") or ""}
+    return {"ok": True, "room_id": int(page_room), "text": text, "server": data.get("message") or ""}
 
 
 def send_video_danmaku(bvid: str, text: str, progress_ms: int = 0) -> dict:

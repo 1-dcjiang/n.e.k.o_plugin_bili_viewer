@@ -797,13 +797,20 @@ class BiliViewerPlugin(NekoPluginBase):
         params = _.get("parameters") or {}
         room = (room or params.get("room") or "").strip()
         text = (text or params.get("text") or "").strip()
+        tab = self._ext_tab()
+        page_room = None
+        if tab:
+            parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
+            if parsed is not None and parsed.get("kind") == "live" and parsed.get("room_id"):
+                page_room = str(parsed["room_id"])
         if not room:
             # 兜底：LLM 直接函数调用未给 room 时，感知当前正在看的直播自动补齐
-            tab = self._ext_tab()
-            if tab:
-                parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
-                if parsed is not None and parsed.get("kind") == "live" and parsed.get("room_id"):
-                    room = str(parsed["room_id"])
+            if page_room:
+                room = page_room
+        elif page_room and room != page_room:
+            # 防 LLM 幻觉传错房间号：用户正看着某个直播间时，以页面号为准
+            _logger.info("live send room corrected %s -> %s (activity tab %s)", room, page_room, tab.get("url", ""))
+            room = page_room
         if not room:
             self._record_send_result("live", False, "NO_ROOM", "无直播目标（未提供房间号且感知不到当前直播）", "")
             return {"output": "请提供直播房间号或链接。", "is_error": True, "error": "NO_ROOM"}
