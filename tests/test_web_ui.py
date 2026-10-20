@@ -276,7 +276,6 @@ def test_extension_cookie_body_still_limited(monkeypatch, tmp_path):
 
 def test_panel_get_origin_blocked(monkeypatch, tmp_path):
     """GET 端点对称校验：恶意网页 Origin 读状态也被 403（v0.6.39）。"""
-    web_ui = _web_ui()
     panel, url = _start_panel(lambda *_: {"ok": True})
     port = panel._port
     try:
