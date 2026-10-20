@@ -269,16 +269,17 @@ class BiliViewerPlugin(NekoPluginBase):
             ):
                 text = _sync_text(parsed)
                 if text:
-                    # B站内容主动触发（respond，YUI 自动跟上）；其余静默注入（read）
-                    behavior = "respond" if parsed.get("is_bili") else "read"
+                    # 一律后台静默注入（read）：不触发 YUI 开口、不弹气泡、不打断玩家；
+                    # YUI 在下次自然对话中消费。禁止 respond 主动播报（v0.7.1 玩家界面优先）。
                     try:
                         self.ctx.push_message(
                             visibility=[],
-                            ai_behavior=behavior,
+                            ai_behavior="read",
                             parts=[{"type": "text", "text": text}],
                             source=self.plugin_id,
                             coalesce_key="now_watching_sync",
                             priority=0,
+                            metadata={"now_watching": True},
                         )
                         last_pushed = fingerprint
                         last_push_ts = now
@@ -333,13 +334,16 @@ class BiliViewerPlugin(NekoPluginBase):
         if not text:
             return
         try:
+            # 后台静默唤醒（read）：注入 YUI 上下文但不触发开口回合——不弹气泡、
+            # 不打断玩家界面；YUI 在下次自然对话中自主执行。禁止 respond 主动播报。
             ctx.push_message(
                 visibility=[],
-                ai_behavior="respond",
+                ai_behavior="read",
                 parts=[{"type": "text", "text": text}],
                 source=self.plugin_id,
                 coalesce_key="yui_autonomy",
                 priority=0,
+                metadata={"autonomy": True},
             )
             self._yui_cool[key] = now + _YUI_AUTONOMY_COOLDOWN
         except Exception:
@@ -397,7 +401,10 @@ class BiliViewerPlugin(NekoPluginBase):
             f"{refs[:300]}"
             "纪律：内容自然、基于内容本身；不刷屏、不攻击、不复制已有弹幕/评论；"
             "所有写操作必须 account=yui（独立小号），严禁使用用户主账号；"
-            "没想好就什么都不做，等下一个周期。）"
+            "没想好就什么都不做，等下一个周期。"
+            "后台纪律（重要）：本任务是后台自主任务——执行全程不向玩家汇报、不主动开口、不打断玩家界面；"
+            "行动成功静默完成（工具确认即可），不播报'我发了/搞定了'；"
+            "只有遇到权限/风控等无法自行解决的问题时，才在下次自然对话里简短向玩家求助。）"
         )
 
     # ══════════ 生命周期 ══════════

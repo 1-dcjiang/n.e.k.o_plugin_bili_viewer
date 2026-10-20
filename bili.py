@@ -1494,6 +1494,9 @@ def submit_video(file_path: str, title: str, desc: str = "", tags: str = "", tid
                 }, {"file": (os.path.basename(file_path), chunk)}, account=account, timeout=120.0)
             except BiliError as exc:
                 raise BiliError(f"上传分片 {i + 1}/{total_chunks} 失败：" + exc.message, "UPLOAD_CHUNK_FAILED") from exc
+            # 后台化：分片间小延迟，避免占满玩家带宽/拖慢其正在进行的游戏或直播（v0.7.1）
+            if i + 1 < total_chunks:
+                time.sleep(0.15)
     try:
         _http_post(_API + "/x/vu/client/complete", {
             "upload_id": upload_id,

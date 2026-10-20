@@ -199,15 +199,15 @@ def test_yui_upload_path_safety(monkeypatch) -> None:
     assert out3.get("error") == "NO_FILE"
 
 
-# ══════════ 自主唤醒冷却 ══════════
+# ══════════ 自主唤醒冷却 + 后台静默（read 不抢界面） ══════════
 
 
 class _FakeCtx:
     def __init__(self):
-        self.pushed: list[str] = []
+        self.pushed: list[dict] = []
 
     def push_message(self, **kwargs):
-        self.pushed.append(kwargs.get("parts", [{}])[0].get("text", ""))
+        self.pushed.append(kwargs)
 
 
 def test_autonomy_tick_cooldown(monkeypatch) -> None:
@@ -230,6 +230,27 @@ def test_autonomy_tick_cooldown(monkeypatch) -> None:
     inst._yui_cool["live:12345"] = 0
     inst._yui_autonomy_tick(parsed)
     assert len(fake_ctx.pushed) == 2
+
+
+def test_autonomy_push_is_background_silent(monkeypatch) -> None:
+    """v0.7.1 后台化：自主唤醒必须 read（不触发 YUI 开口/不弹气泡）、低优先级、带 autonomy 标记。"""
+    from plugin.plugins.bili_viewer import BiliViewerPlugin
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.delenv("YUI_AUTONOMY", raising=False)
+    fake_ctx = _FakeCtx()
+    inst = BiliViewerPlugin(ctx=fake_ctx)
+    parsed = {"is_bili": True, "kind": "video", "bvid": "BV1xx411c7mD", "subject": "测试视频"}
+    monkeypatch.setattr(inst, "_yui_resolve_target", lambda p: ("video", "BV1xx411c7mD", {"title": "测试视频", "source": "follow"}))
+    monkeypatch.setattr(inst, "_yui_autonomy_text", lambda k, t, i: "自主任务")
+    inst._yui_autonomy_tick(parsed)
+    assert len(fake_ctx.pushed) == 1
+    kw = fake_ctx.pushed[0]
+    assert kw.get("ai_behavior") == "read"  # 静默注入，绝不 respond
+    assert kw.get("priority") == 0
+    assert kw.get("metadata", {}).get("autonomy") is True
+    assert kw.get("visibility") == []
+    assert kw.get("coalesce_key") == "yui_autonomy"
 
 
 def test_autonomy_disabled_env(monkeypatch) -> None:
