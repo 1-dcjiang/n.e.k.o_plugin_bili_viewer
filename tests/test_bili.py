@@ -204,6 +204,33 @@ def test_msg_length_validation(monkeypatch) -> None:
     monkeypatch.delenv("BILI_COOKIE", raising=False)
 
 
+def test_receive_ext_dom_stores_realtime(monkeypatch) -> None:
+    """扩展页面 DOM 实况推送：存储并 120s 内可读（v0.6.34）。"""
+    from plugin.plugins.bili_viewer import BiliViewerPlugin, web_ui
+
+    inst = BiliViewerPlugin(ctx=None)
+    now = int(__import__("time").time())
+    resp = inst._receive_ext_dom({
+        "url": "https://live.bilibili.com/1025219",
+        "kind": "live",
+        "title": "北极僵尸从入门到入土",
+        "uname": "干凝冰羽",
+        "online": "15",
+        "area": "星际争霸",
+        "danmaku": [{"user": "观众A", "text": "666"}, {"user": "观众B", "text": "毒爆一个神两个"}],
+        "at": now,
+    })
+    assert resp["ok"] is True
+    dom = inst._ext_dom()
+    assert dom is not None and dom["kind"] == "live"
+    assert dom["title"] == "北极僵尸从入门到入土"
+    assert len(dom["danmaku"]) == 2
+    # 过期后不可读
+    stale = {"kind": "live", "at": now - web_ui._EXT_ONLINE_WINDOW - 10}
+    inst._ext_dom_data = stale
+    assert inst._ext_dom() is None
+
+
 def test_render_see_live_and_video() -> None:
     from plugin.plugins.bili_viewer.bili import render_see
 

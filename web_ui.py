@@ -183,6 +183,14 @@ class _PanelHandler(BaseHTTPRequestHandler):
                 payload = {"ok": False, "detail": f"扩展标签页推送处理异常：{exc}"}
             self._json(200, payload)
             return
+        if self.path.startswith("/api/extension-dom"):
+            body = self._read_json_body()
+            try:
+                payload = dict(self.server.dom_fn(body) or {"ok": False})
+            except Exception as exc:
+                payload = {"ok": False, "detail": f"扩展页面DOM推送处理异常：{exc}"}
+            self._json(200, payload)
+            return
         self._json(404, {"error": "not found"})
 
 
@@ -192,11 +200,12 @@ class BindPanel:
     port 可覆盖（默认 8765），测试场景传入随机端口避免冲突。
     """
 
-    def __init__(self, status_fn, bind_fn, ext_fn=None, tab_fn=None, port: int = _PANEL_PORT) -> None:
+    def __init__(self, status_fn, bind_fn, ext_fn=None, tab_fn=None, dom_fn=None, port: int = _PANEL_PORT) -> None:
         self._status_fn = status_fn
         self._bind_fn = bind_fn
         self._ext_fn = ext_fn or (lambda _cookie, _at: {"ok": False, "detail": "扩展通道未启用"})
         self._tab_fn = tab_fn or (lambda _url, _title, _at: {"ok": True})
+        self._dom_fn = dom_fn or (lambda _body: {"ok": False, "detail": "扩展DOM通道未启用"})
         self._port = port
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -212,6 +221,7 @@ class BindPanel:
             server.bind_fn = self._bind_fn
             server.ext_fn = self._ext_fn
             server.tab_fn = self._tab_fn
+            server.dom_fn = self._dom_fn
             thread = threading.Thread(target=server.serve_forever, name="bili-bind-panel", daemon=True)
             thread.start()
             self._server = server

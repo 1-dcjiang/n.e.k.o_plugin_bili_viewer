@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "B站接入桥 (bili-bridge)",
-  "version": "0.2.1",
-  "description": "把 B站登录态与当前浏览内容实时同步给本机 N.E.K.O bili_viewer 插件：仅推送至 127.0.0.1 本机服务，数据不经过任何外部网络。",
-  "permissions": ["cookies", "storage", "alarms", "tabs"],
+  "version": "0.2.2",
+  "description": "把 B站登录态、当前浏览内容与页面实况（直播弹幕/视频进度）实时同步给本机 N.E.K.O bili_viewer 插件：仅推送至 127.0.0.1 本机服务，数据不经过任何外部网络。",
+  "permissions": ["cookies", "storage", "alarms", "tabs", "scripting"],
   "host_permissions": [
     "*://*.bilibili.com/*",
     "http://127.0.0.1:8765/*"

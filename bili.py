@@ -922,9 +922,14 @@ def render_see(see: dict) -> str:
     if see.get("kind") == "video":
         dur = see.get("duration") or 0
         mm = f"{dur // 60}:{dur % 60:02d}"
+        progress = see.get("progress")
+        total = see.get("duration_total")
+        prog_txt = ""
+        if progress:
+            prog_txt = f"｜播放进度：{progress}" + (f"/{total}" if total else "")
         lines = [
             f"视频实况：{see.get('title') or '（无标题）'}",
-            f"UP主：{see.get('uname') or '未知'}｜时长：{mm}｜分区：{see.get('tname') or ''}｜播放：{see.get('view') or 0}",
+            f"UP主：{see.get('uname') or '未知'}｜时长：{mm}｜分区：{see.get('tname') or ''}｜播放：{see.get('view') or 0}{prog_txt}",
             "近期弹幕：",
         ]
         dms = see.get("recent_danmaku") or []

@@ -792,19 +792,45 @@ class BiliViewerPlugin(NekoPluginBase):
     async def bili_see_live(self, *, room: str = "", **_):
         params = _.get("parameters") or {}
         room = (room or params.get("room") or "").strip()
+        dom = self._ext_dom()
+        dom_live = dom if (dom and dom.get("kind") == "live") else None
         if not room:
             tab = self._ext_tab()
             if tab:
                 parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
                 if parsed is not None and parsed.get("kind") == "live" and parsed.get("room_id"):
                     room = str(parsed["room_id"])
+            if not room and dom_live:
+                parsed = bili.parse_bili_url(dom_live.get("url", ""), "")
+                if parsed is not None and parsed.get("room_id"):
+                    room = str(parsed["room_id"])
         if not room:
             return {"output": "未提供房间号且感知不到当前直播。", "is_error": True, "error": "NO_ROOM"}
         try:
-            result = bili.live_see(room)
+            if dom_live and bili.parse_bili_url(dom_live.get("url", ""), ""):
+                # 页面级实时 DOM 优先：标题/在线/弹幕来自浏览器页面（比 API 更即时）
+                d = dom_live
+                see = {
+                    "kind": "live",
+                    "room_id": int((bili.parse_bili_url(d.get("url", ""), "") or {}).get("room_id") or 0) or None,
+                    "uname": d.get("uname", ""),
+                    "title": d.get("title", ""),
+                    "status": "直播中",
+                    "online": d.get("online", ""),
+                    "area": d.get("area", ""),
+                    "parent_area": d.get("parent_area", ""),
+                    "recent_danmaku": [
+                        {"user": x.get("user", ""), "text": x.get("text", "")}
+                        for x in (d.get("danmaku") or [])[-20:]
+                    ],
+                    "_source": "page-dom",
+                }
+            else:
+                see = bili.live_see(room)
+                see["_source"] = "api"
         except bili.BiliError as exc:
             return _wrap_err(exc)
-        return {"output": bili.render_see(result), "is_error": False, "result": result}
+        return {"output": bili.render_see(see), "is_error": False, "result": see}
 
     @llm_tool(
         name="bili_see_video",
@@ -824,19 +850,41 @@ class BiliViewerPlugin(NekoPluginBase):
     async def bili_see_video(self, *, bvid: str = "", **_):
         params = _.get("parameters") or {}
         bvid = (bvid or params.get("bvid") or "").strip()
+        dom = self._ext_dom()
+        dom_video = dom if (dom and dom.get("kind") == "video") else None
         if not bvid:
             tab = self._ext_tab()
             if tab:
                 parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
                 if parsed is not None and parsed.get("kind") == "video" and parsed.get("bvid"):
                     bvid = str(parsed["bvid"])
+            if not bvid and dom_video:
+                parsed = bili.parse_bili_url(dom_video.get("url", ""), "")
+                if parsed is not None and parsed.get("bvid"):
+                    bvid = str(parsed["bvid"])
         if not bvid:
             return {"output": "未提供BV号且感知不到当前视频。", "is_error": True, "error": "NO_BVID"}
         try:
-            result = bili.video_see(bvid)
+            see = bili.video_see(bvid)
+            see["_source"] = "api"
+            if dom_video:
+                # 页面级实时 DOM 补充：播放进度（API 拿不到 currentTime）
+                d = dom_video
+                if d.get("title"):
+                    see["title"] = d["title"]
+                if d.get("uname"):
+                    see["uname"] = d["uname"]
+                see["progress"] = f"{int(d.get('progress') or 0) // 60}:{int(d.get('progress') or 0) % 60:02d}"
+                if d.get("duration"):
+                    see["duration_total"] = f"{int(d['duration']) // 60}:{int(d['duration']) % 60:02d}"
+                if d.get("danmaku"):
+                    see["recent_danmaku"] = [
+                        x.get("text", "") if isinstance(x, dict) else str(x)
+                        for x in (d["danmaku"])[-20:]
+                    ]
         except bili.BiliError as exc:
             return _wrap_err(exc)
-        return {"output": bili.render_see(result), "is_error": False, "result": result}
+        return {"output": bili.render_see(see), "is_error": False, "result": see}
 
     @llm_tool(
         name="bili_live_send_danmaku",
@@ -1112,6 +1160,45 @@ class BiliViewerPlugin(NekoPluginBase):
         }
         return {"ok": True, "detail": "已记录当前活动标签页"}
 
+    def _receive_ext_dom(self, body: dict) -> dict:
+        """接收浏览器扩展注入脚本读到的页面 DOM 实况（直播弹幕/视频进度等）。
+
+        DOM 数据仅本地使用：为 bili_see_live / bili_see_video 提供页面级实时内容，
+        不上传、不写日志。
+        """
+        ts = float(body.get("at") or 0) or time.time()
+        self._ext_dom_data = {
+            "url": str(body.get("url") or "").strip(),
+            "kind": str(body.get("kind") or "").strip(),
+            "title": str(body.get("title") or "")[:200],
+            "uname": str(body.get("uname") or "")[:80],
+            "online": str(body.get("online") or ""),
+            "area": str(body.get("area") or ""),
+            "parent_area": str(body.get("parent_area") or ""),
+            "progress": float(body.get("progress") or 0) or 0,
+            "duration": float(body.get("duration") or 0) or 0,
+            "danmaku": body.get("danmaku") or [],
+            "at": ts,
+        }
+        _logger.info(
+            "ext dom received: kind=%s title=%s online=%s dms=%d at=%s",
+            self._ext_dom_data["kind"],
+            self._ext_dom_data["title"][:30],
+            self._ext_dom_data["online"],
+            len(self._ext_dom_data["danmaku"]),
+            int(ts),
+        )
+        return {"ok": True, "detail": "已记录页面DOM实况"}
+
+    def _ext_dom(self) -> dict | None:
+        """返回新鲜（120s 内）的扩展页面 DOM 实况；无或过期返回 None。"""
+        dom = getattr(self, "_ext_dom_data", None)
+        if not dom:
+            return None
+        if time.time() - float(dom.get("at") or 0) > web_ui._EXT_ONLINE_WINDOW:
+            return None
+        return dom
+
     def _ext_tab(self) -> dict | None:
         """返回新鲜（120s 内）的扩展标签页数据；无或过期返回 None。"""
         tab = getattr(self, "_ext_tab_data", None)
@@ -1176,6 +1263,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 self._panel_bind,
                 ext_fn=self._receive_ext_cookie,
                 tab_fn=self._receive_ext_tab,
+                dom_fn=self._receive_ext_dom,
             )
             self._bind_panel = panel
         return panel.ensure_started()
