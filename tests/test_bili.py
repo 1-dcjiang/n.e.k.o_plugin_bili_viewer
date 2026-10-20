@@ -282,9 +282,9 @@ def test_live_send_danmaku_uses_msg_send(monkeypatch) -> None:
     monkeypatch.setenv("BILI_COOKIE", "SESSDATA=abc; bili_jct=tok")
     posted: dict = {}
 
-    def _fake_post(url, form):
+    def _fake_post(url, form, timeout=12.0, account="main"):
         assert url.endswith("/msg/send")
-        posted.update(url=url, form=form)
+        posted.update(url=url, form=form, account=account)
         return {"code": 0, "message": "0"}
 
     monkeypatch.setattr(bili, "_http_post", _fake_post)
@@ -335,9 +335,9 @@ def test_video_send_danmaku_posts_with_cid(monkeypatch) -> None:
         assert bvid == "BV1xx411c7mD"
         return {"title": "测试", "pages": [{"cid": 10086}, {"cid": 20086}]}
 
-    def _fake_post(url, form):
+    def _fake_post(url, form, timeout=12.0, account="main"):
         assert url.endswith("/x/v2/dm/post")
-        posted.update(url=url, form=form)
+        posted.update(url=url, form=form, account=account)
         return {"code": 0, "message": "0"}
 
     monkeypatch.setattr(bili, "video_info", _fake_video_info)
@@ -368,7 +368,7 @@ def test_video_send_danmaku_keeps_biz_code(monkeypatch) -> None:
     def _fake_video_info(bvid):
         return {"title": "测试", "pages": [{"cid": 10086}]}
 
-    def _fake_post(url, form):
+    def _fake_post(url, form, timeout=12.0, account="main"):
         raise BiliError("请求错误", "BIZ_-352")
 
     monkeypatch.setattr(bili, "video_info", _fake_video_info)
@@ -1119,7 +1119,7 @@ def test_live_send_danmaku_dedup_once(monkeypatch) -> None:
     from plugin.plugins.bili_viewer import BiliViewerPlugin, bili
 
     sent: list[tuple[str, str]] = []
-    monkeypatch.setattr(bili, "live_send_danmaku", lambda room, text: (sent.append((room, text)), {"dmid": "D1", "server": "ok"})[1])
+    monkeypatch.setattr(bili, "live_send_danmaku", lambda room, text, account="main": (sent.append((room, text)), {"dmid": "D1", "server": "ok"})[1])
     monkeypatch.delenv("BILLI_SYNC_DISABLE", raising=False)
     inst = object.__new__(BiliViewerPlugin)
     inst._ext_tab = lambda: None
@@ -1144,7 +1144,7 @@ def test_live_send_danmaku_dedup_expires(monkeypatch) -> None:
     from plugin.plugins.bili_viewer import BiliViewerPlugin, bili
 
     sent: list[tuple[str, str]] = []
-    monkeypatch.setattr(bili, "live_send_danmaku", lambda room, text: (sent.append((room, text)), {"dmid": "D1", "server": "ok"})[1])
+    monkeypatch.setattr(bili, "live_send_danmaku", lambda room, text, account="main": (sent.append((room, text)), {"dmid": "D1", "server": "ok"})[1])
     monkeypatch.delenv("BILLI_SYNC_DISABLE", raising=False)
     inst = object.__new__(BiliViewerPlugin)
     inst._ext_tab = lambda: None
@@ -1166,7 +1166,7 @@ def test_video_send_danmaku_dedup_once(monkeypatch) -> None:
     monkeypatch.setattr(
         bili,
         "send_video_danmaku",
-        lambda bvid, text, progress_ms=0: (sent.append((bvid, text, progress_ms)), {"dmid": "D2"})[1],
+        lambda bvid, text, progress_ms=0, account="main": (sent.append((bvid, text, progress_ms)), {"dmid": "D2"})[1],
     )
     monkeypatch.delenv("BILLI_SYNC_DISABLE", raising=False)
     inst = object.__new__(BiliViewerPlugin)

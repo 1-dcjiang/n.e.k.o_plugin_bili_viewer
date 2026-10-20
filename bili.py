@@ -55,12 +55,28 @@ class BiliError(Exception):
 
 # ══════════════ 基础 HTTP ══════════════
 
+_YUI_COOKIE_FILE = "yui_cookie.txt"  # 插件目录下的 YUI 专属小号 Cookie 文件（与本机主账号 BILI_COOKIE 完全隔离）
+_YUI_COOKIE_DIR = os.path.dirname(os.path.abspath(__file__))  # 可注入目录便于测试
 
-def _cookie() -> str:
+
+def _yui_cookie_from_file() -> str:
+    """从插件目录 yui_cookie.txt 读取 YUI 小号 Cookie（本地专用，不上传不写日志）。"""
+    try:
+        p = os.path.join(_YUI_COOKIE_DIR, _YUI_COOKIE_FILE)
+        with open(p, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _cookie(account: str = "main") -> str:
+    """账号 Cookie：main=用户主账号（BILI_COOKIE）；yui=YUI 独立小号（BILI_YUI_COOKIE 或 yui_cookie.txt）。"""
+    if account == "yui":
+        return os.environ.get("BILI_YUI_COOKIE", "").strip() or _yui_cookie_from_file()
     return os.environ.get("BILI_COOKIE", "").strip()
 
 
-def _http_get(url: str, params: dict | None = None, timeout: float = _TIMEOUT) -> dict:
+def _http_get(url: str, params: dict | None = None, timeout: float = _TIMEOUT, account: str = "main") -> dict:
     """GET JSON 接口；返回解析后的 dict。"""
     if params:
         url = url + "?" + urllib.parse.urlencode(params)
@@ -69,8 +85,8 @@ def _http_get(url: str, params: dict | None = None, timeout: float = _TIMEOUT) -
         "Referer": "https://www.bilibili.com/",
         "Accept": "application/json, text/plain, */*",
     })
-    if _cookie():
-        req.add_header("Cookie", _cookie())
+    if _cookie(account):
+        req.add_header("Cookie", _cookie(account))
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read()
@@ -502,6 +518,25 @@ def video_comments(bvid: str, mode: str = "hot", page: int = 1, limit: int = 15)
             "rcount": r.get("rcount", 0),
             "ctime": r.get("ctime", 0),
             "reply_count": len(r.get("replies") or []),
+        })
+    return out
+
+
+def popular(limit: int = 3) -> list[dict]:
+    """B站热门视频列表（匿名可读），用于 YUI 无跟随目标时自主挑选内容。"""
+    try:
+        data = _http_get(_API + "/x/web-interface/popular", {"ps": min(max(limit, 1), 10), "pn": 1}, timeout=10)
+    except BiliError as exc:
+        raise BiliError("热门视频获取失败（" + exc.message + "）", "POPULAR_FAILED") from exc
+    vlist = (data.get("data") or {}).get("list") or []
+    out = []
+    for v in vlist[:limit]:
+        out.append({
+            "bvid": v.get("bvid", ""),
+            "title": (v.get("title") or "").strip(),
+            "uname": ((v.get("owner") or {}).get("name") or ""),
+            "play": v.get("stat", {}).get("view", 0),
+            "desc": (v.get("desc") or "")[:80],
         })
     return out
 
@@ -1008,20 +1043,21 @@ def user_videos(mid: int, page: int = 1, limit: int = 15) -> list[dict]:
 # ══════════════ 我的账号 / 稿件管理（需 BILI_COOKIE 登录态） ══════════════
 
 
-def _csrf() -> str:
+def _csrf(account: str = "main") -> str:
     """从 Cookie 中提取 bili_jct（写操作的 CSRF token）。"""
-    m = re.search(r"bili_jct=([0-9a-zA-Z]+)", _cookie())
+    m = re.search(r"bili_jct=([0-9a-zA-Z]+)", _cookie(account))
     return m.group(1) if m else ""
 
 
-def _require_login() -> str:
-    cookie = _cookie()
+def _require_login(account: str = "main") -> str:
+    cookie = _cookie(account)
     if not cookie:
-        raise BiliError("需要登录态：请配置环境变量 BILI_COOKIE（含 SESSDATA 与 bili_jct）", "NEED_LOGIN")
+        who = "YUI 小号（BILI_YUI_COOKIE 或插件目录 yui_cookie.txt）" if account == "yui" else "主账号（BILI_COOKIE）"
+        raise BiliError(f"需要登录态：请配置{who}（含 SESSDATA 与 bili_jct）", "NEED_LOGIN")
     return cookie
 
 
-def _http_post(url: str, form: dict, timeout: float = _TIMEOUT) -> dict:
+def _http_post(url: str, form: dict, timeout: float = _TIMEOUT, account: str = "main") -> dict:
     """POST 表单（带 Cookie）；解析 JSON。"""
     body = urllib.parse.urlencode(form).encode()
     req = urllib.request.Request(url, data=body, headers={
@@ -1030,8 +1066,8 @@ def _http_post(url: str, form: dict, timeout: float = _TIMEOUT) -> dict:
         "Content-Type": "application/x-www-form-urlencoded",
         "Origin": "https://www.bilibili.com",
     })
-    if _cookie():
-        req.add_header("Cookie", _cookie())
+    if _cookie(account):
+        req.add_header("Cookie", _cookie(account))
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read()
@@ -1051,10 +1087,10 @@ def _http_post(url: str, form: dict, timeout: float = _TIMEOUT) -> dict:
     return data
 
 
-def my_info() -> dict:
-    """当前账号（BILI_COOKIE）信息：昵称/uid/等级/硬币/大会员。"""
-    _require_login()
-    data = (_http_get(_API + "/x/web-interface/nav")).get("data") or {}
+def my_info(account: str = "main") -> dict:
+    """当前账号信息：昵称/uid/等级/硬币/大会员。account=main 主账号 / yui 小号。"""
+    _require_login(account)
+    data = (_http_get(_API + "/x/web-interface/nav", account=account)).get("data") or {}
     if not data.get("mid"):
         raise BiliError("无法读取账号信息（登录态无效）", "AUTH_FAILED")
     level_info = data.get("level_info") or {}
@@ -1151,20 +1187,20 @@ def edit_video(bvid: str, title: str | None = None, desc: str | None = None, tag
     return {"bvid": bvid, "title": form["title"], "desc": form["desc"], "tag": form["tag"], "ok": True}
 
 
-def live_send_danmaku(room: str, text: str) -> dict:
-    """向直播间发送一条弹幕。需 BILI_COOKIE 登录态（含 bili_jct）。
+def live_send_danmaku(room: str, text: str, account: str = "main") -> dict:
+    """向直播间发送一条弹幕。account=main 主账号 / yui 小号。
 
     注意：msg/send 的 roomid 必须是页面显示的房间号（URL 上的数字，
     与 B站 Web 端一致），不能用 room_init 解析出的真实 room_id——
     两者不一致时弹幕会发进错误房间（v0.6.30）。
     """
-    _require_login()
+    _require_login(account)
     text = (text or "").strip()
     if not text:
         raise BiliError("弹幕内容为空", "EMPTY_MSG")
     if len(text) > 30:
         raise BiliError("弹幕最长 30 个字符", "MSG_TOO_LONG")
-    csrf = _csrf()
+    csrf = _csrf(account)
     if not csrf:
         raise BiliError("Cookie 缺少 bili_jct（CSRF token），无法发送弹幕", "NO_CSRF")
     page_room = room.strip()
@@ -1187,7 +1223,7 @@ def live_send_danmaku(room: str, text: str) -> dict:
     }
     # 直播弹幕走 /msg/send（xlive/web-room/v1/dms/send 已废弃返回 404，v0.6.29）
     try:
-        data = _http_post(_LIVE_API + "/msg/send", form)
+        data = _http_post(_LIVE_API + "/msg/send", form, account=account)
     except BiliError as exc:
         raise BiliError("弹幕发送失败：" + exc.message, "SEND_FAILED:" + exc.code) from exc
     resp_data = data.get("data")
@@ -1204,21 +1240,21 @@ def live_send_danmaku(room: str, text: str) -> dict:
     }
 
 
-def send_video_danmaku(bvid: str, text: str, progress_ms: int = 0) -> dict:
-    """向视频投递一条普通弹幕（默认出现在视频开头时间点）。需 BILI_COOKIE 登录态。
+def send_video_danmaku(bvid: str, text: str, progress_ms: int = 0, account: str = "main") -> dict:
+    """向视频投递一条普通弹幕（默认出现在视频开头时间点）。account=main 主账号 / yui 小号。
 
     参数：
         bvid：视频 BV 号（自动解析到第一P 的 cid）。
         text：弹幕内容（最长 100 字）。
         progress_ms：弹幕出现的时间点（毫秒，0=开头）。
     """
-    _require_login()
+    _require_login(account)
     text = (text or "").strip()
     if not text:
         raise BiliError("弹幕内容为空", "EMPTY_MSG")
     if len(text) > 100:
         raise BiliError("视频弹幕最长 100 个字符", "MSG_TOO_LONG")
-    csrf = _csrf()
+    csrf = _csrf(account)
     if not csrf:
         raise BiliError("Cookie 缺少 bili_jct（CSRF token），无法发送弹幕", "NO_CSRF")
     bvid = _parse_bvid(bvid)
@@ -1253,10 +1289,234 @@ def send_video_danmaku(bvid: str, text: str, progress_ms: int = 0) -> dict:
     except BiliError:
         pass  # 签名失败不致命，回退裸请求
     try:
-        data = _http_post(_API + "/x/v2/dm/post", form)
+        data = _http_post(_API + "/x/v2/dm/post", form, account=account)
     except BiliError as exc:
         raise BiliError("视频弹幕发送失败：" + exc.message, "SEND_FAILED:" + exc.code) from exc
     return {"ok": True, "bvid": bvid, "cid": int(cid), "text": text, "progress_ms": int(progress_ms), "server": data.get("message") or ""}
+
+
+# ══════════════ YUI 独立小号写操作（评论/动态/投稿） ══════════════
+# 全部走 account="yui"（BILI_YUI_COOKIE 或插件目录 yui_cookie.txt），
+# 与用户主账号 BILI_COOKIE 严格隔离；内容由 YUI 生成，插件只做长度/格式硬校验。
+
+
+def _http_post_json(url: str, body: dict, csrf: str, account: str = "yui", timeout: float = _TIMEOUT) -> dict:
+    """POST JSON body（带 Cookie 与 csrf）；用于动态发布等 JSON 接口。"""
+    data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(url + ("" if "?" in url else "?") + "platform=web&csrf=" + urllib.parse.quote(csrf),
+                                 data=data, headers={
+        "User-Agent": _UA,
+        "Referer": "https://t.bilibili.com/",
+        "Content-Type": "application/json; charset=utf-8",
+        "Origin": "https://t.bilibili.com",
+    })
+    if _cookie(account):
+        req.add_header("Cookie", _cookie(account))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        raise BiliError(f"接口 HTTP {exc.code}", "HTTP_ERROR") from exc
+    except urllib.error.URLError as exc:
+        raise BiliError(f"网络错误：{exc.reason}", "NETWORK") from exc
+    try:
+        resp_data = json.loads(raw)
+    except ValueError as exc:
+        raise BiliError("接口返回非 JSON", "BAD_RESPONSE") from exc
+    if resp_data.get("code", 0) != 0:
+        code = resp_data.get("code", -1)
+        if code in (-352, -401, -412, -101):
+            raise BiliError("登录态失效或触发风控（请重新配置 YUI 小号 Cookie）", "AUTH_FAILED")
+        raise BiliError(resp_data.get("message") or resp_data.get("msg") or "B站接口错误", f"BIZ_{code}")
+    return resp_data
+
+
+def add_reply(oid: int, type_id: int, text: str, account: str = "yui") -> dict:
+    """用指定账号发一条评论。type_id：1=视频，2=动态，3=专栏，11=直播。
+
+    参数：
+        oid：目标对象的 id（视频=aid、动态=动态id、直播=房间号、专栏=cvid）。
+        type_id：评论区类型（1 视频 / 2 动态 / 3 专栏 / 11 直播）。
+        text：评论内容（最长 1000 字）。
+    """
+    _require_login(account)
+    text = (text or "").strip()
+    if not text:
+        raise BiliError("评论内容为空", "EMPTY_MSG")
+    if len(text) > 1000:
+        raise BiliError("评论最长 1000 个字符", "MSG_TOO_LONG")
+    csrf = _csrf(account)
+    if not csrf:
+        raise BiliError("Cookie 缺少 bili_jct（CSRF token），无法发送评论", "NO_CSRF")
+    form = {
+        "oid": int(oid),
+        "type": int(type_id),
+        "message": text,
+        "csrf": csrf,
+        "csrf_token": csrf,
+        "jsonp": "jsonp",
+    }
+    try:
+        _http_post(_API + "/x/v2/reply/add", form, account=account)
+    except BiliError as exc:
+        raise BiliError("评论发送失败：" + exc.message, "REPLY_FAILED:" + exc.code) from exc
+    return {"ok": True, "oid": int(oid), "type": int(type_id), "text": text}
+
+
+def post_dynamic(text: str, account: str = "yui") -> dict:
+    """用指定账号发一条文字动态。需小号 Cookie（含 bili_jct）。
+
+    现行接口 POST /x/dynamic/web/create/v1/dyn（JSON body + csrf + wbi query）。
+    """
+    _require_login(account)
+    text = (text or "").strip()
+    if not text:
+        raise BiliError("动态内容为空", "EMPTY_MSG")
+    if len(text) > 2000:
+        raise BiliError("动态最长 2000 个字符", "MSG_TOO_LONG")
+    csrf = _csrf(account)
+    if not csrf:
+        raise BiliError("Cookie 缺少 bili_jct（CSRF token），无法发布动态", "NO_CSRF")
+    try:
+        up_uid = my_info(account)["mid"]
+    except BiliError as exc:
+        raise BiliError("动态发布失败：无法读取小号信息：" + exc.message, "NO_UID") from exc
+    body = {
+        "dynamic_id": 0,
+        "type": 4,
+        "rid": 0,
+        "content": {"content": text},
+        "up_uid": int(up_uid),
+        "at_uids": "",
+        "ctrl": "[]",
+    }
+    try:
+        _http_post_json(_API + "/x/dynamic/web/create/v1/dyn", body, csrf, account=account)
+    except BiliError as exc:
+        raise BiliError("动态发布失败：" + exc.message, "DYN_FAILED:" + exc.code) from exc
+    return {"ok": True, "text": text[:100]}
+
+
+def _http_multipart(url: str, fields: dict, files: dict, account: str = "yui", timeout: float = 60.0) -> dict:
+    """手写 multipart/form-data POST（无第三方依赖），用于投稿分片上传。"""
+    boundary = "----neko" + str(int(time.time() * 1000000))
+    parts: list[bytes] = []
+    for key, value in fields.items():
+        parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{value}\r\n".encode("utf-8"))
+    for key, (filename, data) in files.items():
+        parts.append(
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"; filename=\"{filename}\"\r\n"
+            "Content-Type: application/octet-stream\r\n\r\n".encode("utf-8") + data + b"\r\n"
+        )
+    parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+    body = b"".join(parts)
+    req = urllib.request.Request(url, data=body, headers={
+        "User-Agent": _UA,
+        "Referer": "https://member.bilibili.com/",
+        "Origin": "https://member.bilibili.com",
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "Content-Length": str(len(body)),
+    })
+    if _cookie(account):
+        req.add_header("Cookie", _cookie(account))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        raise BiliError(f"接口 HTTP {exc.code}", "HTTP_ERROR") from exc
+    except urllib.error.URLError as exc:
+        raise BiliError(f"网络错误：{exc.reason}", "NETWORK") from exc
+    try:
+        resp_data = json.loads(raw)
+    except ValueError as exc:
+        raise BiliError("接口返回非 JSON", "BAD_RESPONSE") from exc
+    if resp_data.get("code", 0) != 0:
+        code = resp_data.get("code", -1)
+        if code in (-352, -401, -412, -101):
+            raise BiliError("登录态失效或触发风控（请重新配置 YUI 小号 Cookie）", "AUTH_FAILED")
+        raise BiliError(resp_data.get("message") or resp_data.get("msg") or "B站接口错误", f"BIZ_{code}")
+    return resp_data
+
+
+def submit_video(file_path: str, title: str, desc: str = "", tags: str = "", tid: int = 171, account: str = "yui") -> dict:
+    """用指定账号投稿一个本地视频文件（web 端分片上传 + 提交）。
+
+    依赖：小号 Cookie 需有投稿权限；视频文件必须已存在；分区 tid 默认 171（电子竞技）。
+    流程：init（获取上传凭证）→ 分片 upload → complete（合并）→ add（提交稿件，进审核）。
+    说明：B站 web 投稿接口字段偶有变动，若报 BIZ_xxx 需按当时接口实测调整。
+    """
+    _require_login(account)
+    csrf = _csrf(account)
+    if not csrf:
+        raise BiliError("Cookie 缺少 bili_jct（CSRF token），无法投稿", "NO_CSRF")
+    if not os.path.isfile(file_path):
+        raise BiliError(f"视频文件不存在：{file_path}", "NO_FILE")
+    size = os.path.getsize(file_path)
+    if size <= 0:
+        raise BiliError("视频文件为空", "EMPTY_FILE")
+    title = (title or "").strip()
+    if not title:
+        raise BiliError("投稿标题为空", "NO_TITLE")
+    meta = json.dumps({"title": title, "desc": (desc or "").strip(), "cover": ""}, ensure_ascii=False)
+    try:
+        init = _http_post(_API + "/x/vu/client/init", {
+            "name": os.path.basename(file_path),
+            "size": int(size),
+            "meta": meta,
+            "copyright": "2",
+            "csrf": csrf,
+        }, account=account, timeout=30.0)
+    except BiliError as exc:
+        raise BiliError("投稿初始化失败：" + exc.message, "UPLOAD_INIT_FAILED") from exc
+    init_data = init.get("data") or {}
+    up_uid = init_data.get("up_uid") or 0
+    upload_id = init_data.get("upload_id") or ""
+    chunk_size = int(init_data.get("chunk_size") or (4 * 1024 * 1024))
+    if not upload_id:
+        raise BiliError("投稿初始化未返回 upload_id", "UPLOAD_NO_ID")
+    total_chunks = max(1, (size + chunk_size - 1) // chunk_size)
+    with open(file_path, "rb") as f:
+        for i in range(total_chunks):
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            try:
+                _http_multipart(_API + "/x/vu/client/upload", {
+                    "upload_id": upload_id,
+                    "chunk": str(i),
+                    "chunks": str(total_chunks),
+                    "size": str(len(chunk)),
+                    "partSize": str(chunk_size),
+                    "total": str(size),
+                    "filename": os.path.basename(file_path),
+                    "up_uid": str(up_uid),
+                    "csrf": csrf,
+                }, {"file": (os.path.basename(file_path), chunk)}, account=account, timeout=120.0)
+            except BiliError as exc:
+                raise BiliError(f"上传分片 {i + 1}/{total_chunks} 失败：" + exc.message, "UPLOAD_CHUNK_FAILED") from exc
+    try:
+        _http_post(_API + "/x/vu/client/complete", {
+            "upload_id": upload_id,
+            "up_uid": str(up_uid),
+            "csrf": csrf,
+        }, account=account, timeout=60.0)
+    except BiliError as exc:
+        raise BiliError("上传合并失败：" + exc.message, "UPLOAD_COMPLETE_FAILED") from exc
+    try:
+        _http_post(_API + "/x/vu/client/add", {
+            "copyright": "2",
+            "source": "",
+            "tid": int(tid),
+            "title": title,
+            "desc": (desc or "").strip(),
+            "tag": (tags or "").strip(),
+            "cover": "",
+            "up_uid": str(up_uid),
+            "csrf": csrf,
+        }, account=account, timeout=60.0)
+    except BiliError as exc:
+        raise BiliError("稿件提交失败：" + exc.message, "SUBMIT_FAILED") from exc
+    return {"ok": True, "title": title, "file": os.path.basename(file_path), "tid": int(tid), "size": int(size)}
 
 
 # ══════════════ 当前观看感知（前台窗口标题，通用） ══════════════

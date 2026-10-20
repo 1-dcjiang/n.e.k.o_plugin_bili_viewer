@@ -233,7 +233,7 @@ def test_llm_tool_video_send_senses_current_video() -> None:
     plugin = object.__new__(_plugin_cls())
     calls = []
 
-    def fake_send(bvid="", text="", progress_ms=0):
+    def fake_send(bvid="", text="", progress_ms=0, account="main"):
         calls.append(("video", bvid, text, progress_ms))
         return {"ok": True, "bvid": bvid, "cid": 1, "text": text, "progress_ms": progress_ms, "server": ""}
 
@@ -273,7 +273,7 @@ def test_llm_tool_live_send_senses_current_live() -> None:
     plugin = object.__new__(_plugin_cls())
     calls = []
 
-    def fake_send(room="", text=""):
+    def fake_send(room="", text="", account="main"):
         calls.append(("live", room, text))
         return {"ok": True, "room_id": int(room), "text": text, "server": ""}
 
@@ -313,7 +313,7 @@ def test_send_result_recorded_on_success() -> None:
     plugin = object.__new__(_plugin_cls())
     orig = bili.send_video_danmaku
 
-    def fake_send(bvid="", text="", progress_ms=0):
+    def fake_send(bvid="", text="", progress_ms=0, account="main"):
         return {"ok": True, "bvid": bvid, "cid": 1, "text": text, "progress_ms": progress_ms, "server": ""}
 
     bili.send_video_danmaku = fake_send

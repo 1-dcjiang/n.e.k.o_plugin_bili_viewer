@@ -4,8 +4,14 @@
 - 浏览：搜索/视频详情/弹幕/字幕/AI概要/评论/直播信息与实时弹幕/UP主信息
 - 感知：读取前台窗口，识别用户在看的应用/站点/页面主题（实时同步给 YUI）
 - 管理：查看自己账号与稿件、修改稿件信息、直播时回复弹幕（需 BILI_COOKIE 登录态）
+- YUI 独立小号（v0.7.0）：配置 BILI_YUI_COOKIE 或插件目录 yui_cookie.txt 后，
+  YUI 可用独立账号跟随用户同步到同一直播间/视频，并自主运营（发弹幕/评论/动态/投稿），
+  写操作默认走小号、与用户主账号严格隔离（未配置小号时自动回退主账号）。
+- 自主运营（v0.7.0）：后台轮询按节流唤醒 YUI，跟随用户当前内容或自主挑选热门内容，
+  由 YUI 理解内容后决定是否行动；频率受硬限制（弹幕 60s/目标、评论 120s/视频、
+  动态 ≤6 条/日、投稿 ≤2 条/日），风控错误自动退避。
 
-安全边界：读操作只访问公开内容；写操作仅限本人账号内容、需登录态与用户确认；
+安全边界：读操作只访问公开内容；写操作走独立小号或用户本人账号、需登录态；
 实时感知仅读取本地窗口标题与进程名，不读取页面内容、不做网络传输。
 """
 
@@ -47,6 +53,16 @@ _SYNC_STABLE_COUNT = 2
 _SYNC_MIN_INTERVAL = 15.0  # 两次推送的最小间隔（秒），避免频繁切内容时刷屏
 _SYNC_DISABLE_ENV = "BILLI_SYNC_DISABLE"
 _BROWSER_MONITOR_EVERY = 24  # 浏览器接入监控刷新频率：约每 24 次轮询（≈60s）一次
+
+# YUI 自主运营（v0.7.0）
+_YUI_AUTONOMY_ENV = "YUI_AUTONOMY"       # "0" 关闭自主运营，默认开启
+_YUI_AUTONOMY_TICK = 30.0                # 自主唤醒判定间隔（秒）
+_YUI_AUTONOMY_COOLDOWN = 900.0           # 同一目标两次自主唤醒的最小间隔（15 分钟）
+_YUI_DANMAKU_WINDOW = 60.0               # 同一目标弹幕最小间隔（秒）
+_YUI_COMMENT_WINDOW = 120.0              # 同一视频评论最小间隔（秒）
+_YUI_DYNAMIC_DAILY_MAX = 6               # 每日动态上限
+_YUI_UPLOAD_DAILY_MAX = 2                # 每日投稿上限
+_YUI_UPLOAD_DIR = "yui_uploads"          # 插件目录下，YUI 投稿视频文件放置目录
 
 # 插件配置段与 Cookie 配置键
 _CONFIG_SECTION = "settings"
@@ -167,6 +183,11 @@ class BiliViewerPlugin(NekoPluginBase):
         # 防止 LLM/宿主对同一指令重复触发发送工具/兜底入口导致同一条弹幕发两次（v0.6.38）。
         self._danmaku_sent: dict[str, float] = {}
         self._danmaku_dedup_lock = threading.Lock()
+        # YUI 自主运营节流（v0.7.0）：频率表 + 天级计数 + 自主唤醒冷却
+        self._yui_rate: dict[str, float] = {}
+        self._yui_daily: dict[str, int] = {}
+        self._yui_cool: dict[str, float] = {}
+        self._yui_rate_lock = threading.Lock()
         # 启动后台实时感知线程（守护线程，不阻塞插件生命周期）
         self._start_sync_watcher()
 
@@ -222,9 +243,18 @@ class BiliViewerPlugin(NekoPluginBase):
                 threading.Event().wait(_SYNC_POLL_INTERVAL)
                 continue
             if not parsed:
-                # 无可感知窗口（如仅剩聊天客户端/终端）：跳过，保持上一次有效感知
+                # 无可感知窗口（如仅剩聊天客户端/终端）：YUI 仍可自主运营（自主挑选热门）
+                try:
+                    self._yui_autonomy_tick(None)
+                except Exception:
+                    pass
                 threading.Event().wait(_SYNC_POLL_INTERVAL)
                 continue
+            # YUI 自主运营判定（节流唤醒，跟随用户或自主挑选热门；失败静默）
+            try:
+                self._yui_autonomy_tick(parsed)
+            except Exception:
+                pass
             fingerprint = _window_fingerprint(parsed)
             if fingerprint != candidate:
                 candidate, candidate_count = fingerprint, 0
@@ -255,6 +285,120 @@ class BiliViewerPlugin(NekoPluginBase):
                     except Exception:
                         pass  # 推送失败不中断轮询
             threading.Event().wait(_SYNC_POLL_INTERVAL)
+
+    # ══════════ YUI 自主运营（v0.7.0，独立小号） ══════════
+
+    def _yui_rate_check(self, op: str, key: str, window: float) -> bool:
+        """频率限制：op 作用于 key 的操作距上次是否超过 window 秒。True=允许。"""
+        with self._yui_rate_lock:
+            last = self._yui_rate.get(f"{op}:{key}", 0.0)
+            return (time.time() - last) >= window
+
+    def _yui_rate_mark(self, op: str, key: str) -> None:
+        with self._yui_rate_lock:
+            self._yui_rate[f"{op}:{key}"] = time.time()
+
+    def _yui_daily_allow(self, op: str) -> bool:
+        """天级上限：dynamic≤6、upload≤2；True=允许。"""
+        day = time.strftime("%Y%m%d")
+        cap = {"dynamic": _YUI_DYNAMIC_DAILY_MAX, "upload": _YUI_UPLOAD_DAILY_MAX}.get(op, 99)
+        with self._yui_rate_lock:
+            return self._yui_daily.get(f"{op}:{day}", 0) < cap
+
+    def _yui_daily_bump(self, op: str) -> None:
+        day = time.strftime("%Y%m%d")
+        with self._yui_rate_lock:
+            self._yui_daily[f"{op}:{day}"] = self._yui_daily.get(f"{op}:{day}", 0) + 1
+
+    def _yui_autonomy_tick(self, parsed: dict | None) -> None:
+        """自主运营判定：开关与小号配置检查 → 解析目标 → 冷却 → 组装上下文唤醒 YUI。
+
+        parsed：当前感知结果；None=用户无 B站内容（此时 YUI 自主挑选热门视频）。
+        """
+        if os.environ.get(_YUI_AUTONOMY_ENV, "1").strip() == "0":
+            return
+        if not bili._cookie("yui"):
+            return  # 小号未配置：不做自主运营（保持只读感知）
+        ctx = getattr(self, "ctx", None)
+        if ctx is None or not callable(getattr(ctx, "push_message", None)):
+            return
+        kind, target, info = self._yui_resolve_target(parsed)
+        if not kind or not target:
+            return
+        key = f"{kind}:{target}"
+        now = time.time()
+        if now < self._yui_cool.get(key, 0.0):
+            return  # 同目标冷却期内不重复唤醒
+        text = self._yui_autonomy_text(kind, target, info)
+        if not text:
+            return
+        try:
+            ctx.push_message(
+                visibility=[],
+                ai_behavior="respond",
+                parts=[{"type": "text", "text": text}],
+                source=self.plugin_id,
+                coalesce_key="yui_autonomy",
+                priority=0,
+            )
+            self._yui_cool[key] = now + _YUI_AUTONOMY_COOLDOWN
+        except Exception:
+            pass  # 唤醒失败不中断轮询
+
+    def _yui_resolve_target(self, parsed: dict | None) -> tuple[str | None, str | None, dict]:
+        """解析自主运营目标：用户在 B站 → 跟随用户；否则自主挑选热门视频。"""
+        if parsed and parsed.get("is_bili"):
+            kind = parsed.get("kind")
+            if kind == "live" and parsed.get("room_id"):
+                return "live", str(parsed["room_id"]), {"title": parsed.get("subject") or "", "source": "follow"}
+            if kind == "video" and parsed.get("bvid"):
+                return "video", parsed["bvid"], {"title": parsed.get("subject") or "", "source": "follow"}
+        try:
+            items = bili.popular(limit=3)
+        except Exception:
+            return None, None, {}
+        for v in items:
+            bvid = v.get("bvid", "")
+            if bvid:
+                return "video", bvid, {"title": v.get("title", ""), "uname": v.get("uname", ""), "source": "autonomy"}
+        return None, None, {}
+
+    def _yui_autonomy_text(self, kind: str, target: str, info: dict) -> str | None:
+        """组装自主运营唤醒上下文（含纪律与内容参考；失败用最小信息继续）。"""
+        uname = ""
+        try:
+            uname = bili.my_info("yui").get("uname", "")
+        except Exception:
+            pass
+        refs = ""
+        try:
+            if kind == "live":
+                see = bili.live_see(target, danmaku_limit=6)
+                refs = "；近期弹幕：" + "、".join(f"{d['user']}：{d['text']}" for d in (see.get("recent_danmaku") or [])[-4:])
+                title = f"{see.get('title') or info.get('title') or target}（直播 by {see.get('uname') or info.get('uname') or ''}）"
+            else:
+                vinfo = bili.video_info(target)
+                title = f"{vinfo.get('title') or info.get('title') or target}（视频 by {vinfo.get('uname') or info.get('uname') or ''}）"
+                try:
+                    cmts = bili.video_comments(target, mode="hot", limit=4)
+                    refs = "；热评：" + "、".join(f"{c.get('user', '')}：{c.get('text', '')}" for c in cmts[:3])
+                except Exception:
+                    pass
+        except Exception:
+            title = f"{info.get('title') or target}（{kind}）"
+        follow = "跟随用户观看内容" if info.get("source") == "follow" else "自主挑选内容"
+        return (
+            f"（YUI 自主运营任务【{follow}】：当前目标「{title[:100]}」。"
+            f"你是 B站小号「{uname or 'YUI小号'}」的运营者，现在可以自主行动："
+            "1）发一条贴合内容的弹幕（bili_live_send_danmaku / bili_video_send_danmaku，account=yui）；"
+            "2）给这个内容写一条评论（bili_reply_comment，account=yui）；"
+            "3）发一条动态（bili_yui_dynamic）；"
+            "4）若插件目录 yui_uploads 有新视频文件可投稿（bili_yui_upload）。"
+            f"{refs[:300]}"
+            "纪律：内容自然、基于内容本身；不刷屏、不攻击、不复制已有弹幕/评论；"
+            "所有写操作必须 account=yui（独立小号），严禁使用用户主账号；"
+            "没想好就什么都不做，等下一个周期。）"
+        )
 
     # ══════════ 生命周期 ══════════
 
@@ -918,12 +1062,14 @@ class BiliViewerPlugin(NekoPluginBase):
     @llm_tool(
         name="bili_live_send_danmaku",
         description=(
-            "向 B站直播间发送一条弹幕。何时用：直播时用户要求'回复弹幕/发一条弹幕'时，"
-            "配合 bili_live_danmaku 采集实时弹幕、理解后再回复。"
-            "参数 room：房间号或链接；text：弹幕内容（最长 30 字）。"
-            "这是写操作：需要配置 BILI_COOKIE（含 bili_jct 与 SESSDATA）环境变量，"
-            "且仅在用户明确要求发弹幕时调用；严禁主动询问'要不要发弹幕/要不要回复弹幕'——"
-            "用户没有明确要求就绝不调用。发送成功后，你的回复必须原样只有一句话：'弹幕已发送。'"
+            "向 B站直播间发送一条弹幕。何时用：直播时用户要求'回复弹幕/发一条弹幕'，或 YUI 自主运营任务中"
+            "配合 bili_live_danmaku 采集实时弹幕、理解内容后自主发言时。"
+            "参数 room：房间号或链接；text：弹幕内容（最长 30 字）；account：yui（YUI 独立小号，默认）/ main（用户主账号）。"
+            "账号规则：默认使用 YUI 独立小号；小号未配置时自动回退用户主账号；"
+            "自主运营任务中必须显式传 account=yui，严禁用用户主账号。"
+            "节流：同一直播间 60 秒内最多发 1 条（插件强制，超限返回 RATE_LIMITED）。"
+            "这是写操作：仅在用户明确要求发弹幕时调用，或自主运营任务主动推进时调用；"
+            "严禁主动询问'要不要发弹幕/要不要回复弹幕'。发送成功后，你的回复必须原样只有一句话：'弹幕已发送。'"
             "禁止添加任何其它文字：禁止说'搞定/任务搞定啦/发出去了/任务完成/发出去咯'等话术，"
             "禁止复述弹幕内容、房间号、BV号，禁止追问'你看到了吗/弹幕出来了吗'，"
             "禁止猜测为什么没看到（如'是不是开了弹幕过滤'）。"
@@ -935,15 +1081,19 @@ class BiliViewerPlugin(NekoPluginBase):
             "properties": {
                 "room": {"type": "string", "description": "直播间房间号或链接"},
                 "text": {"type": "string", "description": "要发送的弹幕内容，最长 30 字"},
+                "account": {"type": "string", "description": "yui=YUI 独立小号（默认）/ main=用户主账号"},
             },
             "required": ["room", "text"],
         },
         timeout=30.0,
     )
-    async def bili_live_send_danmaku(self, *, room: str = "", text: str = "", **_):
+    async def bili_live_send_danmaku(self, *, room: str = "", text: str = "", account: str = "", **_):
         params = _.get("parameters") or {}
         room = (room or params.get("room") or "").strip()
         text = (text or params.get("text") or "").strip()
+        account = (account or params.get("account") or "").strip()
+        if account not in ("main", "yui"):
+            account = "yui" if bili._cookie("yui") else "main"  # 默认小号；未配置小号回退主账号
         tab = self._ext_tab()
         page_room = None
         if tab:
@@ -964,16 +1114,20 @@ class BiliViewerPlugin(NekoPluginBase):
         if not text:
             self._record_send_result("live", False, "EMPTY_MSG", "弹幕内容为空", room)
             return {"output": "请提供要发送的弹幕内容。", "is_error": True, "error": "EMPTY_MSG"}
+        if account == "yui" and not self._yui_rate_check("danmaku", f"live:{room}", _YUI_DANMAKU_WINDOW):
+            return {"output": "已发过弹幕（同一目标 60 秒内限 1 条），请稍后再试。", "is_error": True, "error": "RATE_LIMITED"}
         if self._danmaku_recently_sent("live", room, text, 0):
             # 同房间同内容 60 秒内已发送过（可能是重复触发/兜底入口二次调用）→ 不重复发送
             _logger.info("live danmaku dedup hit room=%s text=%r", room, text[:20])
             return {"output": "弹幕已发送。", "is_error": False, "result": {"dedup": True, "room": room}}
         try:
-            result = bili.live_send_danmaku(room, text)
+            result = bili.live_send_danmaku(room, text, account=account)
         except bili.BiliError as exc:
             self._record_send_result("live", False, exc.code, exc.message, room)
             return _wrap_err(exc)
         self._mark_danmaku_sent("live", room, text, 0)
+        if account == "yui":
+            self._yui_rate_mark("danmaku", f"live:{room}")
         self._record_send_result("live", True, "", result.get("server") or "", room, dmid=result.get("dmid") or "")
         return {"output": "弹幕已发送。", "is_error": False, "result": result}
 
@@ -981,12 +1135,15 @@ class BiliViewerPlugin(NekoPluginBase):
         name="bili_video_send_danmaku",
         description=(
             "向 B站视频发送一条弹幕（投到视频时间轴）。何时用：用户在视频页要求'给这个视频发弹幕/"
-            "发一条弹幕'时，配合实时感知推送的 BV 号直接使用。"
+            "发一条弹幕'，或 YUI 自主运营任务中理解视频内容后自主发言时。"
             "参数 bvid：视频 BV 号；text：弹幕内容（最长 100 字）；"
-            "progress：弹幕出现的时间点（秒，可选，默认 0 即视频开头）。"
-            "这是写操作：需要配置 BILI_COOKIE（含 bili_jct 与 SESSDATA）环境变量，"
-            "且仅在用户明确要求发弹幕时调用；严禁主动询问'要不要发弹幕/要不要回复弹幕'——"
-            "用户没有明确要求就绝不调用。发送成功后，你的回复必须原样只有一句话：'弹幕已发送。'"
+            "progress：弹幕出现的时间点（秒，可选，默认 0 即视频开头）；"
+            "account：yui（YUI 独立小号，默认）/ main（用户主账号）。"
+            "账号规则：默认使用 YUI 独立小号；小号未配置时自动回退用户主账号；"
+            "自主运营任务中必须显式传 account=yui，严禁用用户主账号。"
+            "节流：同一视频 60 秒内最多发 1 条（插件强制，超限返回 RATE_LIMITED）。"
+            "这是写操作：仅在用户明确要求发弹幕时调用，或自主运营任务主动推进时调用；"
+            "严禁主动询问'要不要发弹幕/要不要回复弹幕'。发送成功后，你的回复必须原样只有一句话：'弹幕已发送。'"
             "禁止添加任何其它文字：禁止说'搞定/任务搞定啦/发出去了/任务完成/发出去咯'等话术，"
             "禁止复述弹幕内容、房间号、BV号，禁止追问'你看到了吗/弹幕出来了吗'，"
             "禁止猜测为什么没看到（如'是不是开了弹幕过滤'）。"
@@ -999,15 +1156,19 @@ class BiliViewerPlugin(NekoPluginBase):
                 "bvid": {"type": "string", "description": "视频 BV 号"},
                 "text": {"type": "string", "description": "要发送的弹幕内容，最长 100 字"},
                 "progress": {"type": "integer", "description": "弹幕出现的时间点（秒），默认 0"},
+                "account": {"type": "string", "description": "yui=YUI 独立小号（默认）/ main=用户主账号"},
             },
             "required": ["bvid", "text"],
         },
         timeout=30.0,
     )
-    async def bili_video_send_danmaku(self, *, bvid: str = "", text: str = "", progress: int = 0, **_):
+    async def bili_video_send_danmaku(self, *, bvid: str = "", text: str = "", progress: int = 0, account: str = "", **_):
         params = _.get("parameters") or {}
         bvid = (bvid or params.get("bvid") or "").strip()
         text = (text or params.get("text") or "").strip()
+        account = (account or params.get("account") or "").strip()
+        if account not in ("main", "yui"):
+            account = "yui" if bili._cookie("yui") else "main"  # 默认小号；未配置小号回退主账号
         try:
             progress = int(progress if progress else params.get("progress") or 0)
         except (TypeError, ValueError):
@@ -1026,6 +1187,8 @@ class BiliViewerPlugin(NekoPluginBase):
         if not text:
             self._record_send_result("video", False, "EMPTY_MSG", "弹幕内容为空", bvid)
             return {"output": "请提供要发送的弹幕内容。", "is_error": True, "error": "EMPTY_MSG"}
+        if account == "yui" and not self._yui_rate_check("danmaku", f"video:{bvid}", _YUI_DANMAKU_WINDOW):
+            return {"output": "已发过弹幕（同一目标 60 秒内限 1 条），请稍后再试。", "is_error": True, "error": "RATE_LIMITED"}
         if self._danmaku_recently_sent("video", bvid, text, progress):
             # 同视频同进度同内容 60 秒内已发送过（重复触发/兜底入口二次调用）→ 不重复发送
             _logger.info("video danmaku dedup hit bvid=%s progress=%s text=%r", bvid, progress, text[:20])
@@ -1035,16 +1198,214 @@ class BiliViewerPlugin(NekoPluginBase):
                 "result": {"dedup": True, "bvid": bvid, "progress": progress},
             }
         try:
-            result = bili.send_video_danmaku(bvid, text, progress_ms=progress * 1000)
+            result = bili.send_video_danmaku(bvid, text, progress_ms=progress * 1000, account=account)
         except bili.BiliError as exc:
             self._record_send_result("video", False, exc.code, exc.message, bvid)
             return _wrap_err(exc)
         self._mark_danmaku_sent("video", bvid, text, progress)
+        if account == "yui":
+            self._yui_rate_mark("danmaku", f"video:{bvid}")
         self._record_send_result("video", True, "", result.get("server") or "", bvid)
         return {
             "output": "弹幕已发送。",
             "is_error": False,
             "result": result,
+        }
+
+    # ══════════ YUI 独立小号写操作（v0.7.0：评论/动态/投稿/状态） ══════════
+
+    @llm_tool(
+        name="bili_reply_comment",
+        description=(
+            "用指定账号给 B站内容发一条评论。何时用：用户要求'评论/写条评论/说两句'，"
+            "或 YUI 自主运营任务中理解内容后写评论时。"
+            "参数 target：视频 BV 号或链接 / 直播间房间号或链接 / 评论对象 id（可省略，省略时自动感知当前正在看的内容）；"
+            "text：评论内容（最长 1000 字）；account：yui（独立小号，默认）/ main（用户主账号）；"
+            "parent：要回复的评论 rpid（可选）。"
+            "账号规则：默认 YUI 独立小号；小号未配置自动回退主账号；自主运营必须 account=yui。"
+            "节流：同一视频/直播间 120 秒内最多 1 条评论（插件强制，超限返回 RATE_LIMITED）。"
+            "纪律：内容自然、贴合内容本身；不刷屏、不攻击、不复制已有评论；"
+            "发送成功后只简短告知，禁止'搞定/任务完成'话术、禁止复述评论内容与房间号/BV号。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "视频BV号/直播间房间号或链接（可省略，自动感知当前内容）"},
+                "text": {"type": "string", "description": "评论内容，最长 1000 字"},
+                "account": {"type": "string", "description": "yui=YUI 独立小号（默认）/ main=用户主账号"},
+                "parent": {"type": "string", "description": "要回复的评论 rpid（可选）"},
+            },
+            "required": ["text"],
+        },
+        timeout=30.0,
+    )
+    async def bili_reply_comment(self, *, target: str = "", text: str = "", account: str = "", parent: str = "", **_):
+        params = _.get("parameters") or {}
+        target = (target or params.get("target") or "").strip()
+        text = (text or params.get("text") or "").strip()
+        parent = (parent or params.get("parent") or "").strip()
+        account = (account or params.get("account") or "").strip()
+        if account not in ("main", "yui"):
+            account = "yui" if bili._cookie("yui") else "main"
+        if not text:
+            return {"output": "请提供评论内容。", "is_error": True, "error": "EMPTY_MSG"}
+        # 解析评论目标：显式 target 优先，其次感知当前正在看的 B站内容
+        oid = None
+        type_id = None
+        if target:
+            parsed = bili.parse_bili_url(target, "")
+            if parsed is None:
+                # 裸 BV 号 / 裸房间号兜底解析
+                try:
+                    parsed = {"kind": "video", "bvid": bili._parse_bvid(target)}
+                except bili.BiliError:
+                    parsed = {"kind": "live", "room_id": target} if target.isdigit() and len(target) >= 5 else None
+            if parsed is not None and parsed.get("kind") == "video" and parsed.get("bvid"):
+                try:
+                    aid = bili.video_info(parsed["bvid"]).get("aid")
+                    if aid:
+                        oid, type_id = int(aid), 1
+                except bili.BiliError:
+                    oid, type_id = None, None
+            elif parsed is not None and parsed.get("kind") == "live" and parsed.get("room_id"):
+                oid, type_id = int(parsed["room_id"]), 11
+        if oid is None:
+            tab = self._ext_tab()
+            if tab:
+                parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
+                if parsed is not None and parsed.get("kind") == "video" and parsed.get("bvid"):
+                    try:
+                        aid = bili.video_info(parsed["bvid"]).get("aid")
+                        if aid:
+                            oid, type_id = int(aid), 1
+                    except bili.BiliError:
+                        pass
+                elif parsed is not None and parsed.get("kind") == "live" and parsed.get("room_id"):
+                    oid, type_id = int(parsed["room_id"]), 11
+        if oid is None or type_id is None:
+            return {"output": "无法确定评论目标：请提供视频BV号或直播间房间号（或先在 B站看这个内容）。", "is_error": True, "error": "NO_TARGET"}
+        key = f"{type_id}:{oid}"
+        if account == "yui" and not self._yui_rate_check("comment", key, _YUI_COMMENT_WINDOW):
+            return {"output": "刚发过评论（同一目标 120 秒内限 1 条），请稍后再试。", "is_error": True, "error": "RATE_LIMITED"}
+        try:
+            bili.add_reply(oid, type_id, text, account=account)
+        except bili.BiliError as exc:
+            return _wrap_err(exc)
+        if account == "yui":
+            self._yui_rate_mark("comment", key)
+        return {"output": "评论已发送。", "is_error": False, "result": {"ok": True, "oid": oid, "type": type_id}}
+
+    @llm_tool(
+        name="bili_yui_dynamic",
+        description=(
+            "用 YUI 独立小号发一条 B站文字动态（账号日常运营）。何时用：YUI 自主运营任务中想表达观点/"
+            "分享内容时，或用户要求'发条动态'时。参数 text：动态内容（最长 2000 字）。"
+            "节流：每天最多 6 条（插件强制，超限返回 RATE_LIMITED）。"
+            "纪律：内容自然、不刷屏、不攻击；发送成功后只简短告知，禁止复述动态内容。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {"text": {"type": "string", "description": "动态内容，最长 2000 字"}},
+            "required": ["text"],
+        },
+        timeout=30.0,
+    )
+    async def bili_yui_dynamic(self, *, text: str = "", **_):
+        params = _.get("parameters") or {}
+        text = (text or params.get("text") or "").strip()
+        if not text:
+            return {"output": "请提供动态内容。", "is_error": True, "error": "EMPTY_MSG"}
+        if not self._yui_daily_allow("dynamic"):
+            return {"output": "今天动态已发满 6 条，明天再继续。", "is_error": True, "error": "RATE_LIMITED"}
+        try:
+            bili.post_dynamic(text, account="yui")
+        except bili.BiliError as exc:
+            return _wrap_err(exc)
+        self._yui_daily_bump("dynamic")
+        return {"output": "动态已发布。", "is_error": False, "result": {"ok": True}}
+
+    @llm_tool(
+        name="bili_yui_upload",
+        description=(
+            "用 YUI 独立小号投稿一个视频（web 分片上传 + 提交审核）。何时用：YUI 自主运营任务中"
+            "发现插件目录 yui_uploads 有新的视频文件时，或用户要求'投稿/发视频'时。"
+            "参数 file：yui_uploads 目录下的文件名（仅接受该目录内文件，禁止路径穿越）；"
+            "title：稿件标题（必填）；desc：简介；tags：标签（逗号分隔）；tid：分区 id（默认 171 电子竞技）。"
+            "节流：每天最多 2 个稿件（插件强制）。投稿走审核流程，需小号有投稿权限。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "file": {"type": "string", "description": "yui_uploads 目录下的视频文件名"},
+                "title": {"type": "string", "description": "稿件标题，必填"},
+                "desc": {"type": "string", "description": "稿件简介（可选）"},
+                "tags": {"type": "string", "description": "标签，逗号分隔（可选）"},
+                "tid": {"type": "integer", "description": "分区 id，默认 171（电子竞技）"},
+            },
+            "required": ["file", "title"],
+        },
+        timeout=300.0,
+    )
+    async def bili_yui_upload(self, *, file: str = "", title: str = "", desc: str = "", tags: str = "", tid: int = 0, **_):
+        params = _.get("parameters") or {}
+        file = (file or params.get("file") or "").strip()
+        title = (title or params.get("title") or "").strip()
+        desc = (desc or params.get("desc") or "").strip()
+        tags = (tags or params.get("tags") or "").strip()
+        try:
+            tid = int(tid if tid else params.get("tid") or 171)
+        except (TypeError, ValueError):
+            tid = 171
+        if not file:
+            return {"output": "请提供 yui_uploads 目录下的视频文件名。", "is_error": True, "error": "NO_FILE"}
+        if not title:
+            return {"output": "请提供稿件标题。", "is_error": True, "error": "NO_TITLE"}
+        if not self._yui_daily_allow("upload"):
+            return {"output": "今天已投稿 2 个，明天再继续。", "is_error": True, "error": "RATE_LIMITED"}
+        # 安全：仅允许插件目录 yui_uploads 内的文件（拒绝路径穿越/任意文件上传）
+        upload_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), _YUI_UPLOAD_DIR)
+        base = os.path.basename(file)
+        if base in ("", ".", "..") or "/" in file or "\\" in file or ":" in file:
+            return {"output": "只接受 yui_uploads 目录内的文件名（禁止路径分隔符）。", "is_error": True, "error": "BAD_PATH"}
+        file_path = os.path.join(upload_dir, base)
+        if not os.path.isfile(file_path):
+            return {"output": f"yui_uploads 目录下没有这个文件：{base}（请先把视频文件放到插件目录的 yui_uploads 文件夹）", "is_error": True, "error": "NO_FILE"}
+        try:
+            bili.submit_video(file_path, title, desc=desc, tags=tags, tid=tid, account="yui")
+        except bili.BiliError as exc:
+            return _wrap_err(exc)
+        self._yui_daily_bump("upload")
+        return {"output": "稿件已提交审核。", "is_error": False, "result": {"ok": True, "file": base, "title": title}}
+
+    @llm_tool(
+        name="bili_yui_status",
+        description=(
+            "查询 YUI 独立小号（B站）的绑定状态与账号信息。何时用：用户问'小号绑定好了吗''YUI 的账号是什么'"
+            "，或 YUI 自主运营任务启动前确认小号可用性时。"
+            "返回：小号昵称/uid/等级/是否配置。未配置时给出配置方法（BILI_YUI_COOKIE 环境变量或插件目录 yui_cookie.txt）。"
+        ),
+        parameters={"type": "object", "properties": {}, "required": []},
+        timeout=20.0,
+    )
+    async def bili_yui_status(self, **_):
+        if not bili._cookie("yui"):
+            return {
+                "output": (
+                    "YUI 小号未配置。配置方法：把 B站小号的完整 Cookie（含 SESSDATA 与 bili_jct）"
+                    "保存到插件目录的 yui_cookie.txt 文件（或设置环境变量 BILI_YUI_COOKIE）。"
+                    "配置后 YUI 即可用独立小号跟随你同步行动、自主发弹幕/评论/动态/投稿，与你的主账号完全隔离。"
+                ),
+                "is_error": True,
+                "error": "NO_YUI_COOKIE",
+            }
+        try:
+            info = bili.my_info("yui")
+        except bili.BiliError as exc:
+            return _wrap_err(exc)
+        return {
+            "output": f"YUI 小号：{info['uname']}（uid {info['mid']}，Lv{info['level']}）｜ 配置正常，可自主运营",
+            "is_error": False,
+            "result": info,
         }
 
     @llm_tool(
@@ -1094,16 +1455,18 @@ class BiliViewerPlugin(NekoPluginBase):
         description=(
             "B站全能助手（bili_viewer）：感知用户当前正在看的B站直播/视频"
             "（直播间房间号/视频BV号，编号仅供内部操作，回复用户时请勿复述）；"
-            "向B站直播间或视频发送弹幕；查看视频详情/弹幕/字幕/AI概要/评论、"
-            "直播间信息与实时弹幕、UP主信息与投稿；搜索视频/直播/用户；"
-            "查看和修改自己的稿件；查询B站账号绑定状态。"
-            "用户请求'发弹幕''看视频详情''搜B站''看直播''查UP主''发一条弹幕'等B站相关操作时使用本插件。"
-            "回复纪律：发送弹幕后只原样回复'弹幕已发送。'，禁止'搞定/任务搞定啦/发出去咯'话术、"
+            "向B站直播间或视频发送弹幕、给视频/直播写评论（bili_reply_comment）；"
+            "YUI 独立小号运营（bili_yui_dynamic 发动态 / bili_yui_upload 投稿 / bili_yui_status 查小号状态）；"
+            "查看视频详情/弹幕/字幕/AI概要/评论、直播间信息与实时弹幕、UP主信息与投稿；"
+            "搜索视频/直播/用户；查看和修改自己的稿件；查询B站账号绑定状态。"
+            "用户请求'发弹幕''写评论''发动态''投稿''看视频详情''搜B站''看直播''查UP主'等B站相关操作时使用本插件。"
+            "账号规则：写操作（弹幕/评论/动态/投稿）默认使用 YUI 独立小号（account=yui，未配置时回退主账号）；"
+            "用户明确要求用自己的账号时传 account=main。自主运营任务中必须 account=yui，严禁用主账号。"
+            "回复纪律：发送成功后只原样回复'弹幕已发送。'/'评论已发送。'，禁止'搞定/任务搞定啦/发出去咯'话术、"
             "禁止复述房间号/BV号/弹幕内容、禁止追问'你看到了吗'、禁止猜测弹幕为何没显示；"
             "感知/查询只陈述实况本身，禁止'系统又同步/系统刚给我确认了/房间号没错'等开场白与确认话术；"
-            "严禁主动询问'要不要发弹幕/要不要回复弹幕'——弹幕仅在用户明确要求时发送。"
-            "发送纪律：弹幕发送入口（bili_live_send_danmaku/bili_video_send_danmaku）调用一次即完成，"
-            "禁止发送后再次调用本入口或其他入口确认/补发/重复发送同一弹幕"
+            "严禁主动询问'要不要发弹幕/要不要回复弹幕'——弹幕仅在用户明确要求或自主运营任务中发送。"
+            "发送纪律：弹幕发送入口调用一次即完成，禁止发送后再次调用本入口或其他入口确认/补发/重复发送"
             "（同目标同内容 60 秒内自动去重，只会发一次）。"
         ),
         input_schema={
@@ -1111,11 +1474,12 @@ class BiliViewerPlugin(NekoPluginBase):
             "properties": {
                 "action": {
                     "type": "string",
-                    "description": "操作类型：send_live_danmaku（发直播弹幕）/ send_video_danmaku（发视频弹幕）/ query（查询与感知）",
+                    "description": "操作类型：send_live_danmaku（发直播弹幕）/ send_video_danmaku（发视频弹幕）/ reply（写评论）/ dynamic（发动态）/ upload（投稿）/ query（查询与感知）",
                 },                "room": {"type": "string", "description": "直播间房间号或链接（发直播弹幕时必填）"},
                 "bvid": {"type": "string", "description": "视频BV号（发视频弹幕时必填）"},
                 "text": {"type": "string", "description": "弹幕内容，直播最长 30 字、视频最长 100 字"},
                 "progress": {"type": "integer", "description": "视频弹幕出现的时间点（秒），默认 0 即开头"},
+                "account": {"type": "string", "description": "yui=YUI 独立小号（默认）/ main=用户主账号"},
             },
             "required": ["action"],
         },
@@ -1127,20 +1491,27 @@ class BiliViewerPlugin(NekoPluginBase):
         room = str(kwargs.get("room") or params.get("room") or "")
         bvid = str(kwargs.get("bvid") or params.get("bvid") or "")
         text = str(kwargs.get("text") or params.get("text") or "")
+        account = str(kwargs.get("account") or params.get("account") or "")
         try:
             progress = int(kwargs.get("progress") or params.get("progress") or 0)
         except (TypeError, ValueError):
             progress = 0
         progress = max(0, progress)
+        if action == "reply":
+            return await self.bili_reply_comment(target=(bvid or room), text=text, account=account)
+        if action == "dynamic":
+            return await self.bili_yui_dynamic(text=text)
+        if action == "upload":
+            return await self.bili_yui_upload(file=text, title=params.get("title") or "")
         if action in ("send_live_danmaku", "live_danmaku"):
-            return await self.bili_live_send_danmaku(room=room, text=text)
+            return await self.bili_live_send_danmaku(room=room, text=text, account=account)
         if action in ("send_video_danmaku", "video_danmaku"):
-            return await self.bili_video_send_danmaku(bvid=bvid, text=text, progress=progress)
+            return await self.bili_video_send_danmaku(bvid=bvid, text=text, progress=progress, account=account)
         # 兜底①：LLM 未给 action 但显式给了目标 → 按目标直接发弹幕
         if text and bvid:
-            return await self.bili_video_send_danmaku(bvid=bvid, text=text, progress=progress)
+            return await self.bili_video_send_danmaku(bvid=bvid, text=text, progress=progress, account=account)
         if text and room:
-            return await self.bili_live_send_danmaku(room=room, text=text)
+            return await self.bili_live_send_danmaku(room=room, text=text, account=account)
         # 兜底②：感知当前正在看的视频/直播 → 有弹幕内容时自动发送
         # （parse_bili_url 键名为 kind/room_id/bvid，无 'type' 键，v0.6.23 KeyError 教训）
         tab = self._ext_tab()
@@ -1149,16 +1520,16 @@ class BiliViewerPlugin(NekoPluginBase):
             if parsed is not None:
                 kind = parsed.get("kind")
                 if text and kind == "video" and parsed.get("bvid"):
-                    return await self.bili_video_send_danmaku(bvid=parsed["bvid"], text=text, progress=progress)
+                    return await self.bili_video_send_danmaku(bvid=parsed["bvid"], text=text, progress=progress, account=account)
                 if text and kind == "live" and parsed.get("room_id"):
-                    return await self.bili_live_send_danmaku(room=parsed["room_id"], text=text)
+                    return await self.bili_live_send_danmaku(room=parsed["room_id"], text=text, account=account)
                 return {
                     "output": f"当前正在看：{tab.get('title', '')}（{kind or '未知'}）",
                     "is_error": False,
                     "result": parsed,
                 }
         return {
-            "output": "请指定操作：发弹幕（action=send_live_danmaku/send_video_danmaku，需 room/bvid 与 text），或查询B站内容。",
+            "output": "请指定操作：发弹幕（action=send_live_danmaku/send_video_danmaku，需 room/bvid 与 text）、写评论（reply）、发动态（dynamic）、投稿（upload），或查询B站内容。",
             "is_error": True,
             "error": "NO_ACTION",
         }
@@ -1170,8 +1541,9 @@ class BiliViewerPlugin(NekoPluginBase):
             "向B站直播间或视频发送弹幕。用户明确说'发弹幕''发一条弹幕''帮我发弹幕'时使用；"
             "严禁主动询问'要不要发弹幕/要不要回复弹幕'——用户没要求就绝不调用。"
             "直播弹幕需房间号（room），视频弹幕需BV号（bvid），内容为 text；"
+            "account 可选：yui=YUI 独立小号（默认）/ main=用户主账号。"
             "发送后只原样回复'弹幕已发送。'，禁止'搞定/任务搞定啦/发出去咯'话术、禁止复述房间号/BV号/弹幕内容、"
-            "禁止追问'你看到了吗'、禁止猜测弹幕为何没显示。需要已绑定B站账号。"
+            "禁止追问'你看到了吗'、禁止猜测弹幕为何没显示。需要已配置 B站账号（小号或主账号）。"
             "本入口调用一次即完成发送，禁止发送后再次调用本入口或 run 等其他入口确认/补发/重复发送同一弹幕"
             "（同目标同内容 60 秒内自动去重，只会发一次）。"
         ),
@@ -1182,6 +1554,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 "bvid": {"type": "string", "description": "视频BV号（发视频弹幕时必填）"},
                 "text": {"type": "string", "description": "弹幕内容，直播最长 30 字、视频最长 100 字"},
                 "progress": {"type": "integer", "description": "视频弹幕出现的时间点（秒），默认 0 即开头"},
+                "account": {"type": "string", "description": "yui=YUI 独立小号（默认）/ main=用户主账号"},
             },
             "required": ["text"],
         },
@@ -1192,15 +1565,16 @@ class BiliViewerPlugin(NekoPluginBase):
         room = str(kwargs.get("room") or params.get("room") or "")
         bvid = str(kwargs.get("bvid") or params.get("bvid") or "")
         text = str(kwargs.get("text") or params.get("text") or "")
+        account = str(kwargs.get("account") or params.get("account") or "")
         try:
             progress = int(kwargs.get("progress") or params.get("progress") or 0)
         except (TypeError, ValueError):
             progress = 0
         progress = max(0, progress)
         if bvid:
-            return await self.bili_video_send_danmaku(bvid=bvid, text=text, progress=progress)
+            return await self.bili_video_send_danmaku(bvid=bvid, text=text, progress=progress, account=account)
         if room:
-            return await self.bili_live_send_danmaku(room=room, text=text)
+            return await self.bili_live_send_danmaku(room=room, text=text, account=account)
         return {"output": "请提供直播间房间号（room）或视频BV号（bvid）与弹幕内容（text）。", "is_error": True, "error": "NO_TARGET"}
 
     # ══════════ 账号绑定（CDP 运行时接入 + 监控） ══════════
