@@ -775,6 +775,70 @@ class BiliViewerPlugin(NekoPluginBase):
         }
 
     @llm_tool(
+        name="bili_see_live",
+        description=(
+            "获取当前直播间实况：标题/主播/在线人数/分区 + 最近几秒的实时弹幕。"
+            "何时用：用户问'你看得到直播吗''现在直播间在播什么''观众在聊什么'，"
+            "或 YUI 需要理解直播内容后回复用户时。参数 room：房间号或链接（可省略，省略时自动感知当前正在看的直播）。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "room": {"type": "string", "description": "直播间房间号或链接（可省略）"},
+            },
+        },
+        timeout=30.0,
+    )
+    async def bili_see_live(self, *, room: str = "", **_):
+        params = _.get("parameters") or {}
+        room = (room or params.get("room") or "").strip()
+        if not room:
+            tab = self._ext_tab()
+            if tab:
+                parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
+                if parsed is not None and parsed.get("kind") == "live" and parsed.get("room_id"):
+                    room = str(parsed["room_id"])
+        if not room:
+            return {"output": "未提供房间号且感知不到当前直播。", "is_error": True, "error": "NO_ROOM"}
+        try:
+            result = bili.live_see(room)
+        except bili.BiliError as exc:
+            return _wrap_err(exc)
+        return {"output": bili.render_see(result), "is_error": False, "result": result}
+
+    @llm_tool(
+        name="bili_see_video",
+        description=(
+            "获取当前视频实况：标题/UP主/时长/分区 + 近期弹幕 + CC字幕开头。"
+            "何时用：用户问'你看得到这个视频吗''视频在讲什么'，"
+            "或 YUI 需要理解视频内容后回复用户时。参数 bvid：BV号（可省略，省略时自动感知当前正在看的视频）。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "bvid": {"type": "string", "description": "视频BV号（可省略）"},
+            },
+        },
+        timeout=30.0,
+    )
+    async def bili_see_video(self, *, bvid: str = "", **_):
+        params = _.get("parameters") or {}
+        bvid = (bvid or params.get("bvid") or "").strip()
+        if not bvid:
+            tab = self._ext_tab()
+            if tab:
+                parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
+                if parsed is not None and parsed.get("kind") == "video" and parsed.get("bvid"):
+                    bvid = str(parsed["bvid"])
+        if not bvid:
+            return {"output": "未提供BV号且感知不到当前视频。", "is_error": True, "error": "NO_BVID"}
+        try:
+            result = bili.video_see(bvid)
+        except bili.BiliError as exc:
+            return _wrap_err(exc)
+        return {"output": bili.render_see(result), "is_error": False, "result": result}
+
+    @llm_tool(
         name="bili_live_send_danmaku",
         description=(
             "向 B站直播间发送一条弹幕。何时用：直播时用户要求'回复弹幕/发一条弹幕'时，"

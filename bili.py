@@ -853,6 +853,92 @@ def live_danmaku(room: str, duration: int = 8, limit: int = 60) -> list[dict]:
     return collected
 
 
+def live_see(room: str, duration: int = 8, danmaku_limit: int = 40) -> dict:
+    """直播间实况：房间信息 + 最近实时弹幕（供 LLM 描述直播内容，v0.6.32）。"""
+    info = live_info(room)
+    recent: list[dict] = []
+    try:
+        recent = live_danmaku(room, duration=duration, limit=danmaku_limit)
+    except BiliError:
+        recent = []
+    return {
+        "kind": "live",
+        "room_id": info.get("room_id"),
+        "uname": info.get("uname", ""),
+        "title": info.get("title", ""),
+        "status": info.get("status_text", ""),
+        "online": info.get("online", 0),
+        "area": info.get("area", ""),
+        "parent_area": info.get("parent_area", ""),
+        "recent_danmaku": [
+            {"user": d.get("user", ""), "text": d.get("text", "")}
+            for d in recent[-danmaku_limit:]
+        ],
+    }
+
+
+def video_see(bvid: str, danmaku_limit: int = 40, subtitle_chars: int = 600) -> dict:
+    """视频实况：视频信息 + 近期弹幕 + CC 字幕开头（供 LLM 描述视频内容，v0.6.32）。"""
+    info = video_info(bvid)
+    try:
+        dms = video_danmaku(bvid, limit=danmaku_limit)
+    except BiliError:
+        dms = []
+    subtitle_head = ""
+    try:
+        subtitle_head = (video_subtitle(bvid) or "")[:subtitle_chars]
+    except BiliError:
+        subtitle_head = ""
+    return {
+        "kind": "video",
+        "bvid": bvid,
+        "title": info.get("title", ""),
+        "uname": info.get("owner_name", ""),
+        "duration": info.get("duration", 0),
+        "tname": info.get("tname", ""),
+        "view": info.get("view", 0),
+        "recent_danmaku": dms[-danmaku_limit:],
+        "subtitle_head": subtitle_head,
+    }
+
+
+def render_see(see: dict) -> str:
+    """把 live_see / video_see 结果渲染成给 LLM 的实况文本（v0.6.32）。"""
+    if not see:
+        return "暂无实况信息。"
+    if see.get("kind") == "live":
+        lines = [
+            f"直播间实况：{see.get('title') or '（无标题）'}",
+            f"主播：{see.get('uname') or '未知'}｜状态：{see.get('status') or '未知'}｜在线：{see.get('online') or 0}人",
+            f"分区：{see.get('parent_area') or ''}{see.get('area') or ''}",
+            "最近弹幕：",
+        ]
+        dms = see.get("recent_danmaku") or []
+        if dms:
+            lines.extend(f"  · {d.get('user', '')}：{d.get('text', '')}" for d in dms)
+        else:
+            lines.append("  （采集期间无人发言）")
+        return "\n".join(lines)
+    if see.get("kind") == "video":
+        dur = see.get("duration") or 0
+        mm = f"{dur // 60}:{dur % 60:02d}"
+        lines = [
+            f"视频实况：{see.get('title') or '（无标题）'}",
+            f"UP主：{see.get('uname') or '未知'}｜时长：{mm}｜分区：{see.get('tname') or ''}｜播放：{see.get('view') or 0}",
+            "近期弹幕：",
+        ]
+        dms = see.get("recent_danmaku") or []
+        if dms:
+            lines.extend(f"  · {d}" for d in dms)
+        else:
+            lines.append("  （暂无弹幕）")
+        sub = (see.get("subtitle_head") or "").strip()
+        if sub:
+            lines.append(f"字幕开头：{sub}")
+        return "\n".join(lines)
+    return "暂无实况信息。"
+
+
 # ══════════════ UP主 ══════════════
 
 

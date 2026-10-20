@@ -204,6 +204,22 @@ def test_msg_length_validation(monkeypatch) -> None:
     monkeypatch.delenv("BILI_COOKIE", raising=False)
 
 
+def test_render_see_live_and_video() -> None:
+    from plugin.plugins.bili_viewer.bili import render_see
+
+    live = render_see({
+        "kind": "live", "title": "测试直播间", "uname": "主播A", "status": "直播中",
+        "online": 123, "parent_area": "网游", "area": "星际争霸",
+        "recent_danmaku": [{"user": "观众1", "text": "666"}],
+    })
+    assert "测试直播间" in live and "观众1：666" in live and "123人" in live
+    video = render_see({
+        "kind": "video", "title": "测试视频", "uname": "UP主B", "duration": 125,
+        "tname": "游戏", "view": 1000, "recent_danmaku": ["前排"], "subtitle_head": "大家好",
+    })
+    assert "测试视频" in video and "UP主B" in video and "2:05" in video and "前排" in video and "大家好" in video
+
+
 def test_live_send_danmaku_uses_msg_send(monkeypatch) -> None:
     """直播弹幕走 /msg/send，roomid 用页面号（不能用 room_init 解析号，v0.6.30）。"""
     from plugin.plugins.bili_viewer import bili
