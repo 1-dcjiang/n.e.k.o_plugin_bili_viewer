@@ -18,6 +18,7 @@ import os
 import re
 import threading
 import time
+from pathlib import Path
 
 from plugin.sdk.plugin import NekoPluginBase, lifecycle, llm_tool, neko_plugin, plugin_entry
 
@@ -26,8 +27,9 @@ from . import bili, cdp_cookie, cookie_auto, desktop_deliver, web_ui
 _logger = logging.getLogger(__name__)
 
 # 扩展截屏落盘位置（仅本地保存，供 YUI 读取画面实况）
+# Windows 用 LOCALAPPDATA；其他平台回退到用户主目录，避免生成平台相关路径字面量
 _SCREENSHOT_PATH = os.path.join(
-    os.environ.get("LOCALAPPDATA", r"C:\Users\Public"), "N.E.K.O", "bili_viewer_screen.jpg"
+    os.environ.get("LOCALAPPDATA") or str(Path.home()), "N.E.K.O", "bili_viewer_screen.jpg"
 )
 
 
