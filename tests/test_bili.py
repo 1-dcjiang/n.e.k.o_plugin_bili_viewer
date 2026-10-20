@@ -251,11 +251,11 @@ def test_receive_ext_shot_stores_and_see_screen(monkeypatch) -> None:
     shot = inst._ext_shot()
     assert shot is not None and shot["title"] == "北极僵尸从入门到入土"
     assert shot["size"] > 0 and os.path.exists(shot["path"])
-    out = asyncio.get_event_loop().run_until_complete(inst.bili_see_screen())
+    out = asyncio.run(inst.bili_see_screen())
     assert out["is_error"] is False and shot["path"] in out["output"]
     # 过期后不可读
     inst._ext_shot_data = {"at": now - web_ui._EXT_ONLINE_WINDOW - 10, "path": shot["path"]}
-    out2 = asyncio.get_event_loop().run_until_complete(inst.bili_see_screen())
+    out2 = asyncio.run(inst.bili_see_screen())
     assert out2["is_error"] is True and out2["error"] == "NO_SHOT"
 
 
@@ -1049,3 +1049,74 @@ def test_detect_db_error_when_browser_closed(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(cookie_auto, "_browser_process_running", lambda name: False)  # 浏览器已关
     status, cookie, _ = cookie_auto.detect_bili_cookie()
     assert status == cookie_auto._STATUS_FAIL and cookie == ""
+
+
+def test_live_send_danmaku_dedup_once(monkeypatch) -> None:
+    """同一房间同一条弹幕 60 秒内重复触发只发一次（v0.6.38 幂等去重）。"""
+    import asyncio
+
+    from plugin.plugins.bili_viewer import BiliViewerPlugin, bili
+
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(bili, "live_send_danmaku", lambda room, text: (sent.append((room, text)), {"dmid": "D1", "server": "ok"})[1])
+    monkeypatch.delenv("BILLI_SYNC_DISABLE", raising=False)
+    inst = object.__new__(BiliViewerPlugin)
+    inst._ext_tab = lambda: None
+
+    r1 = asyncio.run(inst.bili_live_send_danmaku(room="1025219", text="主播好帅"))
+    assert r1["is_error"] is False and r1["output"] == "弹幕已发送。"
+    # 第二次（模拟模型重复触发/兜底入口再次调用）：同房间同内容 → 去重，不再真实发送
+    r2 = asyncio.run(inst.bili_live_send_danmaku(room="1025219", text="主播好帅"))
+    assert r2["is_error"] is False and r2["output"] == "弹幕已发送。"
+    assert r2["result"].get("dedup") is True
+    assert len(sent) == 1
+    # 不同内容 → 允许再发
+    r3 = asyncio.run(inst.bili_live_send_danmaku(room="1025219", text="再来一条"))
+    assert r3["is_error"] is False and len(sent) == 2
+    assert r3["result"].get("dedup") is None
+
+
+def test_live_send_danmaku_dedup_expires(monkeypatch) -> None:
+    """去重窗口过期后同一弹幕可再次发送。"""
+    import asyncio
+
+    from plugin.plugins.bili_viewer import BiliViewerPlugin, bili
+
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(bili, "live_send_danmaku", lambda room, text: (sent.append((room, text)), {"dmid": "D1", "server": "ok"})[1])
+    monkeypatch.delenv("BILLI_SYNC_DISABLE", raising=False)
+    inst = object.__new__(BiliViewerPlugin)
+    inst._ext_tab = lambda: None
+
+    asyncio.run(inst.bili_live_send_danmaku(room="1025219", text="过期测试"))
+    inst._danmaku_sent.clear()  # 模拟窗口已过（property 只读，clear 内部 dict 即可）
+    r = asyncio.run(inst.bili_live_send_danmaku(room="1025219", text="过期测试"))
+    assert r["is_error"] is False and r["result"].get("dedup") is None
+    assert len(sent) == 2
+
+
+def test_video_send_danmaku_dedup_once(monkeypatch) -> None:
+    """同一视频同一进度同一条弹幕 60 秒内重复触发只发一次。"""
+    import asyncio
+
+    from plugin.plugins.bili_viewer import BiliViewerPlugin, bili
+
+    sent: list[tuple[str, str, int]] = []
+    monkeypatch.setattr(
+        bili,
+        "send_video_danmaku",
+        lambda bvid, text, progress_ms=0: (sent.append((bvid, text, progress_ms)), {"dmid": "D2"})[1],
+    )
+    monkeypatch.delenv("BILLI_SYNC_DISABLE", raising=False)
+    inst = object.__new__(BiliViewerPlugin)
+    inst._ext_tab = lambda: None
+
+    r1 = asyncio.run(inst.bili_video_send_danmaku(bvid="BV1GJ411x7h7", text="镇站之宝", progress=5))
+    assert r1["is_error"] is False
+    r2 = asyncio.run(inst.bili_video_send_danmaku(bvid="BV1GJ411x7h7", text="镇站之宝", progress=5))
+    assert r2["is_error"] is False and r2["result"].get("dedup") is True
+    assert len(sent) == 1
+    # 同视频不同进度 → 不判重
+    r3 = asyncio.run(inst.bili_video_send_danmaku(bvid="BV1GJ411x7h7", text="镇站之宝", progress=30))
+    assert r3["is_error"] is False and r3["result"].get("dedup") is None
+    assert len(sent) == 2

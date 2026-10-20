@@ -158,6 +158,10 @@ class BiliViewerPlugin(NekoPluginBase):
         super().__init__(ctx)
         self._sync_thread: threading.Thread | None = None
         self._sync_lock = threading.Lock()
+        # 弹幕发送幂等去重：key=(kind,target,text) -> 上次发送时间戳。
+        # 防止 LLM/宿主对同一指令重复触发发送工具/兜底入口导致同一条弹幕发两次（v0.6.38）。
+        self._danmaku_sent: dict[str, float] = {}
+        self._danmaku_dedup_lock = threading.Lock()
         # 启动后台实时感知线程（守护线程，不阻塞插件生命周期）
         self._start_sync_watcher()
 
@@ -916,6 +920,8 @@ class BiliViewerPlugin(NekoPluginBase):
             "禁止添加任何其它文字：禁止说'搞定/任务搞定啦/发出去了/任务完成/发出去咯'等话术，"
             "禁止复述弹幕内容、房间号、BV号，禁止追问'你看到了吗/弹幕出来了吗'，"
             "禁止猜测为什么没看到（如'是不是开了弹幕过滤'）。"
+            "本工具已包含发送全流程：调用一次即完成，禁止再次调用本工具或 run/bili_danmaku 等任何发送入口"
+            "重复发送同一弹幕（同目标同内容 60 秒内会被自动去重，只发一次）。"
         ),
         parameters={
             "type": "object",
@@ -951,11 +957,16 @@ class BiliViewerPlugin(NekoPluginBase):
         if not text:
             self._record_send_result("live", False, "EMPTY_MSG", "弹幕内容为空", room)
             return {"output": "请提供要发送的弹幕内容。", "is_error": True, "error": "EMPTY_MSG"}
+        if self._danmaku_recently_sent("live", room, text, 0):
+            # 同房间同内容 60 秒内已发送过（可能是重复触发/兜底入口二次调用）→ 不重复发送
+            _logger.info("live danmaku dedup hit room=%s text=%r", room, text[:20])
+            return {"output": "弹幕已发送。", "is_error": False, "result": {"dedup": True, "room": room}}
         try:
             result = bili.live_send_danmaku(room, text)
         except bili.BiliError as exc:
             self._record_send_result("live", False, exc.code, exc.message, room)
             return _wrap_err(exc)
+        self._mark_danmaku_sent("live", room, text, 0)
         self._record_send_result("live", True, "", result.get("server") or "", room, dmid=result.get("dmid") or "")
         return {"output": "弹幕已发送。", "is_error": False, "result": result}
 
@@ -971,6 +982,8 @@ class BiliViewerPlugin(NekoPluginBase):
             "禁止添加任何其它文字：禁止说'搞定/任务搞定啦/发出去了/任务完成/发出去咯'等话术，"
             "禁止复述弹幕内容、房间号、BV号，禁止追问'你看到了吗/弹幕出来了吗'，"
             "禁止猜测为什么没看到（如'是不是开了弹幕过滤'）。"
+            "本工具已包含发送全流程：调用一次即完成，禁止再次调用本工具或 run/bili_danmaku 等任何发送入口"
+            "重复发送同一弹幕（同目标同内容 60 秒内会被自动去重，只发一次）。"
         ),
         parameters={
             "type": "object",
@@ -1005,11 +1018,20 @@ class BiliViewerPlugin(NekoPluginBase):
         if not text:
             self._record_send_result("video", False, "EMPTY_MSG", "弹幕内容为空", bvid)
             return {"output": "请提供要发送的弹幕内容。", "is_error": True, "error": "EMPTY_MSG"}
+        if self._danmaku_recently_sent("video", bvid, text, progress):
+            # 同视频同进度同内容 60 秒内已发送过（重复触发/兜底入口二次调用）→ 不重复发送
+            _logger.info("video danmaku dedup hit bvid=%s progress=%s text=%r", bvid, progress, text[:20])
+            return {
+                "output": "弹幕已发送。",
+                "is_error": False,
+                "result": {"dedup": True, "bvid": bvid, "progress": progress},
+            }
         try:
             result = bili.send_video_danmaku(bvid, text, progress_ms=progress * 1000)
         except bili.BiliError as exc:
             self._record_send_result("video", False, exc.code, exc.message, bvid)
             return _wrap_err(exc)
+        self._mark_danmaku_sent("video", bvid, text, progress)
         self._record_send_result("video", True, "", result.get("server") or "", bvid)
         return {
             "output": "弹幕已发送。",
@@ -1071,6 +1093,9 @@ class BiliViewerPlugin(NekoPluginBase):
             "回复纪律：发送弹幕后只原样回复'弹幕已发送。'，禁止'搞定/任务搞定啦/发出去咯'话术、"
             "禁止复述房间号/BV号/弹幕内容、禁止追问'你看到了吗'、禁止猜测弹幕为何没显示；"
             "感知/查询只陈述实况本身，禁止'系统又同步/系统刚给我确认了/房间号没错'等开场白与确认话术。"
+            "发送纪律：弹幕发送入口（bili_live_send_danmaku/bili_video_send_danmaku）调用一次即完成，"
+            "禁止发送后再次调用本入口或其他入口确认/补发/重复发送同一弹幕"
+            "（同目标同内容 60 秒内自动去重，只会发一次）。"
         ),
         input_schema={
             "type": "object",
@@ -1137,6 +1162,8 @@ class BiliViewerPlugin(NekoPluginBase):
             "直播弹幕需房间号（room），视频弹幕需BV号（bvid），内容为 text；"
             "发送后只原样回复'弹幕已发送。'，禁止'搞定/任务搞定啦/发出去咯'话术、禁止复述房间号/BV号/弹幕内容、"
             "禁止追问'你看到了吗'、禁止猜测弹幕为何没显示。需要已绑定B站账号。"
+            "本入口调用一次即完成发送，禁止发送后再次调用本入口或 run 等其他入口确认/补发/重复发送同一弹幕"
+            "（同目标同内容 60 秒内自动去重，只会发一次）。"
         ),
         input_schema={
             "type": "object",
@@ -1320,6 +1347,38 @@ class BiliViewerPlugin(NekoPluginBase):
         }
         _logger.info("danmaku send result: kind=%s ok=%s error=%s message=%s target=%s",
                      kind, ok, error, str(message or "")[:120], target)
+
+    _DANMAKU_DEDUP_WINDOW = 60.0  # 同目标同内容弹幕的去重窗口（秒）
+
+    def _dedup_lock(self) -> threading.Lock:
+        # 惰性初始化：测试环境常用 object.__new__ 构造实例，__init__ 不会执行
+        lock = getattr(self, "_danmaku_dedup_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._danmaku_dedup_lock = lock
+        return lock
+
+    def _danmaku_recently_sent(self, kind: str, target: str, text: str, progress: int) -> bool:
+        """幂等去重：同一目标（房间/BV+进度）与内容在窗口内是否已发送过。"""
+        key = f"{kind}|{target}|{progress}|{text}"
+        with self._dedup_lock():
+            sent = getattr(self, "_danmaku_sent", None)
+            ts = (sent or {}).get(key)
+            return ts is not None and (time.time() - ts) < self._DANMAKU_DEDUP_WINDOW
+
+    def _mark_danmaku_sent(self, kind: str, target: str, text: str, progress: int) -> None:
+        """记录一次真实发送时间戳；超过窗口的旧记录惰性清理。"""
+        key = f"{kind}|{target}|{progress}|{text}"
+        now = time.time()
+        with self._dedup_lock():
+            sent = getattr(self, "_danmaku_sent", None)
+            if sent is None:
+                sent = {}
+                self._danmaku_sent = sent
+            sent[key] = now
+            stale = [k for k, ts in sent.items() if now - ts > self._DANMAKU_DEDUP_WINDOW * 2]
+            for k in stale:
+                sent.pop(k, None)
 
     def _panel_status(self) -> dict:
         """面板状态接口：浏览器接入状态 + B站绑定状态 + 扩展通道状态（纯本地，无网络）。"""
