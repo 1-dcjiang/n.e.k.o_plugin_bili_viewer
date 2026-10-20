@@ -822,7 +822,7 @@ class BiliViewerPlugin(NekoPluginBase):
         except bili.BiliError as exc:
             self._record_send_result("live", False, exc.code, exc.message, room)
             return _wrap_err(exc)
-        self._record_send_result("live", True, "", result.get("server") or "", room)
+        self._record_send_result("live", True, "", result.get("server") or "", room, dmid=result.get("dmid") or "")
         return {"output": f"已向直播间 {result['room_id']} 发送弹幕：{result['text']}", "is_error": False, "result": result}
 
     @llm_tool(
@@ -1055,7 +1055,7 @@ class BiliViewerPlugin(NekoPluginBase):
             return None
         return tab
 
-    def _record_send_result(self, kind: str, ok: bool, error: str, message: str, target: str) -> None:
+    def _record_send_result(self, kind: str, ok: bool, error: str, message: str, target: str, dmid: str = "") -> None:
         """记录最近一次弹幕发送结果（供面板只读诊断；不含任何 cookie 内容）。"""
         self._last_send_result = {
             "kind": kind,
@@ -1063,6 +1063,7 @@ class BiliViewerPlugin(NekoPluginBase):
             "error": str(error or ""),
             "message": str(message or "")[:120],
             "target": str(target or ""),
+            "dmid": str(dmid or ""),
             "at": int(time.time()),
         }
         _logger.info("danmaku send result: kind=%s ok=%s error=%s message=%s target=%s",

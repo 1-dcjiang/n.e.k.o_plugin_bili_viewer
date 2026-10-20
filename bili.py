@@ -1099,7 +1099,18 @@ def live_send_danmaku(room: str, text: str) -> dict:
         data = _http_post(_LIVE_API + "/msg/send", form)
     except BiliError as exc:
         raise BiliError("弹幕发送失败：" + exc.message, "SEND_FAILED:" + exc.code) from exc
-    return {"ok": True, "room_id": int(page_room), "text": text, "server": data.get("message") or ""}
+    resp_data = data.get("data")
+    dmid = ""
+    if isinstance(resp_data, dict):
+        dmid = str(resp_data.get("dmid") or resp_data.get("dmid_str") or "")
+    return {
+        "ok": True,
+        "room_id": int(page_room),
+        "text": text,
+        "server": data.get("message") or "",
+        "resp_code": data.get("code"),
+        "dmid": dmid,
+    }
 
 
 def send_video_danmaku(bvid: str, text: str, progress_ms: int = 0) -> dict:
