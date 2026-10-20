@@ -1051,6 +1051,67 @@ def test_detect_db_error_when_browser_closed(monkeypatch, tmp_path) -> None:
     assert status == cookie_auto._STATUS_FAIL and cookie == ""
 
 
+def test_receive_ext_shot_rejects_non_image_prefix(monkeypatch) -> None:
+    """截屏推送必须 data:image/*;base64 前缀：其他 dataURL（如 text/html）拒绝落盘（v0.6.39）。"""
+    import base64
+
+    from plugin.plugins.bili_viewer import BiliViewerPlugin
+
+    monkeypatch.delenv("BILLI_SYNC_DISABLE", raising=False)
+    inst = BiliViewerPlugin(ctx=None)
+    jpeg = base64.b64encode(b"\xff\xd8\xff\xe0fake").decode()
+    resp = inst._receive_ext_shot({"image": f"data:text/html;base64,{jpeg}", "url": "https://x", "title": "t", "at": 1})
+    assert resp["ok"] is False
+    assert inst._ext_shot() is None
+
+
+def test_receive_ext_shot_rejects_oversized(monkeypatch) -> None:
+    """截屏 raw 超过 20MB 上限时拒绝落盘，防磁盘耗尽（v0.6.39）。"""
+    import base64
+
+    from plugin.plugins.bili_viewer import BiliViewerPlugin
+
+    monkeypatch.delenv("BILLI_SYNC_DISABLE", raising=False)
+    inst = BiliViewerPlugin(ctx=None)
+    # 21MB 全零字节的 base64（避免 OOM：用 padding 构造）
+    big_raw = b"\x00" * (21 * 1024 * 1024)
+    payload = base64.b64encode(big_raw).decode()
+    resp = inst._receive_ext_shot({"image": f"data:image/jpeg;base64,{payload}", "url": "https://x", "title": "t", "at": 1})
+    assert resp["ok"] is False
+    assert "过大" in resp.get("detail", "")
+
+
+def test_receive_ext_dom_danmaku_capped(monkeypatch) -> None:
+    """DOM 弹幕数组截断：条数与单条长度都设上限，防异常推送撑爆内存（v0.6.39）。"""
+    import time as _t
+
+    from plugin.plugins.bili_viewer import BiliViewerPlugin
+
+    monkeypatch.delenv("BILLI_SYNC_DISABLE", raising=False)
+    inst = BiliViewerPlugin(ctx=None)
+    resp = inst._receive_ext_dom({
+        "url": "https://live.bilibili.com/1025219",
+        "kind": "live",
+        "title": "直播",
+        "danmaku": ["长弹幕" * 500] + [f"dm{i}" for i in range(500)],
+        "at": int(_t.time()),
+    })
+    assert resp["ok"] is True
+    dom = inst._ext_dom()
+    assert dom is not None
+    assert len(dom["danmaku"]) == inst._EXT_DOM_MAX_DANMAKU  # 100 条
+    assert all(len(x) <= inst._EXT_DOM_MAX_DM_LEN for x in dom["danmaku"])  # 每条 ≤200 字
+
+
+def test_sync_text_truncates_long_subject() -> None:
+    """同步注入文本对超长标题截断，防止恶意/异常标题撑爆上下文（v0.6.39）。"""
+    from plugin.plugins.bili_viewer import _sync_text
+
+    t = _sync_text({"kind": "video", "is_bili": True, "subject": "超长标题" * 200})
+    assert t is not None and "内部感知" in t
+    assert len(t) < 1000
+
+
 def test_live_send_danmaku_dedup_once(monkeypatch) -> None:
     """同一房间同一条弹幕 60 秒内重复触发只发一次（v0.6.38 幂等去重）。"""
     import asyncio

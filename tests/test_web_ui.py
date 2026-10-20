@@ -214,3 +214,83 @@ def test_panel_post_origin_blocked(monkeypatch, tmp_path):
         assert len(received) == 2
     finally:
         panel.stop()
+
+
+def test_extension_shot_accepts_large_body(monkeypatch, tmp_path):
+    """截屏端点：大 payload（>默认 64KB，真实浏览器截图大小）必须放行（v0.6.39）。"""
+    web_ui = _web_ui()
+    received = []
+
+    def shot_fn(body):
+        received.append(body.get("image") or "")
+        return {"ok": True}
+
+    panel = web_ui.BindPanel(
+        lambda *_: {"ok": True},
+        lambda *_: {"ok": True},
+        ext_fn=lambda *_: {"ok": True},
+        shot_fn=shot_fn,
+        port=_free_port(),
+    )
+    panel.ensure_started()
+    port = panel._port
+    big = "data:image/jpeg;base64," + ("A" * 200_000)  # ≈150KB base64
+    try:
+        data = json.dumps({"image": big, "url": "https://live.bilibili.com/1025219", "title": "t", "at": 1}).encode()
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/extension-shot", data=data, method="POST")
+        req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            assert resp.status == 200
+        assert received and received[0] == big
+    finally:
+        panel.stop()
+
+
+def test_extension_cookie_body_still_limited(monkeypatch, tmp_path):
+    """非截屏端点保持默认 64KB 上限：超大 payload 被拒为空，回调不收到内容（v0.6.39）。"""
+    web_ui = _web_ui()
+    received = []
+
+    def ext_fn(cookie, at):
+        received.append((cookie, at))
+        return {"ok": True, "bound": True}
+
+    panel = web_ui.BindPanel(
+        lambda *_: {"ok": True},
+        lambda *_: {"ok": True},
+        ext_fn=ext_fn,
+        port=_free_port(),
+    )
+    panel.ensure_started()
+    port = panel._port
+    try:
+        data = json.dumps({"cookie": "SESSDATA=" + "x" * 100_000, "at": 1}).encode()
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/extension-cookie", data=data, method="POST")
+        req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            assert resp.status == 200
+        assert received and received[0][0] == ""  # body 超限 → 空 payload，未解析到 cookie
+    finally:
+        panel.stop()
+
+
+def test_panel_get_origin_blocked(monkeypatch, tmp_path):
+    """GET 端点对称校验：恶意网页 Origin 读状态也被 403（v0.6.39）。"""
+    web_ui = _web_ui()
+    panel, url = _start_panel(lambda *_: {"ok": True})
+    port = panel._port
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/status")
+        req.add_header("Origin", "https://evil.example")
+        try:
+            with urllib.request.urlopen(req, timeout=10):
+                assert False, "恶意 Origin 的 GET 应被拒绝"
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 403
+        # 面板自身 Origin 放行
+        req2 = urllib.request.Request(f"http://127.0.0.1:{port}/api/status")
+        req2.add_header("Origin", f"http://127.0.0.1:{port}")
+        with urllib.request.urlopen(req2, timeout=10) as resp:
+            assert resp.status == 200
+    finally:
+        panel.stop()

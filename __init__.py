@@ -117,7 +117,7 @@ def _sync_text(parsed: dict) -> str | None:
         return None
     if parsed.get("is_bili"):
         label = "直播" if kind == "live" else "视频"
-        subject = parsed.get("subject") or "未知内容"
+        subject = (parsed.get("subject") or "未知内容")[:100]  # 超长标题截断，防撑爆注入上下文
         # 附带精确标识：直播给房间号（YUI 可直接发弹幕/查详情）、视频给 BV 号。
         # 明确指示这些编号仅供内部操作（发弹幕/查详情），不要向用户复述出来。
         extra = ""
@@ -132,10 +132,15 @@ def _sync_text(parsed: dict) -> str | None:
             "没人问就不提。）"
         )
     if parsed.get("site"):
-        return f"（实时感知：用户当前正在用 {parsed['site']}，页面「{parsed.get('subject') or '未知'}」）"
+        site = (str(parsed["site"]) or "")[:30]
+        subj = (str(parsed.get("subject") or "未知"))[:100]
+        return f"（实时感知：用户当前正在用 {site}，页面「{subj}」）"
     if kind == "web":
-        return f"（实时感知：用户当前正在浏览网页「{parsed.get('subject') or '未知'}」）"
-    return f"（实时感知：用户当前正在使用应用 {parsed.get('app') or '未知'}，窗口「{parsed.get('subject') or '未知'}」）"
+        subj = (str(parsed.get("subject") or "未知"))[:100]
+        return f"（实时感知：用户当前正在浏览网页「{subj}」）"
+    app = (str(parsed.get("app") or "未知"))[:30]
+    subj = (str(parsed.get("subject") or "未知"))[:100]
+    return f"（实时感知：用户当前正在使用应用 {app}，窗口「{subj}」）"
 
 
 def _window_fingerprint(parsed: dict) -> str:
@@ -1250,6 +1255,12 @@ class BiliViewerPlugin(NekoPluginBase):
         不上传、不写日志。
         """
         ts = float(body.get("at") or 0) or time.time()
+        raw_dms = body.get("danmaku") or []
+        if isinstance(raw_dms, list):
+            # 条数与单条长度都设上限，防止异常/恶意 DOM 推送撑爆内存与后续渲染
+            danmaku = [str(x)[: self._EXT_DOM_MAX_DM_LEN] for x in raw_dms[: self._EXT_DOM_MAX_DANMAKU]]
+        else:
+            danmaku = []
         self._ext_dom_data = {
             "url": str(body.get("url") or "").strip(),
             "kind": str(body.get("kind") or "").strip(),
@@ -1260,7 +1271,7 @@ class BiliViewerPlugin(NekoPluginBase):
             "parent_area": str(body.get("parent_area") or ""),
             "progress": float(body.get("progress") or 0) or 0,
             "duration": float(body.get("duration") or 0) or 0,
-            "danmaku": body.get("danmaku") or [],
+            "danmaku": danmaku,
             "at": ts,
         }
         _logger.info(
@@ -1282,18 +1293,30 @@ class BiliViewerPlugin(NekoPluginBase):
             return None
         return dom
 
+    _EXT_SHOT_MAX_RAW = 20 * 1024 * 1024  # 截屏落盘上限：防恶意/异常超大 payload 撑爆磁盘
+    _EXT_DOM_MAX_DANMAKU = 100  # 页面 DOM 弹幕最多保留条数
+    _EXT_DOM_MAX_DM_LEN = 200  # 单条弹幕最长字符
+
     def _receive_ext_shot(self, body: dict) -> dict:
         """接收浏览器扩展截取的当前标签页画面（JPEG dataURL），落盘供 YUI 读取。
 
         画面仅本地保存（_SCREENSHOT_PATH），不上传、不写日志正文。
+        仅接受 data:image/* 前缀的合法 base64，且限制落盘体积（v0.6.39）。
         """
         image = str(body.get("image") or "")
         if not image or "," not in image:
             return {"ok": False, "detail": "截屏数据为空或格式异常"}
+        header = image.split(",", 1)[0].strip()
+        if not header.startswith("data:image/") or not header.lower().endswith(";base64"):
+            return {"ok": False, "detail": "截屏数据格式不受支持（仅 data:image/*;base64）"}
         try:
-            raw = base64.b64decode(image.split(",", 1)[1])
+            raw = base64.b64decode(image.split(",", 1)[1], validate=True)
         except Exception as exc:
             return {"ok": False, "detail": f"截屏解码失败：{exc}"}
+        if not raw:
+            return {"ok": False, "detail": "截屏内容为空"}
+        if len(raw) > self._EXT_SHOT_MAX_RAW:
+            return {"ok": False, "detail": f"截屏体积过大（>{self._EXT_SHOT_MAX_RAW} 字节），已拒绝落盘"}
         try:
             os.makedirs(os.path.dirname(_SCREENSHOT_PATH), exist_ok=True)
             with open(_SCREENSHOT_PATH, "wb") as f:

@@ -18,6 +18,11 @@ _PANEL_PORT = 8765
 _EXT_ONLINE_WINDOW = 120.0  # 扩展最近一次推送超过该秒数视为离线
 _PANEL_URL = f"http://{_PANEL_HOST}:{_PANEL_PORT}/"
 
+# 扩展通道请求体上限（字节）：截屏 base64（4K 屏 JPEG≈几 MB）与页面 DOM 实况
+# 远大于默认 64KB，按端点分别放宽；同时防止无上限的磁盘/内存滥用。
+_EXT_SHOT_MAX_BYTES = 16 * 1024 * 1024
+_EXT_DOM_MAX_BYTES = 2 * 1024 * 1024
+
 _PAGE = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -99,10 +104,15 @@ class _PanelHandler(BaseHTTPRequestHandler):
     def _json(self, code: int, payload: dict) -> None:
         self._send(code, "application/json; charset=utf-8", json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
-    def _read_json_body(self) -> dict:
+    def _read_json_body(self, max_len: int = 65536) -> dict:
+        """读取并解析 JSON 请求体；超过 max_len 直接视为空（防内存/磁盘滥用）。
+
+        extension-shot 通道（浏览器截屏 base64）与 extension-dom（页面 DOM 实况）
+        的负载可能远超默认 64KB，调用方按端点传入更大上限；其余端点保持默认小上限。
+        """
         try:
             length = int(self.headers.get("Content-Length") or 0)
-            if length <= 0 or length > 65536:
+            if length <= 0 or length > max_len:
                 return {}
             return json.loads(self.rfile.read(length).decode("utf-8", "replace"))
         except Exception:
@@ -134,6 +144,9 @@ class _PanelHandler(BaseHTTPRequestHandler):
 
     # -- routes --
     def do_GET(self) -> None:
+        if not self._origin_allowed():
+            self._json(403, {"error": "origin not allowed"})
+            return
         status_fn = self.server.status_fn
         if self.path.startswith("/api/status"):
             payload = dict(status_fn() or {})
@@ -184,7 +197,7 @@ class _PanelHandler(BaseHTTPRequestHandler):
             self._json(200, payload)
             return
         if self.path.startswith("/api/extension-dom"):
-            body = self._read_json_body()
+            body = self._read_json_body(_EXT_DOM_MAX_BYTES)
             try:
                 payload = dict(self.server.dom_fn(body) or {"ok": False})
             except Exception as exc:
@@ -192,7 +205,7 @@ class _PanelHandler(BaseHTTPRequestHandler):
             self._json(200, payload)
             return
         if self.path.startswith("/api/extension-shot"):
-            body = self._read_json_body()
+            body = self._read_json_body(_EXT_SHOT_MAX_BYTES)
             try:
                 payload = dict(self.server.shot_fn(body) or {"ok": False})
             except Exception as exc:
