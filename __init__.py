@@ -845,7 +845,8 @@ class BiliViewerPlugin(NekoPluginBase):
             "配合 bili_live_danmaku 采集实时弹幕、理解后再回复。"
             "参数 room：房间号或链接；text：弹幕内容（最长 30 字）。"
             "这是写操作：需要配置 BILI_COOKIE（含 bili_jct 与 SESSDATA）环境变量，"
-            "且仅在用户明确确认后调用。发送后回复用户时无需复述房间号。"
+            "且仅在用户明确确认后调用。发送成功后只回复一句简短确认（如'弹幕已发送'），"
+            "不要复述弹幕内容、不要复述房间号、不要追问'你看到了吗/弹幕出来了吗'。"
         ),
         parameters={
             "type": "object",
@@ -887,7 +888,7 @@ class BiliViewerPlugin(NekoPluginBase):
             self._record_send_result("live", False, exc.code, exc.message, room)
             return _wrap_err(exc)
         self._record_send_result("live", True, "", result.get("server") or "", room, dmid=result.get("dmid") or "")
-        return {"output": f"已向直播间 {result['room_id']} 发送弹幕：{result['text']}", "is_error": False, "result": result}
+        return {"output": "弹幕已发送。", "is_error": False, "result": result}
 
     @llm_tool(
         name="bili_video_send_danmaku",
@@ -897,7 +898,8 @@ class BiliViewerPlugin(NekoPluginBase):
             "参数 bvid：视频 BV 号；text：弹幕内容（最长 100 字）；"
             "progress：弹幕出现的时间点（秒，可选，默认 0 即视频开头）。"
             "这是写操作：需要配置 BILI_COOKIE（含 bili_jct 与 SESSDATA）环境变量，"
-            "且仅在用户明确确认后调用。发送后回复用户时无需复述 BV 号。"
+            "且仅在用户明确确认后调用。发送成功后只回复一句简短确认（如'弹幕已发送'），"
+            "不要复述弹幕内容、不要复述 BV 号、不要追问'你看到了吗/弹幕出来了吗'。"
         ),
         parameters={
             "type": "object",
@@ -939,7 +941,7 @@ class BiliViewerPlugin(NekoPluginBase):
             return _wrap_err(exc)
         self._record_send_result("video", True, "", result.get("server") or "", bvid)
         return {
-            "output": f"已向视频 {result['bvid']} 发送弹幕：{result['text']}（时间点 {result['progress_ms'] // 1000} 秒）",
+            "output": "弹幕已发送。",
             "is_error": False,
             "result": result,
         }
