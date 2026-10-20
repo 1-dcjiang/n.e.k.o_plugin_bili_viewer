@@ -901,13 +901,24 @@ class BiliViewerPlugin(NekoPluginBase):
             return await self.bili_live_send_danmaku(room=room, text=text)
         if action in ("send_video_danmaku", "video_danmaku"):
             return await self.bili_video_send_danmaku(bvid=bvid, text=text, progress=progress)
-        # 兜底：感知当前正在看的内容（若用户请求是 B站相关但未给具体参数）
+        # 兜底①：LLM 未给 action 但显式给了目标 → 按目标直接发弹幕
+        if text and bvid:
+            return await self.bili_video_send_danmaku(bvid=bvid, text=text, progress=progress)
+        if text and room:
+            return await self.bili_live_send_danmaku(room=room, text=text)
+        # 兜底②：感知当前正在看的视频/直播 → 有弹幕内容时自动发送
+        # （parse_bili_url 键名为 kind/room_id/bvid，无 'type' 键，v0.6.23 KeyError 教训）
         tab = self._ext_tab()
         if tab:
             parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
             if parsed is not None:
+                kind = parsed.get("kind")
+                if text and kind == "video" and parsed.get("bvid"):
+                    return await self.bili_video_send_danmaku(bvid=parsed["bvid"], text=text, progress=progress)
+                if text and kind == "live" and parsed.get("room_id"):
+                    return await self.bili_live_send_danmaku(room=parsed["room_id"], text=text)
                 return {
-                    "output": f"当前正在看：{tab.get('title', '')}（{parsed['type']}）",
+                    "output": f"当前正在看：{tab.get('title', '')}（{kind or '未知'}）",
                     "is_error": False,
                     "result": parsed,
                 }

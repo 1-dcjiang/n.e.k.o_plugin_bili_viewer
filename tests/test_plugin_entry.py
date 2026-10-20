@@ -145,3 +145,80 @@ def test_collect_entries_contains_plugin_entries() -> None:
     assert collected["run"].meta.id == "run"
     assert collected["bili_danmaku"].meta.id == "bili_danmaku"
     assert collected["bili_danmaku"].meta.event_type == "plugin_entry"
+
+
+def test_entry_run_fallback_no_action_with_bvid() -> None:
+    """兜底①：LLM 未给 action 但显式给了 bvid+text → 自动发视频弹幕。"""
+    import asyncio
+
+    plugin = object.__new__(_plugin_cls())
+    calls = []
+
+    async def fake_video(bvid="", text="", progress=0, **_):
+        calls.append(("video", bvid, text, progress))
+        return {"output": f"ok {bvid}", "is_error": False}
+
+    plugin.bili_video_send_danmaku = fake_video
+    plugin._ext_tab = lambda: None
+
+    result = asyncio.run(plugin.entry_run(bvid="BV1yy", text="mft"))
+    assert calls == [("video", "BV1yy", "mft", 0)]
+    assert result["is_error"] is False
+
+
+def test_entry_run_fallback_senses_current_video() -> None:
+    """兜底②：无 action 且无显式目标，感知当前正在看的视频并自动发送。"""
+    import asyncio
+
+    plugin = object.__new__(_plugin_cls())
+    calls = []
+
+    async def fake_video(bvid="", text="", progress=0, **_):
+        calls.append(("video", bvid, text, progress))
+        return {"output": f"ok {bvid}", "is_error": False}
+
+    plugin.bili_video_send_danmaku = fake_video
+    plugin._ext_tab = lambda: {
+        "url": "https://www.bilibili.com/video/BV1cur",
+        "title": "当前视频标题",
+        "at": 9999999999.0,
+    }
+
+    result = asyncio.run(plugin.entry_run(text="mft"))
+    assert calls == [("video", "BV1cur", "mft", 0)]
+    assert result["is_error"] is False
+
+
+def test_entry_run_fallback_senses_current_live() -> None:
+    """兜底②：感知当前正在看的直播并自动发送直播弹幕。"""
+    import asyncio
+
+    plugin = object.__new__(_plugin_cls())
+    calls = []
+
+    async def fake_live(room="", text="", **_):
+        calls.append(("live", room, text))
+        return {"output": f"ok {room}", "is_error": False}
+
+    plugin.bili_live_send_danmaku = fake_live
+    plugin._ext_tab = lambda: {
+        "url": "https://live.bilibili.com/88888",
+        "title": "直播间",
+        "at": 9999999999.0,
+    }
+
+    result = asyncio.run(plugin.entry_run(text="mft"))
+    assert calls == [("live", "88888", "mft")]
+    assert result["is_error"] is False
+
+
+def test_entry_run_fallback_no_target_no_crash() -> None:
+    """无 action、无目标、无可感知内容 → 返回 NO_ACTION 而非 KeyError（v0.6.23 回归）。"""
+    import asyncio
+
+    plugin = object.__new__(_plugin_cls())
+    plugin._ext_tab = lambda: None
+
+    result = asyncio.run(plugin.entry_run(text="mft"))
+    assert result["is_error"] is True
+    assert result["error"] == "NO_ACTION"
