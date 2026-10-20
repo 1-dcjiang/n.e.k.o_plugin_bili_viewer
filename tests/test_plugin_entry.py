@@ -222,3 +222,83 @@ def test_entry_run_fallback_no_target_no_crash() -> None:
     result = asyncio.run(plugin.entry_run(text="mft"))
     assert result["is_error"] is True
     assert result["error"] == "NO_ACTION"
+
+
+def test_llm_tool_video_send_senses_current_video() -> None:
+    """llm_tool 版发视频弹幕：LLM 未给 bvid 时感知当前视频自动补齐（v0.6.25）。"""
+    import asyncio
+
+    from plugin.plugins.bili_viewer import bili
+
+    plugin = object.__new__(_plugin_cls())
+    calls = []
+
+    def fake_send(bvid="", text="", progress_ms=0):
+        calls.append(("video", bvid, text, progress_ms))
+        return {"ok": True, "bvid": bvid, "cid": 1, "text": text, "progress_ms": progress_ms, "server": ""}
+
+    orig = bili.send_video_danmaku
+    bili.send_video_danmaku = fake_send
+    plugin._ext_tab = lambda: {
+        "url": "https://www.bilibili.com/video/BV1llm",
+        "title": "Kards 视频",
+        "at": 9999999999.0,
+    }
+    try:
+        result = asyncio.run(plugin.bili_video_send_danmaku(text="mft"))
+    finally:
+        bili.send_video_danmaku = orig
+    assert calls == [("video", "BV1llm", "mft", 0)]
+    assert result["is_error"] is False
+
+
+def test_llm_tool_video_send_no_sense_keeps_error() -> None:
+    """llm_tool 版发视频弹幕：无可感知视频时保持 NO_BVID 错误。"""
+    import asyncio
+
+    plugin = object.__new__(_plugin_cls())
+    plugin._ext_tab = lambda: None
+
+    result = asyncio.run(plugin.bili_video_send_danmaku(text="mft"))
+    assert result["is_error"] is True
+    assert result["error"] == "NO_BVID"
+
+
+def test_llm_tool_live_send_senses_current_live() -> None:
+    """llm_tool 版发直播弹幕：LLM 未给 room 时感知当前直播自动补齐（v0.6.25）。"""
+    import asyncio
+
+    from plugin.plugins.bili_viewer import bili
+
+    plugin = object.__new__(_plugin_cls())
+    calls = []
+
+    def fake_send(room="", text=""):
+        calls.append(("live", room, text))
+        return {"ok": True, "room_id": int(room), "text": text, "server": ""}
+
+    orig = bili.live_send_danmaku
+    bili.live_send_danmaku = fake_send
+    plugin._ext_tab = lambda: {
+        "url": "https://live.bilibili.com/66666",
+        "title": "直播间",
+        "at": 9999999999.0,
+    }
+    try:
+        result = asyncio.run(plugin.bili_live_send_danmaku(text="mft"))
+    finally:
+        bili.live_send_danmaku = orig
+    assert calls == [("live", "66666", "mft")]
+    assert result["is_error"] is False
+
+
+def test_llm_tool_live_send_no_sense_keeps_error() -> None:
+    """llm_tool 版发直播弹幕：无可感知直播时保持 NO_ROOM 错误。"""
+    import asyncio
+
+    plugin = object.__new__(_plugin_cls())
+    plugin._ext_tab = lambda: None
+
+    result = asyncio.run(plugin.bili_live_send_danmaku(text="mft"))
+    assert result["is_error"] is True
+    assert result["error"] == "NO_ROOM"

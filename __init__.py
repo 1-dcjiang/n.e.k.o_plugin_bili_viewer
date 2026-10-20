@@ -795,6 +795,13 @@ class BiliViewerPlugin(NekoPluginBase):
         room = (room or params.get("room") or "").strip()
         text = (text or params.get("text") or "").strip()
         if not room:
+            # 兜底：LLM 直接函数调用未给 room 时，感知当前正在看的直播自动补齐
+            tab = self._ext_tab()
+            if tab:
+                parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
+                if parsed is not None and parsed.get("kind") == "live" and parsed.get("room_id"):
+                    room = str(parsed["room_id"])
+        if not room:
             return {"output": "请提供直播房间号或链接。", "is_error": True, "error": "NO_ROOM"}
         if not text:
             return {"output": "请提供要发送的弹幕内容。", "is_error": True, "error": "EMPTY_MSG"}
@@ -834,6 +841,13 @@ class BiliViewerPlugin(NekoPluginBase):
         except (TypeError, ValueError):
             progress = 0
         progress = max(0, progress)
+        if not bvid:
+            # 兜底：LLM 直接函数调用未给 bvid 时，感知当前正在看的视频自动补齐
+            tab = self._ext_tab()
+            if tab:
+                parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
+                if parsed is not None and parsed.get("kind") == "video" and parsed.get("bvid"):
+                    bvid = parsed["bvid"]
         if not bvid:
             return {"output": "请提供视频 BV 号。", "is_error": True, "error": "NO_BVID"}
         if not text:
