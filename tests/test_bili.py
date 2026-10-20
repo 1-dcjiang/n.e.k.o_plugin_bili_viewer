@@ -253,6 +253,7 @@ def test_video_send_danmaku_posts_with_cid(monkeypatch) -> None:
         monkeypatch.delenv("BILI_COOKIE", raising=False)
     assert result["ok"] is True
     assert posted["form"]["oid"] == 10086  # 第一P cid
+    assert posted["form"]["bvid"] == "BV1xx411c7mD"  # bvid 必填（缺失返回 -400 请求错误）
     assert posted["form"]["msg"] == "前排围观"
     assert posted["form"]["progress"] == 45000
     assert posted["form"]["csrf"] == "tok"
