@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import os
 import re
@@ -23,6 +24,11 @@ from plugin.sdk.plugin import NekoPluginBase, lifecycle, llm_tool, neko_plugin, 
 from . import bili, cdp_cookie, cookie_auto, desktop_deliver, web_ui
 
 _logger = logging.getLogger(__name__)
+
+# 扩展截屏落盘位置（仅本地保存，供 YUI 读取画面实况）
+_SCREENSHOT_PATH = os.path.join(
+    os.environ.get("LOCALAPPDATA", r"C:\Users\Public"), "N.E.K.O", "bili_viewer_screen.jpg"
+)
 
 
 def _wrap_err(exc: bili.BiliError) -> dict:
@@ -1004,6 +1010,35 @@ class BiliViewerPlugin(NekoPluginBase):
             "result": result,
         }
 
+    @llm_tool(
+        name="bili_see_screen",
+        description=(
+            "读取用户当前标签页的画面截图（浏览器扩展 captureVisibleTab 截取，"
+            "JPEG 已保存到本地 _SCREENSHOT_PATH）。何时用：用户问'你看得到画面吗''你看得到屏幕吗'"
+            "'直播画面你能看到吗'，或 YUI 需要描述画面本身（非文字实况）时。"
+            "无需参数；截图 120 秒内新鲜，超出后提示稍后重试。"
+            "回复纪律：看到画面后直接描述画面内容（直播画面/游戏画面等）；"
+            "看不到时如实说明，禁止说'系统刚给我确认了'等话术，禁止猜测。"
+        ),
+        parameters={"type": "object", "properties": {}, "required": []},
+        timeout=20.0,
+    )
+    async def bili_see_screen(self, **_):
+        shot = self._ext_shot()
+        if not shot:
+            return {
+                "output": "暂时没有新鲜画面截图（扩展未截取或已过期）。",
+                "is_error": True,
+                "error": "NO_SHOT",
+            }
+        path = shot.get("path") or _SCREENSHOT_PATH
+        return {
+            "output": f"已读取你屏幕当前画面截图（{shot.get('title') or shot.get('url') or ''}，"
+            f"保存于 {path}，{shot.get('size') or 0} 字节）。",
+            "is_error": False,
+            "result": {"path": path, "title": shot.get("title", ""), "at": shot.get("at", 0)},
+        }
+
     # ══════════ 自动路由入口（plugin_entry：TaskExecutor 评估可见） ══════════
     # llm_tool 走 LLM 函数调用通道；plugin_entry 走 TaskExecutor 的 UserPlugin
     # 路由通道（评估时 LLM 依据插件 entries 判断"哪个插件能执行该请求"并路由）。
@@ -1213,6 +1248,49 @@ class BiliViewerPlugin(NekoPluginBase):
             return None
         return dom
 
+    def _receive_ext_shot(self, body: dict) -> dict:
+        """接收浏览器扩展截取的当前标签页画面（JPEG dataURL），落盘供 YUI 读取。
+
+        画面仅本地保存（_SCREENSHOT_PATH），不上传、不写日志正文。
+        """
+        image = str(body.get("image") or "")
+        if not image or "," not in image:
+            return {"ok": False, "detail": "截屏数据为空或格式异常"}
+        try:
+            raw = base64.b64decode(image.split(",", 1)[1])
+        except Exception as exc:
+            return {"ok": False, "detail": f"截屏解码失败：{exc}"}
+        try:
+            os.makedirs(os.path.dirname(_SCREENSHOT_PATH), exist_ok=True)
+            with open(_SCREENSHOT_PATH, "wb") as f:
+                f.write(raw)
+        except Exception as exc:
+            return {"ok": False, "detail": f"截屏落盘失败：{exc}"}
+        self._ext_shot_data = {
+            "url": str(body.get("url") or "").strip(),
+            "title": str(body.get("title") or "")[:200],
+            "path": _SCREENSHOT_PATH,
+            "size": len(raw),
+            "at": float(body.get("at") or 0) or time.time(),
+        }
+        _logger.info(
+            "ext shot received: url=%s title=%s bytes=%d at=%s",
+            self._ext_shot_data["url"][:60],
+            self._ext_shot_data["title"][:30],
+            len(raw),
+            int(self._ext_shot_data["at"]),
+        )
+        return {"ok": True, "detail": "已保存当前页面画面截图"}
+
+    def _ext_shot(self) -> dict | None:
+        """返回新鲜（120s 内）的扩展截屏元数据；无或过期返回 None。"""
+        shot = getattr(self, "_ext_shot_data", None)
+        if not shot:
+            return None
+        if time.time() - float(shot.get("at") or 0) > web_ui._EXT_ONLINE_WINDOW:
+            return None
+        return shot
+
     def _ext_tab(self) -> dict | None:
         """返回新鲜（120s 内）的扩展标签页数据；无或过期返回 None。"""
         tab = getattr(self, "_ext_tab_data", None)
@@ -1278,6 +1356,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 ext_fn=self._receive_ext_cookie,
                 tab_fn=self._receive_ext_tab,
                 dom_fn=self._receive_ext_dom,
+                shot_fn=self._receive_ext_shot,
             )
             self._bind_panel = panel
         return panel.ensure_started()

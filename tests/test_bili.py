@@ -231,6 +231,34 @@ def test_receive_ext_dom_stores_realtime(monkeypatch) -> None:
     assert inst._ext_dom() is None
 
 
+def test_receive_ext_shot_stores_and_see_screen(monkeypatch) -> None:
+    """扩展截屏推送：落盘、120s 内可读，bili_see_screen 返回画面路径（v0.6.36）。"""
+    import asyncio
+    import base64
+
+    from plugin.plugins.bili_viewer import BiliViewerPlugin, web_ui
+
+    inst = BiliViewerPlugin(ctx=None)
+    jpeg = base64.b64encode(b"\xff\xd8\xff\xe0fakejpegdata").decode()
+    now = int(__import__("time").time())
+    resp = inst._receive_ext_shot({
+        "image": f"data:image/jpeg;base64,{jpeg}",
+        "url": "https://live.bilibili.com/1025219",
+        "title": "北极僵尸从入门到入土",
+        "at": now,
+    })
+    assert resp["ok"] is True
+    shot = inst._ext_shot()
+    assert shot is not None and shot["title"] == "北极僵尸从入门到入土"
+    assert shot["size"] > 0 and os.path.exists(shot["path"])
+    out = asyncio.get_event_loop().run_until_complete(inst.bili_see_screen())
+    assert out["is_error"] is False and shot["path"] in out["output"]
+    # 过期后不可读
+    inst._ext_shot_data = {"at": now - web_ui._EXT_ONLINE_WINDOW - 10, "path": shot["path"]}
+    out2 = asyncio.get_event_loop().run_until_complete(inst.bili_see_screen())
+    assert out2["is_error"] is True and out2["error"] == "NO_SHOT"
+
+
 def test_render_see_live_and_video() -> None:
     from plugin.plugins.bili_viewer.bili import render_see
 
