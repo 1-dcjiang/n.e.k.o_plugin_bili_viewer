@@ -315,3 +315,72 @@ def test_bili_post_dynamic_requires_login(monkeypatch) -> None:
         raise AssertionError("should raise")
     except bili.BiliError as exc:
         assert exc.code == "NEED_LOGIN"
+
+
+def test_bili_post_dynamic_wbi_signed_query(monkeypatch) -> None:
+    """v0.7.3 复查修复：动态发布必须带 wbi 签名 query（wts+w_rid），否则 B站 -403/-352。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    calls: list[tuple[str, dict, str]] = []
+
+    def fake_post_json(url, body, csrf, account="yui", timeout=12.0, query=None):
+        calls.append((url, dict(body or {}), dict(query or {})))
+        return {"code": 0, "data": {}}
+
+    monkeypatch.setattr(bili, "_http_post_json", fake_post_json)
+    monkeypatch.setattr(bili, "my_info", lambda account="main": {"mid": 123456})
+    monkeypatch.setattr(bili, "_get_mixin_key", lambda: "m" * 32)
+    r = bili.post_dynamic("测试动态", account="yui")
+    assert r["ok"] is True
+    assert len(calls) == 1
+    url, body, query_dict = calls[0]
+    assert "/x/dynamic/web/create/v1/dyn" in url
+    assert body["content"]["content"] == "测试动态"
+    assert body["up_uid"] == 123456
+    # query 必须含 csrf 与 wbi 签名结果
+    assert query_dict.get("csrf") == "yj"
+    assert "wts" in query_dict
+    assert "w_rid" in query_dict
+
+
+def test_bili_safe_multipart_name(monkeypatch) -> None:
+    """v0.7.3 防御：multipart 文件名清洗，引号/换行/反斜杠不破坏 boundary。"""
+    from plugin.plugins.bili_viewer import bili
+
+    assert bili._safe_multipart_name('a"b') == "a_b"
+    assert bili._safe_multipart_name("a\r\nb") == "a__b"
+    assert bili._safe_multipart_name("a\\b") == "a_b"
+    assert bili._safe_multipart_name("ok.mp4") == "ok.mp4"
+
+
+def test_yui_cookie_file_mtime_cache(monkeypatch, tmp_path) -> None:
+    """v0.7.3 优化：小号 Cookie 文件 mtime 缓存，内容未变不重复读盘。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.delenv("BILI_YUI_COOKIE", raising=False)
+    monkeypatch.setattr(bili, "_YUI_COOKIE_DIR", str(tmp_path))
+    bili._yui_cookie_file_cache = (0.0, "")  # 清全局缓存
+    (tmp_path / "yui_cookie.txt").write_text("SESSDATA=abc; bili_jct=def", encoding="utf-8")
+    # 确定性 mtime：1.0 期间内容不变 → 只读一次；2.0 视为文件已改 → 重读
+    mtimes = iter([1.0, 1.0, 1.0, 2.0, 2.0])
+    monkeypatch.setattr(bili.os.path, "getmtime", lambda _p: next(mtimes))
+    reads = {"n": 0}
+    import builtins
+
+    orig_open = builtins.open
+
+    def counting_open(path, *a, **kw):
+        if str(path).endswith("yui_cookie.txt"):
+            reads["n"] += 1
+        return orig_open(path, *a, **kw)
+
+    monkeypatch.setattr(builtins, "open", counting_open)
+    assert bili._cookie("yui") == "SESSDATA=abc; bili_jct=def"
+    assert bili._cookie("yui") == "SESSDATA=abc; bili_jct=def"  # 命中缓存，不重复读
+    assert reads["n"] == 1
+    assert bili._cookie("yui") == "SESSDATA=abc; bili_jct=def"  # mtime 仍 1.0，继续命中
+    assert reads["n"] == 1
+    # mtime 变化（文件被改）→ 重读
+    assert bili._cookie("yui") == "SESSDATA=abc; bili_jct=def"  # 内容文件未真正改，重读仍同值
+    assert reads["n"] == 2

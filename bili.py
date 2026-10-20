@@ -57,16 +57,32 @@ class BiliError(Exception):
 
 _YUI_COOKIE_FILE = "yui_cookie.txt"  # 插件目录下的 YUI 专属小号 Cookie 文件（与本机主账号 BILI_COOKIE 完全隔离）
 _YUI_COOKIE_DIR = os.path.dirname(os.path.abspath(__file__))  # 可注入目录便于测试
+_yui_cookie_file_cache: tuple[float, str] = (0.0, "")  # (mtime, 内容)，避免 watcher 高频轮询反复读盘
 
 
 def _yui_cookie_from_file() -> str:
-    """从插件目录 yui_cookie.txt 读取 YUI 小号 Cookie（本地专用，不上传不写日志）。"""
+    """从插件目录 yui_cookie.txt 读取 YUI 小号 Cookie（本地专用，不上传不写日志）。
+
+    复查优化（v0.7.3）：文件 mtime 缓存——自主运营 watcher 每 2.5s 检查一次小号
+    配置，文件方式配置时若每次读盘会浪费 IO；mtime 未变则直接用缓存。
+    """
+    global _yui_cookie_file_cache
+    p = os.path.join(_YUI_COOKIE_DIR, _YUI_COOKIE_FILE)
     try:
-        p = os.path.join(_YUI_COOKIE_DIR, _YUI_COOKIE_FILE)
-        with open(p, "r", encoding="utf-8") as f:
-            return f.read().strip()
+        mtime = os.path.getmtime(p)
     except OSError:
+        _yui_cookie_file_cache = (0.0, "")
         return ""
+    cache_ts, cache_val = _yui_cookie_file_cache
+    if cache_ts == mtime and cache_val:
+        return cache_val
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+    except OSError:
+        content = ""
+    _yui_cookie_file_cache = (mtime, content)
+    return content
 
 
 def _cookie(account: str = "main") -> str:
@@ -104,6 +120,8 @@ def _http_get(url: str, params: dict | None = None, timeout: float = _TIMEOUT, a
         code = data.get("code", -1)
         if code in (-352, -401, -412):
             raise BiliError("触发风控限制，请稍后再试（或配置 BILI_COOKIE）", "RISK_CONTROL")
+        if code == -101:
+            raise BiliError("登录态失效或未登录（请重新配置有效的 BILI_COOKIE）", "AUTH_FAILED")
         if code == -404:
             raise BiliError("内容不存在或已被删除", "NOT_FOUND")
         if code == -403:
@@ -1300,11 +1318,24 @@ def send_video_danmaku(bvid: str, text: str, progress_ms: int = 0, account: str 
 # 与用户主账号 BILI_COOKIE 严格隔离；内容由 YUI 生成，插件只做长度/格式硬校验。
 
 
-def _http_post_json(url: str, body: dict, csrf: str, account: str = "yui", timeout: float = _TIMEOUT) -> dict:
-    """POST JSON body（带 Cookie 与 csrf）；用于动态发布等 JSON 接口。"""
+def _http_post_json(
+    url: str,
+    body: dict,
+    csrf: str,
+    account: str = "yui",
+    timeout: float = _TIMEOUT,
+    query: dict | None = None,
+) -> dict:
+    """POST JSON body（带 Cookie 与 csrf）；用于动态发布等 JSON 接口。
+
+    query：URL query 参数（默认 {"platform":"web","csrf":csrf}）。
+    复查优化（v0.7.3）：B站动态接口现行要求 wbi 签名（wts+w_rid），
+    调用方可用 query=_wbi_sign({...}) 传入签名结果；未传时保持原行为兜底。
+    """
+    q = dict(query or {"platform": "web", "csrf": csrf})
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(url + ("" if "?" in url else "?") + "platform=web&csrf=" + urllib.parse.quote(csrf),
-                                 data=data, headers={
+    url = url + ("&" if "?" in url else "?") + urllib.parse.urlencode(q)
+    req = urllib.request.Request(url, data=data, headers={
         "User-Agent": _UA,
         "Referer": "https://t.bilibili.com/",
         "Content-Type": "application/json; charset=utf-8",
@@ -1390,11 +1421,23 @@ def post_dynamic(text: str, account: str = "yui") -> dict:
         "at_uids": "",
         "ctrl": "[]",
     }
+    # 复查修复（v0.7.3）：动态发布接口现行要求 wbi 签名 query（wts+w_rid），
+    # 缺失会报 -403/-352；游客密钥即可签名，失败时保持裸请求兜底。
+    query = {"platform": "web", "csrf": csrf}
     try:
-        _http_post_json(_API + "/x/dynamic/web/create/v1/dyn", body, csrf, account=account)
+        query = _wbi_sign(query, _get_mixin_key())
+    except BiliError:
+        pass
+    try:
+        _http_post_json(_API + "/x/dynamic/web/create/v1/dyn", body, csrf, account=account, query=query)
     except BiliError as exc:
         raise BiliError("动态发布失败：" + exc.message, "DYN_FAILED:" + exc.code) from exc
     return {"ok": True, "text": text[:100]}
+
+
+def _safe_multipart_name(name: str) -> str:
+    """清洗 multipart 文件名：去掉会破坏 boundary 的引号/换行/反斜杠（复查优化 v0.7.3）。"""
+    return re.sub(r'[\r\n"\\]', "_", str(name))
 
 
 def _http_multipart(url: str, fields: dict, files: dict, account: str = "yui", timeout: float = 60.0) -> dict:
@@ -1405,7 +1448,7 @@ def _http_multipart(url: str, fields: dict, files: dict, account: str = "yui", t
         parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{value}\r\n".encode("utf-8"))
     for key, (filename, data) in files.items():
         parts.append(
-            f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"; filename=\"{filename}\"\r\n"
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"; filename=\"{_safe_multipart_name(filename)}\"\r\n"
             "Content-Type: application/octet-stream\r\n\r\n".encode("utf-8") + data + b"\r\n"
         )
     parts.append(f"--{boundary}--\r\n".encode("utf-8"))

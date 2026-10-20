@@ -248,6 +248,8 @@ def ensure_debug_browser(auto_launch: bool = True) -> tuple[int | None, str]:
     port = _find_debug_port()
     if port is not None:
         return port, "已连接正在运行的调试浏览器"
+    # 复查优化（v0.7.3）：Chrome 启动失败时继续尝试 Edge，最后统一给引导；
+    # 之前 Chrome 失败会立即 return，Edge 永远不会被尝试。
     for name in ("Chrome", "Edge"):
         exe_name = _BROWSER_EXES[name]
         if not os.path.isdir(os.path.join(os.environ.get("LOCALAPPDATA", ""), _BROWSER_DIRS[name])):
@@ -257,12 +259,14 @@ def ensure_debug_browser(auto_launch: bool = True) -> tuple[int | None, str]:
         port = _launch_debug_browser(name)
         if port is not None:
             return port, f"已启动 {name} 调试实例（浏览器保持运行）"
+        if name == "Chrome":
+            continue  # Chrome 启动失败（profile 被占/无可执行文件）→ 试 Edge
         return None, (
             f"{name} 正在使用中且未开启接入端口：默认配置的 {exe_name} 已在运行，"
             "无法再开一个调试实例。无需关闭或重启浏览器：请确认已安装并重载'B站接入桥'扩展"
             "（扩展会随浏览器自动同步登录态，无需任何关闭操作），或刷新接入面板查看扩展通道状态。"
         )
-    return None, "未找到 Chrome/Edge 浏览器"
+    return None, "未找到可启动的 Chrome/Edge 浏览器"
 
 
 # ══════════ CDP 取 Cookie ══════════

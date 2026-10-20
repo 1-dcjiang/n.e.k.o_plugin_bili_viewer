@@ -1492,10 +1492,14 @@ class BiliViewerPlugin(NekoPluginBase):
             "properties": {
                 "action": {
                     "type": "string",
-                    "description": "操作类型：send_live_danmaku（发直播弹幕）/ send_video_danmaku（发视频弹幕）/ reply（写评论）/ dynamic（发动态）/ upload（投稿）/ query（查询与感知）",
-                },                "room": {"type": "string", "description": "直播间房间号或链接（发直播弹幕时必填）"},
+                    "description": "操作类型：send_live_danmaku（发直播弹幕，需 room+text）/ send_video_danmaku（发视频弹幕，需 bvid+text）/ reply（写评论，需 text 与 bvid 或 room）/ dynamic（发动态，需 text）/ upload（投稿，需 file 为 yui_uploads 内文件名 + title）/ query（查询与感知）",
+                },
+                "room": {"type": "string", "description": "直播间房间号或链接（发直播弹幕时必填）"},
                 "bvid": {"type": "string", "description": "视频BV号（发视频弹幕时必填）"},
-                "text": {"type": "string", "description": "弹幕内容，直播最长 30 字、视频最长 100 字"},
+                "text": {"type": "string", "description": "弹幕/评论/动态内容（直播最长 30 字、视频弹幕最长 100 字、评论最长 1000 字、动态最长 2000 字）；action=upload 时填 yui_uploads 目录内的视频文件名"},
+                "title": {"type": "string", "description": "仅投稿（upload）时使用：稿件标题，必填"},
+                "desc": {"type": "string", "description": "仅投稿（upload）时使用：稿件简介（可选）"},
+                "tags": {"type": "string", "description": "仅投稿（upload）时使用：标签，逗号分隔（可选）"},
                 "progress": {"type": "integer", "description": "视频弹幕出现的时间点（秒），默认 0 即开头"},
                 "account": {"type": "string", "description": "yui=YUI 独立小号（默认）/ main=用户主账号"},
             },
@@ -1520,7 +1524,12 @@ class BiliViewerPlugin(NekoPluginBase):
         if action == "dynamic":
             return await self.bili_yui_dynamic(text=text)
         if action == "upload":
-            return await self.bili_yui_upload(file=text, title=params.get("title") or "")
+            return await self.bili_yui_upload(
+                file=text,
+                title=str(params.get("title") or kwargs.get("title") or ""),
+                desc=str(params.get("desc") or kwargs.get("desc") or ""),
+                tags=str(params.get("tags") or kwargs.get("tags") or ""),
+            )
         if action in ("send_live_danmaku", "live_danmaku"):
             return await self.bili_live_send_danmaku(room=room, text=text, account=account)
         if action in ("send_video_danmaku", "video_danmaku"):
@@ -1801,10 +1810,14 @@ class BiliViewerPlugin(NekoPluginBase):
                 sent.pop(k, None)
 
     def _panel_status(self) -> dict:
-        """面板状态接口：浏览器接入状态 + B站绑定状态 + 扩展通道状态（纯本地，无网络）。"""
+        """面板状态接口：浏览器接入状态 + B站绑定状态 + 扩展通道状态（纯本地，无网络）。
+
+        复查优化（v0.7.3）：只读缓存 _browser_monitor（由 watcher 每 60s 刷新），
+        不现场触发 CDP 探测——面板每 3s 轮询一次，若每次都探测会高频打调试端口。
+        """
         cookie = os.environ.get("BILI_COOKIE", "") or ""
         source = getattr(self, "_cookie_source", _COOKIE_SOURCE_NONE)
-        monitor = getattr(self, "_browser_monitor", None) or self._monitor_browser()
+        monitor = getattr(self, "_browser_monitor", None) or {"connected": False, "detail": "未探测", "at": 0}
         ext_online = (time.time() - self._ext_last_seen()) < web_ui._EXT_ONLINE_WINDOW
         tab = self._ext_tab()
         uid = _cookie_uid(cookie)
@@ -1890,8 +1903,8 @@ class BiliViewerPlugin(NekoPluginBase):
         cookie = os.environ.get("BILI_COOKIE", "") or ""
         source = getattr(self, "_cookie_source", _COOKIE_SOURCE_NONE)
         summary = _cookie_summary(cookie)
-        # 浏览器接入监控（最近一次探测结果 + 现场刷新；线程化避免阻塞事件循环）
-        monitor = getattr(self, "_browser_monitor", None) or self._monitor_browser()
+        # 浏览器接入监控：现场线程化刷新一次（8s 预算），失败沿用缓存；不重复同步探测
+        monitor = getattr(self, "_browser_monitor", None) or {"connected": False, "detail": "未探测", "at": 0}
         try:
             monitor = await asyncio.wait_for(asyncio.to_thread(self._monitor_browser), timeout=6.0)
         except Exception:
