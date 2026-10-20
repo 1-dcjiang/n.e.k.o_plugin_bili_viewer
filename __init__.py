@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import threading
@@ -20,6 +21,8 @@ import time
 from plugin.sdk.plugin import NekoPluginBase, lifecycle, llm_tool, neko_plugin, plugin_entry
 
 from . import bili, cdp_cookie, cookie_auto, desktop_deliver, web_ui
+
+_logger = logging.getLogger(__name__)
 
 
 def _wrap_err(exc: bili.BiliError) -> dict:
@@ -802,13 +805,17 @@ class BiliViewerPlugin(NekoPluginBase):
                 if parsed is not None and parsed.get("kind") == "live" and parsed.get("room_id"):
                     room = str(parsed["room_id"])
         if not room:
+            self._record_send_result("live", False, "NO_ROOM", "无直播目标（未提供房间号且感知不到当前直播）", "")
             return {"output": "请提供直播房间号或链接。", "is_error": True, "error": "NO_ROOM"}
         if not text:
+            self._record_send_result("live", False, "EMPTY_MSG", "弹幕内容为空", room)
             return {"output": "请提供要发送的弹幕内容。", "is_error": True, "error": "EMPTY_MSG"}
         try:
             result = bili.live_send_danmaku(room, text)
         except bili.BiliError as exc:
+            self._record_send_result("live", False, exc.code, exc.message, room)
             return _wrap_err(exc)
+        self._record_send_result("live", True, "", result.get("server") or "", room)
         return {"output": f"已向直播间 {result['room_id']} 发送弹幕：{result['text']}", "is_error": False, "result": result}
 
     @llm_tool(
@@ -849,13 +856,17 @@ class BiliViewerPlugin(NekoPluginBase):
                 if parsed is not None and parsed.get("kind") == "video" and parsed.get("bvid"):
                     bvid = parsed["bvid"]
         if not bvid:
+            self._record_send_result("video", False, "NO_BVID", "无视频目标（未提供 BV 号且感知不到当前视频）", "")
             return {"output": "请提供视频 BV 号。", "is_error": True, "error": "NO_BVID"}
         if not text:
+            self._record_send_result("video", False, "EMPTY_MSG", "弹幕内容为空", bvid)
             return {"output": "请提供要发送的弹幕内容。", "is_error": True, "error": "EMPTY_MSG"}
         try:
             result = bili.send_video_danmaku(bvid, text, progress_ms=progress * 1000)
         except bili.BiliError as exc:
+            self._record_send_result("video", False, exc.code, exc.message, bvid)
             return _wrap_err(exc)
+        self._record_send_result("video", True, "", result.get("server") or "", bvid)
         return {
             "output": f"已向视频 {result['bvid']} 发送弹幕：{result['text']}（时间点 {result['progress_ms'] // 1000} 秒）",
             "is_error": False,
@@ -1037,6 +1048,19 @@ class BiliViewerPlugin(NekoPluginBase):
             return None
         return tab
 
+    def _record_send_result(self, kind: str, ok: bool, error: str, message: str, target: str) -> None:
+        """记录最近一次弹幕发送结果（供面板只读诊断；不含任何 cookie 内容）。"""
+        self._last_send_result = {
+            "kind": kind,
+            "ok": bool(ok),
+            "error": str(error or ""),
+            "message": str(message or "")[:120],
+            "target": str(target or ""),
+            "at": int(time.time()),
+        }
+        _logger.info("danmaku send result: kind=%s ok=%s error=%s message=%s target=%s",
+                     kind, ok, error, str(message or "")[:120], target)
+
     def _panel_status(self) -> dict:
         """面板状态接口：浏览器接入状态 + B站绑定状态 + 扩展通道状态（纯本地，无网络）。"""
         cookie = os.environ.get("BILI_COOKIE", "") or ""
@@ -1057,6 +1081,7 @@ class BiliViewerPlugin(NekoPluginBase):
             "extension_online": ext_online,
             "extension_last_seen": int(self._ext_last_seen()),
             "current_tab": tab,
+            "last_send": getattr(self, "_last_send_result", None),
             "uname": f"uid {uid}" if uid else "",
         }
 

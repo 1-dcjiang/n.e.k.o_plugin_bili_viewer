@@ -302,3 +302,42 @@ def test_llm_tool_live_send_no_sense_keeps_error() -> None:
     result = asyncio.run(plugin.bili_live_send_danmaku(text="mft"))
     assert result["is_error"] is True
     assert result["error"] == "NO_ROOM"
+
+
+def test_send_result_recorded_on_success() -> None:
+    """发送成功后 last_send 诊断字段被记录（面板只读可查，不含 cookie）。"""
+    import asyncio
+
+    from plugin.plugins.bili_viewer import bili
+
+    plugin = object.__new__(_plugin_cls())
+    orig = bili.send_video_danmaku
+
+    def fake_send(bvid="", text="", progress_ms=0):
+        return {"ok": True, "bvid": bvid, "cid": 1, "text": text, "progress_ms": progress_ms, "server": ""}
+
+    bili.send_video_danmaku = fake_send
+    plugin._ext_tab = lambda: None
+    try:
+        result = asyncio.run(plugin.bili_video_send_danmaku(bvid="BV1ok", text="hi"))
+    finally:
+        bili.send_video_danmaku = orig
+    assert result["is_error"] is False
+    rec = plugin._last_send_result
+    assert rec["ok"] is True
+    assert rec["kind"] == "video"
+    assert rec["target"] == "BV1ok"
+
+
+def test_send_result_recorded_on_no_bvid() -> None:
+    """感知不到视频导致 NO_BVID 时，last_send 记录 error=NO_BVID（区分参数失败与 API 拒绝）。"""
+    import asyncio
+
+    plugin = object.__new__(_plugin_cls())
+    plugin._ext_tab = lambda: None
+
+    result = asyncio.run(plugin.bili_video_send_danmaku(text="mft"))
+    assert result["error"] == "NO_BVID"
+    rec = plugin._last_send_result
+    assert rec["ok"] is False
+    assert rec["error"] == "NO_BVID"
