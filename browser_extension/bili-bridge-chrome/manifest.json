@@ -11,6 +11,7 @@
   "background": {
     "service_worker": "background.js"
   },
+  "web_accessible_resources": [{"resources": ["audio-processor.js"], "matches": ["<all_urls>"]}],
   "action": {
     "default_popup": "popup.html",
     "default_title": "B站接入桥 (Chrome)"
