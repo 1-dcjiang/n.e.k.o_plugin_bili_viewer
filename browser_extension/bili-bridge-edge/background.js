@@ -14,7 +14,7 @@
 // 标签页切换/URL 变化（tabs 监听防抖）；alarms 30 秒兜底（MV3 SW 休眠时由 alarm 唤醒）；
 // 推送失败 4 秒快速重试（插件重启后 5 秒内即可恢复感知，不再等下一轮 alarm）。
 
-const EXT_SOURCE = "bili-bridge-edge-extension";
+const EXT_SOURCE = "bili-bridge-chrome-extension";
 const PANEL_URL = "http://127.0.0.1:8765";
 const AUDIO_STATE_KEY = "audio_capture_enabled";
 
@@ -196,12 +196,14 @@ function scheduleCookie() {
   pushTimer = setTimeout(() => { pushCookie(); }, 800);
 }
 
-async function pushAudioState() {
+async function pushAudioState(extra) {
   try {
-    await postJson("/api/extension-audio-state", {
-      enabled: Boolean(audioEnabled),
-      at: Date.now(),
-    });
+    const body = { enabled: Boolean(audioEnabled), at: Date.now() };
+    if (extra) {
+      if (extra.ctx_state) body.ctx_state = extra.ctx_state;
+      if (extra.ctx_err) body.ctx_err = extra.ctx_err;
+    }
+    await postJson("/api/extension-audio-state", body);
   } catch (e) { /* 插件未就绪：下一轮心跳重试 */ }
 }
 
@@ -312,6 +314,11 @@ function ensureAudioSession() {
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  // offscreen 上报采集状态（含 AudioContext 状态/错误诊断，v0.2.14）
+  if (msg && msg.type === "audio-state") {
+    pushAudioState(msg);
+    return false;
+  }
   if (msg && msg.type === "start-audio-request") {
     startAudioCapture().then(() => sendResponse({ ok: true, enabled: audioEnabled }));
     return true;

@@ -111,7 +111,10 @@ async function startCapture(streamId) {
   // 不 resume 则音频图永远不产出数据（0 音频推送）——必须显式启动。
   // offscreen 声明 AUDIO_PLAYBACK reason 后此处 resume 可成功。
   if (audioContext.state !== "running") {
-    audioContext.resume().catch(() => {});
+    audioContext.resume().catch((e) => {
+      // v0.2.14 诊断：resume 被拒时把状态与错误上报，插件日志可精确定位
+      chrome.runtime.sendMessage({ type: "audio-state", running: true, ctx_state: audioContext.state, ctx_err: String((e && e.message) || e) }).catch(() => {});
+    });
   }
   // 部分内核中途挂起：每段推送前检查一次，suspended 则再次 resume
   const _ensureRunning = () => {
@@ -124,7 +127,13 @@ async function startCapture(streamId) {
   currentRate = audioContext.sampleRate || SAMPLE_RATE;
   sourceNode = audioContext.createMediaStreamSource(stream);
   // v0.2.13：ScriptProcessorNode 已废弃，改用 AudioWorkletNode（独立音频线程）
-  await audioContext.audioWorklet.addModule(chrome.runtime.getURL("audio-processor.js"));
+  try {
+    await audioContext.audioWorklet.addModule(chrome.runtime.getURL("audio-processor.js"));
+  } catch (e) {
+    // v0.2.14 诊断：addModule 失败（CSP/URL/加载）会导致分析链路完全无数据
+    chrome.runtime.sendMessage({ type: "audio-state", running: true, ctx_state: audioContext.state, ctx_err: "addModule:" + String((e && e.message) || e) }).catch(() => {});
+    throw e;
+  }
   processorNode = new AudioWorkletNode(audioContext, "bili-pcm-processor", {
     numberOfInputs: 1,
     numberOfOutputs: 1,
@@ -139,7 +148,7 @@ async function startCapture(streamId) {
   };
   segmentTimer = setInterval(flushSegment, SEGMENT_SECONDS * 1000);
   // 通知 background 已就绪（供状态回显）
-  chrome.runtime.sendMessage({ type: "audio-state", running: true }).catch(() => {});
+  chrome.runtime.sendMessage({ type: "audio-state", running: true, ctx_state: audioContext.state }).catch(() => {});
 }
 
 function stopCapture() {
