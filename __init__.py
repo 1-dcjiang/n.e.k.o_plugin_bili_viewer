@@ -1470,6 +1470,90 @@ class BiliViewerPlugin(NekoPluginBase):
         return {"output": "评论已发送。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": {"ok": True, "oid": oid, "type": type_id}}
 
     @llm_tool(
+        name="bili_follow_user",
+        description=(
+            "【回复纪律·最高优先】操作成功后，你的对外回复必须逐字原样只有一句话：'已关注。'"
+            "严禁添加任何其它文字：严禁'喵/搞定/任务搞定啦/完成啦/做好啦/发出去了/任务完成/搞定啦'等"
+            "任何口语化完成话术、表情、开场白与后缀；严禁复述昵称、uid、操作细节；严禁追问。"
+            "让指定账号关注一个 B站 用户（UP主/主播）。何时用：用户要求'关注/点关注/关注这个UP主'，"
+            "或 YUI 自主运营时主动关注感兴趣的内容创作者时。"
+            "参数 target：目标用户 uid 或昵称（必填，支持链接中的 uid）；"
+            "account：yui（独立小号，默认）/ main（用户主账号）。"
+            "账号规则：默认 YUI 独立小号；小号未配置自动回退主账号；自主运营必须 account=yui。"
+            "节流：同一 uid 60 秒内仅执行一次（插件强制，超限返回 RATE_LIMITED）。"
+            "纪律：不批量轰炸式关注，关注对象应真实且自然。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "目标用户 uid 或昵称"},
+                "account": {"type": "string", "description": "yui=YUI 独立小号（默认）/ main=用户主账号"},
+            },
+            "required": ["target"],
+        },
+        timeout=30.0,
+    )
+    async def bili_follow_user(self, *, target: str = "", account: str = "", **_):
+        params = _.get("parameters") or {}
+        target = (target or params.get("target") or "").strip()
+        account = self._resolve_account(account or params.get("account") or "")
+        if not target:
+            return {"output": "请提供要关注的用户 uid 或昵称。", "is_error": True, "error": "EMPTY_TARGET"}
+        key = f"follow:{target}"
+        if account == "yui":
+            if not self._yui_rate_reserve("relation", key, 60):
+                return {"output": "刚执行过关注（同一目标 60 秒内限 1 次），请稍后再试。", "is_error": True, "error": "RATE_LIMITED"}
+        try:
+            result = bili.modify_relation(target, "follow", account=account)
+        except bili.BiliError as exc:
+            if account == "yui":
+                self._yui_rate_rollback("relation", key)
+            return self._wrap_auth(exc, "关注")
+        return {"output": "已关注。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": result}
+
+    @llm_tool(
+        name="bili_unfollow_user",
+        description=(
+            "【回复纪律·最高优先】操作成功后，你的对外回复必须逐字原样只有一句话：'已取消关注。'"
+            "严禁添加任何其它文字：严禁'喵/搞定/任务搞定啦/完成啦/做好啦/发出去了/任务完成/搞定啦'等"
+            "任何口语化完成话术、表情、开场白与后缀；严禁复述昵称、uid、操作细节；严禁追问。"
+            "让指定账号取消关注一个 B站 用户（UP主/主播）。何时用：用户要求'取关/取消关注/拉黑前先取关'，"
+            "或 YUI 自主运营时清理不再关注的创作者时。"
+            "参数 target：目标用户 uid 或昵称（必填）；"
+            "account：yui（独立小号，默认）/ main（用户主账号）。"
+            "账号规则：默认 YUI 独立小号；小号未配置自动回退主账号；自主运营必须 account=yui。"
+            "节流：同一 uid 60 秒内仅执行一次（插件强制，超限返回 RATE_LIMITED）。"
+            "纪律：仅在确实不再需要关注时取关，动作自然。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "目标用户 uid 或昵称"},
+                "account": {"type": "string", "description": "yui=YUI 独立小号（默认）/ main=用户主账号"},
+            },
+            "required": ["target"],
+        },
+        timeout=30.0,
+    )
+    async def bili_unfollow_user(self, *, target: str = "", account: str = "", **_):
+        params = _.get("parameters") or {}
+        target = (target or params.get("target") or "").strip()
+        account = self._resolve_account(account or params.get("account") or "")
+        if not target:
+            return {"output": "请提供要取消关注的用户 uid 或昵称。", "is_error": True, "error": "EMPTY_TARGET"}
+        key = f"unfollow:{target}"
+        if account == "yui":
+            if not self._yui_rate_reserve("relation", key, 60):
+                return {"output": "刚执行过取关（同一目标 60 秒内限 1 次），请稍后再试。", "is_error": True, "error": "RATE_LIMITED"}
+        try:
+            result = bili.modify_relation(target, "unfollow", account=account)
+        except bili.BiliError as exc:
+            if account == "yui":
+                self._yui_rate_rollback("relation", key)
+            return self._wrap_auth(exc, "取消关注")
+        return {"output": "已取消关注。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": result}
+
+    @llm_tool(
         name="bili_yui_dynamic",
         description=(
             "【发送纪律·最高优先】发送成功后，你的对外回复必须逐字原样只有一句话：'动态已发布。'"

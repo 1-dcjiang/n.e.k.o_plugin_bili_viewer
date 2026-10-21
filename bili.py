@@ -1244,6 +1244,80 @@ def format_my_info(info: dict) -> str:
     )
 
 
+# ══════════════ 关注 / 取消关注（v0.7.26） ══════════════
+
+def _resolve_uid(target: str, account: str = "yui") -> int:
+    """把用户输入解析为 B站 uid：纯数字按 uid；否则按昵称搜索（取第一个结果）。"""
+    target = (target or "").strip()
+    if not target:
+        raise BiliError("目标为空：请提供要关注/取关的用户 uid 或昵称", "EMPTY_TARGET")
+    if re.fullmatch(r"\d{1,12}", target):
+        return int(target)
+    try:
+        data = _http_get(
+            _API + "/x/web-interface/search/type",
+            {"search_type": "bili_user", "keyword": target},
+            account=account,
+        )
+    except BiliError as exc:
+        raise BiliError("用户搜索失败（当前网络可能被B站风控）：" + exc.message, "SEARCH_FAILED") from exc
+    result = ((data.get("data") or {}).get("result")) or []
+    if not result:
+        raise BiliError(f"未找到昵称「{target}」对应的用户", "USER_NOT_FOUND")
+    mid = result[0].get("mid")
+    if not mid:
+        raise BiliError(f"昵称「{target}」解析失败（搜索结果缺少 uid）", "USER_NOT_FOUND")
+    return int(mid)
+
+
+def _resolve_uname(target: str, account: str = "yui") -> str:
+    """与 _resolve_uid 配套：返回目标昵称（uid 输入时尽力反查昵称，查不到返回 uid 字符串）。"""
+    target = (target or "").strip()
+    if re.fullmatch(r"\d{1,12}", target):
+        try:
+            data = _http_get(
+                _API + "/x/space/wbi/acc/info",
+                {"mid": int(target)},
+                account=account,
+            )
+            info = data.get("data") or {}
+            if info.get("name"):
+                return str(info["name"])
+        except BiliError:
+            pass
+        return target
+    return target
+
+
+def modify_relation(target: str, action: str = "follow", account: str = "yui") -> dict:
+    """关注/取消关注指定用户（按 uid 或昵称）。action=follow / unfollow。
+
+    account=main 主账号 / yui 小号（默认）；写操作需该账号 Cookie 含 bili_jct。
+    """
+    _require_login(account)
+    mid = _resolve_uid(target, account)
+    uname = _resolve_uname(target, account)
+    act = 1 if action in ("follow", "关注", "subscribe") else 2
+    csrf = _csrf(account)
+    if not csrf:
+        raise BiliError("Cookie 缺少 bili_jct（CSRF token），无法执行关注/取关", "NO_CSRF")
+    form = {"fid": mid, "act": act, "re_src": 11, "csrf": csrf}
+    try:
+        data = _http_post(_API + "/x/relation/modify", form, account=account)
+    except BiliError as exc:
+        raise BiliError(
+            ("关注失败" if act == 1 else "取关失败") + f"（{uname}，uid {mid}）：" + exc.message,
+            f"REL_{act}_{exc.code}",
+        ) from exc
+    return {
+        "mid": mid,
+        "uname": uname,
+        "action": "follow" if act == 1 else "unfollow",
+        "following": bool(data.get("data")),
+        "message": data.get("message") or "",
+    }
+
+
 def my_videos(page: int = 1, limit: int = 10, account: str = "yui") -> list[dict]:
     """指定账号的投稿列表（nav 取 uid → arc/search）。account=main 主账号 / yui 小号（默认）。
 
