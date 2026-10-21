@@ -13,7 +13,7 @@ import logging
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-_logger = logging.getLogger("N.E.K.O.Plugin.bili_viewer.web_ui")
+_logger = logging.getLogger("N.E.K.O.Plugin_bili_viewer.plugin.bili_viewer")
 
 _PANEL_HOST = "127.0.0.1"
 _PANEL_PORT = 8765

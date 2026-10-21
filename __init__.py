@@ -33,7 +33,7 @@ from plugin.sdk.plugin import NekoPluginBase, lifecycle, llm_tool, neko_plugin, 
 
 from . import bili, cdp_cookie, cookie_auto, desktop_deliver, web_ui
 
-_logger = logging.getLogger(__name__)
+_logger = logging.getLogger("N.E.K.O.Plugin_bili_viewer.plugin.bili_viewer")
 
 # 扩展截屏落盘位置（仅本地保存，供 YUI 读取画面实况）
 # Windows 用 LOCALAPPDATA；其他平台回退到用户主目录，避免生成平台相关路径字面量
@@ -2189,6 +2189,13 @@ class BiliViewerPlugin(NekoPluginBase):
         }
         _logger.info("ext audio received: seq=%s bytes=%d rate=%s", self._ext_audio_data["seq"], len(raw), self._ext_audio_data["sample_rate"])
         self._kick_asr()
+        # v0.7.19：ASR worker 用 _asr_worker_evt 事件唤醒（wait timeout=1s），此前事件
+        # 只在测试里被 set、运行时永远无人触发——worker 常眠、转写从不发生（听不到声音
+        # 的真正根因，ASR 锁修复后仍不转写的漏网）。每个新声音段到达都唤醒一次，
+        # worker 醒来处理最新段（串行去重，积压自动跳过）。
+        evt = getattr(self, "_asr_worker_evt", None)
+        if evt is not None:
+            evt.set()
         return {"ok": True, "detail": "已保存当前声音段"}
 
     def _ext_audio(self) -> dict | None:
@@ -2309,6 +2316,8 @@ class BiliViewerPlugin(NekoPluginBase):
             worker = threading.Thread(target=self._asr_worker_loop, name="bili-asr", daemon=True)
             self._asr_worker_thread = worker
             worker.start()
+            # v0.7.19：worker 启动即唤醒一次，处理可能已在队列里的声音段
+            self._asr_worker_evt.set()
 
     def _asr_worker_loop(self) -> None:
         """后台 ASR 循环：有新声音段且空闲时转写，结果静默写入 _ext_asr_data。

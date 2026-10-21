@@ -497,6 +497,49 @@ def test_asr_worker_uses_callable_bridge(monkeypatch):
     assert calls and calls[0] == (r"C:\fake.wav", "zh")
 
 
+def test_receive_ext_audio_sets_asr_event(monkeypatch):
+    """音频到达会唤醒 ASR worker（v0.7.19 回归：_asr_worker_evt 运行时此前从不被 set，
+    转写线程永远沉睡——ASR 锁修复后仍听不到声音的漏网根因）。"""
+    import base64
+    import threading
+
+    pkg = _pkg()
+    inst = _make_instance(pkg)
+    inst._asr_worker_evt = threading.Event()
+    inst._asr_worker_evt.clear()
+    monkeypatch.setattr(inst, "_whisper_model", lambda: None)  # 不引外部桥，只验证事件
+
+    raw = b"RIFF" + b"\x00" * 600  # 最小伪 wav 载荷（仅验证落盘+事件链路）
+    resp = inst._receive_ext_audio(
+        {
+            "audio": "data:audio/wav;base64," + base64.b64encode(raw).decode(),
+            "sample_rate": 16000,
+            "seq": 42,
+            "at": time.time(),
+        }
+    )
+    assert resp.get("ok") is True
+    assert resp.get("detail") == "已保存当前声音段"
+    assert inst._asr_worker_evt.is_set()  # 关键：事件被触发，worker 才会醒来转写
+
+
+def test_kick_asr_sets_event_on_worker_start(monkeypatch):
+    """_kick_asr 启动 worker 时唤醒一次（v0.7.19）。"""
+    import threading
+
+    pkg = _pkg()
+    inst = _make_instance(pkg)
+    inst._asr_worker_evt = threading.Event()
+    inst._asr_worker_evt.clear()
+    monkeypatch.setattr(inst, "_whisper_model", lambda: None)
+    inst._kick_asr()
+    assert getattr(inst, "_asr_worker_thread", None) is not None
+    assert inst._asr_worker_evt.is_set()
+    inst._asr_worker_stop = True
+    inst._asr_worker_evt.set()
+    inst._asr_worker_thread.join(timeout=2)
+
+
 # ══════════════ v0.7.16：感知输出完成话术机器阻断 ══════════════
 
 
