@@ -1094,7 +1094,7 @@ class BiliViewerPlugin(NekoPluginBase):
             return self._wrap_auth(exc, "修改稿件")
         return {
             "output": "稿件已修改。",
-            "is_error": False,
+            "is_error": False, "meta": {"agent": {"delivery": "silent"}},
             "result": result,
         }
 
@@ -1288,7 +1288,7 @@ class BiliViewerPlugin(NekoPluginBase):
             _logger.info("live danmaku dedup hit room=%s text=%r", room, text[:20])
             if account == "yui":
                 self._yui_rate_rollback("danmaku", f"live:{room}")
-            return {"output": "弹幕已发送。", "is_error": False, "result": {"dedup": True, "room": room}}
+            return {"output": "弹幕已发送。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": {"dedup": True, "room": room}}
         try:
             result = bili.live_send_danmaku(room, text, account=account)
         except bili.BiliError as exc:
@@ -1298,7 +1298,7 @@ class BiliViewerPlugin(NekoPluginBase):
             return self._wrap_auth(exc, "发送弹幕")
         self._mark_danmaku_sent("live", room, text, 0)
         self._record_send_result("live", True, "", result.get("server") or "", room, dmid=result.get("dmid") or "")
-        return {"output": "弹幕已发送。", "is_error": False, "result": result}
+        return {"output": "弹幕已发送。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": result}
 
     @llm_tool(
         name="bili_video_send_danmaku",
@@ -1366,7 +1366,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 self._yui_rate_rollback("danmaku", f"video:{bvid}")
             return {
                 "output": "弹幕已发送。",
-                "is_error": False,
+                "is_error": False, "meta": {"agent": {"delivery": "silent"}},
                 "result": {"dedup": True, "bvid": bvid, "progress": progress},
             }
         try:
@@ -1380,7 +1380,7 @@ class BiliViewerPlugin(NekoPluginBase):
         self._record_send_result("video", True, "", result.get("server") or "", bvid)
         return {
             "output": "弹幕已发送。",
-            "is_error": False,
+            "is_error": False, "meta": {"agent": {"delivery": "silent"}},
             "result": result,
         }
 
@@ -1467,7 +1467,7 @@ class BiliViewerPlugin(NekoPluginBase):
             if account == "yui":
                 self._yui_rate_rollback("comment", key)
             return self._wrap_auth(exc, "发送评论")
-        return {"output": "评论已发送。", "is_error": False, "result": {"ok": True, "oid": oid, "type": type_id}}
+        return {"output": "评论已发送。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": {"ok": True, "oid": oid, "type": type_id}}
 
     @llm_tool(
         name="bili_yui_dynamic",
@@ -1499,7 +1499,7 @@ class BiliViewerPlugin(NekoPluginBase):
         except bili.BiliError as exc:
             self._yui_daily_release("dynamic")
             return self._wrap_auth(exc, "发布动态")
-        return {"output": "动态已发布。", "is_error": False, "result": {"ok": True}}
+        return {"output": "动态已发布。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": {"ok": True}}
 
     @llm_tool(
         name="bili_yui_upload",
@@ -1568,7 +1568,7 @@ class BiliViewerPlugin(NekoPluginBase):
         finally:
             with self._yui_upload_lock:
                 self._yui_uploading = False
-        return {"output": "稿件已提交审核。", "is_error": False, "result": {"ok": True, "file": base, "title": title}}
+        return {"output": "稿件已提交审核。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": {"ok": True, "file": base, "title": title}}
 
     @llm_tool(
         name="bili_yui_status",
