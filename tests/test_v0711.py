@@ -472,3 +472,29 @@ def test_asr_worker_uses_callable_bridge(monkeypatch):
     asr = getattr(inst, "_ext_asr_data", None)
     assert asr is not None and asr["text"] == "直播里在说 hello" and asr["seq"] == 7
     assert calls and calls[0] == (r"C:\fake.wav", "zh")
+
+
+# ══════════════ v0.7.16：感知输出完成话术机器阻断 ══════════════
+
+
+def _src() -> str:
+    import pathlib
+
+    p = pathlib.Path(__file__).resolve().parents[1] / "__init__.py"
+    return p.read_text(encoding="utf-8")
+
+
+def test_sense_paths_forbid_completion_phrasing():
+    """所有感知/查询路径输出与描述都必须声明'不是任务'并严禁完成话术（v0.7.16）。"""
+    src = _src()
+    # run 入口感知分支 output 与 description
+    assert "不是任务、无需汇报" in src
+    assert "严禁'任务完成/搞定啦/完成啦/已确认'等完成话术与开场白" in src
+    # 内部感知上下文（_perceive_context）
+    assert "这不是'任务'，只是感知到的实况" in src
+    # bili_now_watching llm_tool output
+    assert "感知到的实况，不是任务、无需汇报" in src
+    # see_live / see_video 描述
+    assert "感知实况不是'任务'" in src
+    # bili_see_screen 描述
+    assert "看到/没看到都是感知实况，不是'任务'" in src

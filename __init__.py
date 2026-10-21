@@ -187,7 +187,8 @@ def _sync_text(parsed: dict) -> str | None:
             extra = f"，BV号 {parsed['bvid']}（该编号仅供发弹幕等内部操作，请勿向用户复述）"
         return (
             f"（内部感知，仅供回答用户提问时参考：用户当前正在看 B站{label}「{subject}」{extra}。"
-            "回复纪律：不要主动播报'系统又同步/我在看/你正在看/又给你同步啦'等任何开场白，"
+            "回复纪律：这不是'任务'，只是感知到的实况——严禁'任务完成/搞定啦/完成啦/系统已确认'等"
+            "任何完成话术与汇报腔；不要主动播报'系统又同步/我在看/你正在看/又给你同步啦'等任何开场白，"
             "不要转述'内部感知/系统同步'等词；用户问到时直接以实况本身回答（一句话说标题/内容即可），"
             "没人问就不提。禁止主动询问'要不要发弹幕/要不要回复弹幕'——发弹幕只在用户明确要求时进行。）"
         )
@@ -969,7 +970,10 @@ class BiliViewerPlugin(NekoPluginBase):
             info = bili.now_watching(tab=tab)
         except bili.BiliError as exc:
             return _wrap_err(exc)
-        return {"output": bili.format_now_watching(info), "is_error": False, "watching": info}
+        output = bili.format_now_watching(info)
+        # v0.7.16 机器阻断：感知结果不是'任务'，禁止完成话术与汇报腔
+        output = f"（感知到的实况，不是任务、无需汇报：{output}直接以实况回答用户即可；严禁'任务完成/搞定啦/完成啦/已确认'等完成话术与开场白。）"
+        return {"output": output, "is_error": False, "watching": info}
 
     @llm_tool(
         name="bili_my_info",
@@ -1103,6 +1107,7 @@ class BiliViewerPlugin(NekoPluginBase):
             "禁止复述房间号，禁止复述或模仿别人刚说过的话；"
             "禁止猜测弹幕为何没显示（如'是不是开了弹幕过滤/只看主播'），"
             "禁止主动询问'要不要发弹幕/要不要回复弹幕'；"
+            "感知实况不是'任务'——严禁'任务完成/搞定啦/完成啦/已确认'等完成话术与汇报腔；"
             "只在用户询问或需要感知内容时调用，没人问就不主动汇报。"
         ),
         parameters={
@@ -1167,6 +1172,7 @@ class BiliViewerPlugin(NekoPluginBase):
             "严禁'喵/喵呜/呜'等语气词、表情与客套话开头（回复直接以内容本身开始）；"
             "禁止复述BV号，禁止复述或模仿别人刚说过的话；"
             "禁止猜测弹幕为何没显示，禁止主动询问'要不要发弹幕/要不要回复弹幕'；"
+            "感知实况不是'任务'——严禁'任务完成/搞定啦/完成啦/已确认'等完成话术与汇报腔；"
             "只在用户询问或需要感知内容时调用，没人问就不主动汇报。"
         ),
         parameters={
@@ -1720,6 +1726,7 @@ class BiliViewerPlugin(NekoPluginBase):
             "'直播画面你能看到吗'，或 YUI 需要描述画面本身（非文字实况）时。"
             "无需参数；截图 120 秒内新鲜，超出后提示稍后重试。"
             "回复纪律：看到画面后直接描述画面内容（直播画面/游戏画面等），不加'系统又同步/我看到/你正在看'等开场白；"
+            "看到/没看到都是感知实况，不是'任务'——严禁'任务完成/搞定啦/完成啦'等完成话术与汇报腔；"
             "看不到时如实说明，禁止说'系统刚给我确认了'等话术，禁止猜测。"
         ),
         parameters={"type": "object", "properties": {}, "required": []},
@@ -1818,6 +1825,7 @@ class BiliViewerPlugin(NekoPluginBase):
             "回复纪律：发送成功后只原样回复'弹幕已发送。'/'评论已发送。'，禁止'搞定/任务搞定啦/发出去咯'话术、"
             "禁止复述房间号/BV号/弹幕内容、禁止追问'你看到了吗'、禁止猜测弹幕为何没显示；"
             "感知/查询只陈述实况本身，禁止'系统又同步/系统刚给我确认了/房间号没错'等开场白与确认话术；"
+            "感知/查询不是'任务'——严禁'任务完成/搞定啦/完成啦/已确认'等任何完成话术与汇报腔；"
             "严禁主动询问'要不要发弹幕/要不要回复弹幕'——弹幕仅在用户明确要求或自主运营任务中发送。"
             "发送纪律：弹幕发送入口调用一次即完成，禁止发送后再次调用本入口或其他入口确认/补发/重复发送"
             "（同目标同内容 60 秒内自动去重，只会发一次）。"
@@ -1886,7 +1894,10 @@ class BiliViewerPlugin(NekoPluginBase):
                 if text and kind == "live" and parsed.get("room_id"):
                     return await self.bili_live_send_danmaku(room=parsed["room_id"], text=text, account=account)
                 return {
-                    "output": f"当前正在看：{tab.get('title', '')}（{kind or '未知'}）",
+                    "output": (
+                        f"（后台静默感知到的实况，不是任务、无需汇报：用户当前正在看「{tab.get('title', '')}」（{kind or '未知'}）。"
+                        "直接以实况回答用户即可；严禁'任务完成/搞定啦/完成啦/已确认'等完成话术与开场白。）"
+                    ),
                     "is_error": False,
                     "result": parsed,
                 }
