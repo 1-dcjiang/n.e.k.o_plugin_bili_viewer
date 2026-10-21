@@ -78,6 +78,29 @@ def test_receive_ext_audio_rejects_bad_payloads(tmp_path, monkeypatch):
     assert not os.path.exists(pkg._AUDIO_PATH)
 
 
+def test_receive_ext_audio_real_kick_starts_asr_worker(tmp_path, monkeypatch):
+    """回归：_asr_lock 存储属性与方法同名会导致首次 _kick_asr 抛
+    "'method' object does not support the context manager protocol"。
+    此处不替换 _kick_asr，真实走一遍落盘 → 锁 → worker 启动，并验证二次推送不再抛错。"""
+    pkg = _pkg()
+    inst = _make_instance(pkg)
+    monkeypatch.setattr(pkg, "_AUDIO_PATH", os.path.join(str(tmp_path), "seg_real.wav"))
+    monkeypatch.setattr(inst, "_whisper_model", lambda: None)  # 不拉起真实 whisper
+    body = {"audio": _wav_base64(1.0), "sample_rate": 16000, "seq": 1, "at": 1234567890}
+    res = inst._receive_ext_audio(body)
+    assert res.get("ok") is True
+    assert os.path.isfile(pkg._AUDIO_PATH)
+    worker = getattr(inst, "_asr_worker_thread", None)
+    assert worker is not None and worker.is_alive()
+    # 第二次推送：_asr_lock 可复用，不应抛异常
+    res2 = inst._receive_ext_audio({"audio": _wav_base64(1.0), "sample_rate": 16000, "seq": 2, "at": 1234567891})
+    assert res2.get("ok") is True
+    # 收尾：停 worker
+    inst._asr_worker_stop = True
+    inst._asr_worker_evt.set()
+    worker.join(timeout=2)
+
+
 # ══════════════ bili_listen_audio 工具 ══════════════
 
 

@@ -2146,10 +2146,13 @@ class BiliViewerPlugin(NekoPluginBase):
     # ══════════ 扩展声音通道（v0.7.11：让 YUI 能"听到"直播/视频） ══════════
 
     def _asr_lock(self) -> threading.Lock:
-        lock = getattr(self, "_asr_lock", None)
+        # 注意：存储属性名不能与方法名相同（self._asr_lock 首次 getattr 会取到
+        # bound method 本身，导致 with 语句抛 "'method' object does not support
+        # the context manager protocol"）。改用 _asr_lock_obj 存储。
+        lock = getattr(self, "_asr_lock_obj", None)
         if lock is None:
             lock = threading.Lock()
-            self._asr_lock = lock
+            self._asr_lock_obj = lock
         return lock
 
     def _receive_ext_audio(self, body: dict) -> dict:
