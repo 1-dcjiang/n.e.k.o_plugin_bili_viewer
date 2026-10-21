@@ -392,6 +392,7 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
 // 启动时校准一次真实焦点（SW 后台唤醒默认 true，这里纠正）
 try {
   chrome.windows.getLastFocused({}, (win) => {
+    if (chrome.runtime.lastError) return; // 无焦点窗口：保持当前值，不报 Unchecked runtime.lastError
     if (win) windowFocused = win.focused !== false;
   });
 } catch (e) { /* 内核过旧无此 API：保持默认 true */ }
