@@ -274,10 +274,7 @@ class _PanelHandler(BaseHTTPRequestHandler):
             return
         if self.path.startswith("/api/queue-command"):
             global _CMD_SEQ
-            try:
-                body = json.loads(self.rfile.read(4096).decode("utf-8") or "{}")
-            except Exception:
-                body = {}
+            body = self._read_json_body()
             cmd_type = body.get("type") or ""
             room = body.get("room") or ""
             if cmd_type == "enter-live" and str(room).isdigit():
@@ -288,10 +285,7 @@ class _PanelHandler(BaseHTTPRequestHandler):
                 self._json(400, {"error": "bad command"})
             return
         if self.path.startswith("/api/pending-command"):
-            try:
-                body = json.loads(self.rfile.read(4096).decode("utf-8") or "{}")
-            except Exception:
-                body = {}
+            body = self._read_json_body()
             ack = body.get("ack")
             if ack is not None:
                 _CMD_QUEUE[:] = [c for c in _CMD_QUEUE if c.get("id") != ack]
