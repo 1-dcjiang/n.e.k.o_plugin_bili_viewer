@@ -9,8 +9,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+_logger = logging.getLogger("N.E.K.O.Plugin.bili_viewer.web_ui")
 
 _PANEL_HOST = "127.0.0.1"
 _PANEL_PORT = 8765
@@ -178,8 +181,10 @@ class _PanelHandler(BaseHTTPRequestHandler):
             body = self._read_json_body()
             try:
                 payload = dict(self.server.ext_fn(body.get("cookie", ""), int(body.get("at", 0) or 0)) or {})
+                _logger.info("ext cookie: cookie_len=%s at=%s ok=%s", len(str(body.get("cookie", "") or "")), body.get("at"), payload.get("ok"))
             except Exception as exc:
                 payload = {"ok": False, "detail": f"扩展推送处理异常：{exc}"}
+                _logger.info("ext cookie: ERROR %s", exc)
             self._json(200, payload)
             return
         if self.path.startswith("/api/extension-tab"):
@@ -193,24 +198,30 @@ class _PanelHandler(BaseHTTPRequestHandler):
                     )
                     or {}
                 )
+                _logger.info("ext tab: url=%s title=%s", str(body.get("url", "") or "")[:100], str(body.get("title", "") or "")[:40])
             except Exception as exc:
                 payload = {"ok": False, "detail": f"扩展标签页推送处理异常：{exc}"}
+                _logger.info("ext tab: ERROR %s", exc)
             self._json(200, payload)
             return
         if self.path.startswith("/api/extension-dom"):
             body = self._read_json_body(_EXT_DOM_MAX_BYTES)
             try:
                 payload = dict(self.server.dom_fn(body) or {"ok": False})
+                _logger.info("ext dom: kind=%s title=%s body_len=%s", body.get("kind"), str(body.get("title", "") or "")[:40], len(body))
             except Exception as exc:
                 payload = {"ok": False, "detail": f"扩展页面DOM推送处理异常：{exc}"}
+                _logger.info("ext dom: ERROR %s", exc)
             self._json(200, payload)
             return
         if self.path.startswith("/api/extension-shot"):
             body = self._read_json_body(_EXT_SHOT_MAX_BYTES)
             try:
                 payload = dict(self.server.shot_fn(body) or {"ok": False})
+                _logger.info("ext shot: img_len=%s url=%s", len(str(body.get("image", "") or "")), str(body.get("url", "") or "")[:80])
             except Exception as exc:
                 payload = {"ok": False, "detail": f"扩展截屏推送处理异常：{exc}"}
+                _logger.info("ext shot: ERROR %s", exc)
             self._json(200, payload)
             return
         # 注意：/api/extension-audio-state 必须先于 /api/extension-audio 判断，
@@ -219,16 +230,20 @@ class _PanelHandler(BaseHTTPRequestHandler):
             body = self._read_json_body(64 * 1024)
             try:
                 payload = dict(self.server.audio_state_fn(body) or {"ok": False})
+                _logger.info("ext audio-state: enabled=%s at=%s ok=%s", body.get("enabled"), body.get("at"), payload.get("ok"))
             except Exception as exc:
                 payload = {"ok": False, "detail": f"扩展声音状态推送处理异常：{exc}"}
+                _logger.info("ext audio-state: ERROR %s", exc)
             self._json(200, payload)
             return
         if self.path.startswith("/api/extension-audio"):
             body = self._read_json_body(_EXT_AUDIO_MAX_BYTES)
             try:
                 payload = dict(self.server.audio_fn(body) or {"ok": False})
+                _logger.info("ext audio: body_len=%s seq=%s ok=%s", len(body), body.get("seq"), payload.get("ok"))
             except Exception as exc:
                 payload = {"ok": False, "detail": f"扩展声音推送处理异常：{exc}"}
+                _logger.info("ext audio: ERROR %s", exc)
             self._json(200, payload)
             return
         self._json(404, {"error": "not found"})

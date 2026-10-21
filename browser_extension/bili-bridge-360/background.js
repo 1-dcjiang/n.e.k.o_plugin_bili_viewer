@@ -1,4 +1,4 @@
-// B站接入桥 (360) v0.2.6 —— 360 安全/极速浏览器专用版
+// B站接入桥 (360) v0.2.9 —— 360 安全/极速浏览器专用版
 // 1) 把 B站登录态直连推送给本机 bili_viewer 插件（POST 127.0.0.1:8765，不上外网）；
 // 2) 把当前活动标签页（URL+标题）实时推送给插件，让 YUI 精确感知你在看什么；
 // 3) 在 B站 直播/视频页注入脚本读取页面实况（直播弹幕列表/在线人数/视频进度），
@@ -25,6 +25,11 @@ const KEEP_NAMES = new Set([
   "bili_ticket", "bili_ticket_expires", "sid",
   "fingerprint", "fingerprintp", "buvid_fp",
 ]);
+
+// 窗口焦点门控（v0.2.9）：仅当浏览器窗口在前台时推送页面实况（tab/dom/shot），
+// 避免 Chrome/Edge/360 同时打开时互相覆盖导致 YUI 感知错位；
+// cookie 同步与声音捕获不受焦点限制（后台也要持续同步、照常听到声音）。
+let windowFocused = true;
 
 let pushTimer = null;
 let retryTimer = null;
@@ -129,6 +134,7 @@ function readBiliDom() {
 
 async function pushDom() {
   try {
+    if (!windowFocused) return;
     const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     const tab = tabs && tabs[0];
     if (!tab || !tab.id || !tab.url) return;
@@ -157,6 +163,7 @@ async function pushDom() {
 
 async function pushShot() {
   try {
+    if (!windowFocused) return;
     const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     const tab = tabs && tabs[0];
     if (!tab || !tab.id || !tab.url) return;
@@ -175,6 +182,7 @@ async function pushShot() {
 
 async function pushTab() {
   try {
+    if (!windowFocused) return;
     const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     const tab = tabs && tabs[0];
     if (!tab || !tab.url || tab.url.startsWith("chrome://") || tab.url.startsWith("edge://")) return;
@@ -332,3 +340,15 @@ pushTab();
 pushDom();
 pushShot();
 pushAudioState();
+
+// 窗口焦点监听（v0.2.9）：失焦即停推页面实况，多浏览器共存时只让用户
+// 正在看的那一个说话；cookie / 声音不受影响。
+chrome.windows.onFocusChanged.addListener((windowId) => {
+  windowFocused = windowId !== chrome.windows.WINDOW_ID_NONE;
+});
+// 启动时校准一次真实焦点（SW 后台唤醒默认 true，这里纠正）
+try {
+  chrome.windows.getLastFocused({}, (win) => {
+    if (win) windowFocused = win.focused !== false;
+  });
+} catch (e) { /* 内核过旧无此 API：保持默认 true */ }

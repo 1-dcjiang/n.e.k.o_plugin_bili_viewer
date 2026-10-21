@@ -255,7 +255,7 @@ def test_ext_package_has_all_six_files(pkg_name):
 @pytest.mark.parametrize("pkg_name", ["bili-bridge-chrome", "bili-bridge-edge", "bili-bridge-360"])
 def test_ext_manifest_has_audio_permissions(pkg_name):
     manifest = json.loads(_read_ext(pkg_name, "manifest.json"))
-    assert manifest["version"] == "0.2.8"
+    assert manifest["version"] == "0.2.9"
     assert "tabCapture" in manifest["permissions"]
     assert "offscreen" in manifest["permissions"]
 
@@ -519,4 +519,46 @@ def test_web_ui_audio_state_routed_before_audio():
     idx_state = src.index('startswith("/api/extension-audio-state")')
     idx_audio = src.index('startswith("/api/extension-audio")')
     assert idx_state < idx_audio, "audio-state 路由判断必须排在 audio 之前"
+
+
+# ══════════════ v0.7.17：扩展窗口焦点门控（三包字节级同步） ══════════════
+
+
+@pytest.mark.parametrize("pkg_name", ["bili-bridge-chrome", "bili-bridge-edge", "bili-bridge-360"])
+def test_ext_focus_gate_present_in_all_packages(pkg_name):
+    """三包 background.js 必须都有窗口焦点门控：失焦停推实况、cookie/声音不受限。"""
+    bg = _read_ext(pkg_name, "background.js")
+    assert "let windowFocused = true;" in bg
+    assert "onFocusChanged" in bg
+    assert "WINDOW_ID_NONE" in bg
+    assert "getLastFocused" in bg
+    for fn in ("pushTab", "pushDom", "pushShot"):
+        i = bg.index(f"async function {fn}()")
+        head = bg[i : i + 400]
+        assert "if (!windowFocused) return;" in head, f"{pkg_name} {fn} 缺焦点门控"
+
+
+@pytest.mark.parametrize("pkg_name", ["bili-bridge-chrome", "bili-bridge-edge", "bili-bridge-360"])
+def test_ext_focus_gate_keeps_cookie_and_audio_unrestricted(pkg_name):
+    """cookie / 声音开关推送不能带焦点门控（后台必须持续同步与听到声音）。"""
+    bg = _read_ext(pkg_name, "background.js")
+    i = bg.index("async function pushCookie()")
+    head = bg[i : i + 300]
+    assert "if (!windowFocused) return;" not in head
+    assert "audio_capture_enabled" in bg
+
+
+def test_ext_focus_gate_synced_across_packages():
+    """焦点门控相关代码在三包中必须字节级一致（除头部标识行）。"""
+    chrome = _read_ext("bili-bridge-chrome", "background.js")
+    edge = _read_ext("bili-bridge-edge", "background.js")
+    pkg360 = _read_ext("bili-bridge-360", "background.js")
+
+    def _focus_block(text: str) -> str:
+        start = text.index("窗口焦点门控")
+        end = text.index("保持默认 true") + len("保持默认 true")
+        return text[start:end]
+
+    for src in (edge, pkg360):
+        assert _focus_block(src) == _focus_block(chrome), "焦点门控代码三包必须字节级一致"
 
