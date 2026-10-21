@@ -181,6 +181,29 @@ def test_edit_video_requires_cookie(monkeypatch) -> None:
         assert exc.code == "NEED_LOGIN"
 
 
+def test_edit_video_wbi_signed_query(monkeypatch) -> None:
+    """v0.7.6 复查修复：/x/vu/edit 必须带 wbi 签名 query（wts+w_rid），否则 -352。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_COOKIE", "SESSDATA=m; bili_jct=mj")
+    calls: list[tuple[str, dict, dict]] = []
+
+    def fake_post(url, form, timeout=12.0, account="main", query=None):
+        calls.append((url, dict(form or {}), dict(query or {})))
+        return {"code": 0, "data": {}}
+
+    monkeypatch.setattr(bili, "_http_post", fake_post)
+    monkeypatch.setattr(bili, "video_info", lambda bvid: {"aid": 123, "title": "旧标题", "desc": "", "tags": ["a"]})
+    monkeypatch.setattr(bili, "_get_mixin_key", lambda: "m" * 32)
+    r = bili.edit_video("BV1xx411c7mD", title="新标题")
+    assert r["ok"] is True
+    assert len(calls) == 1
+    url, form, query = calls[0]
+    assert "/x/vu/edit" in url
+    assert form["title"] == "新标题"
+    assert "wts" in query and "w_rid" in query
+
+
 def test_live_send_requires_cookie(monkeypatch) -> None:
     from plugin.plugins.bili_viewer.bili import BiliError, live_send_danmaku
 

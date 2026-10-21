@@ -1075,9 +1075,16 @@ def _require_login(account: str = "main") -> str:
     return cookie
 
 
-def _http_post(url: str, form: dict, timeout: float = _TIMEOUT, account: str = "main") -> dict:
-    """POST 表单（带 Cookie）；解析 JSON。"""
+def _http_post(url: str, form: dict, timeout: float = _TIMEOUT, account: str = "main", query: dict | None = None) -> dict:
+    """POST 表单（带 Cookie）；解析 JSON。
+
+    query：URL query 参数（复查优化 v0.7.6）：vu 系写接口（/x/vu/edit、/x/vu/client/add）
+    现行要求 wbi 签名（wts+w_rid）放 URL query，调用方可用
+    query={"wts":..., "w_rid":...} 传入；未传保持原行为。
+    """
     body = urllib.parse.urlencode(form).encode()
+    if query:
+        url = url + ("&" if "?" in url else "?") + urllib.parse.urlencode(query)
     req = urllib.request.Request(url, data=body, headers={
         "User-Agent": _UA,
         "Referer": "https://www.bilibili.com/",
@@ -1198,8 +1205,16 @@ def edit_video(bvid: str, title: str | None = None, desc: str | None = None, tag
     }
     if not form["csrf"]:
         raise BiliError("Cookie 缺少 bili_jct（CSRF token），无法执行写操作", "NO_CSRF")
+    # 复查修复（v0.7.6）：/x/vu/edit 现行要求 wbi 签名（wts+w_rid 放 URL query），
+    # 缺失会报 -352"请求错误"；签名失败时保持裸请求兜底。
+    query = None
     try:
-        _http_post(_API + "/x/vu/edit", form)
+        signed = _wbi_sign(dict(form), _get_mixin_key())
+        query = {"wts": signed["wts"], "w_rid": signed["w_rid"]}
+    except BiliError:
+        pass
+    try:
+        _http_post(_API + "/x/vu/edit", form, query=query)
     except BiliError as exc:
         raise BiliError("稿件修改失败：" + exc.message, "EDIT_FAILED") from exc
     return {"bvid": bvid, "title": form["title"], "desc": form["desc"], "tag": form["tag"], "ok": True}
@@ -1548,6 +1563,23 @@ def submit_video(file_path: str, title: str, desc: str = "", tags: str = "", tid
         }, account=account, timeout=60.0)
     except BiliError as exc:
         raise BiliError("上传合并失败：" + exc.message, "UPLOAD_COMPLETE_FAILED") from exc
+    # 复查修复（v0.7.6）：/x/vu/client/add（稿件提交）现行要求 wbi 签名，缺失 -352。
+    add_query = None
+    try:
+        signed = _wbi_sign({
+            "copyright": "2",
+            "source": "",
+            "tid": int(tid),
+            "title": title,
+            "desc": (desc or "").strip(),
+            "tag": (tags or "").strip(),
+            "cover": "",
+            "up_uid": str(up_uid),
+            "csrf": csrf,
+        }, _get_mixin_key())
+        add_query = {"wts": signed["wts"], "w_rid": signed["w_rid"]}
+    except BiliError:
+        pass
     try:
         _http_post(_API + "/x/vu/client/add", {
             "copyright": "2",
@@ -1559,7 +1591,7 @@ def submit_video(file_path: str, title: str, desc: str = "", tags: str = "", tid
             "cover": "",
             "up_uid": str(up_uid),
             "csrf": csrf,
-        }, account=account, timeout=60.0)
+        }, account=account, timeout=60.0, query=add_query)
     except BiliError as exc:
         raise BiliError("稿件提交失败：" + exc.message, "SUBMIT_FAILED") from exc
     return {"ok": True, "title": title, "file": os.path.basename(file_path), "tid": int(tid), "size": int(size)}
