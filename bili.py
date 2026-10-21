@@ -1474,12 +1474,14 @@ def modify_relation(target: str, action: str = "follow", account: str = "yui") -
     }
 
 
-def unfollow_all(account: str = "yui", dry_run: bool = False) -> dict:
+def unfollow_all(account: str = "yui", dry_run: bool = False, limit: int = 0) -> dict:
     """把指定账号关注的所有 UP 主全部取消关注（真实执行，逐条调用并复查）。
 
     逐条调用 /x/relation/modify（B站 无批量取关接口），每条后由 modify_relation
     复查关注状态；风控/网络抖动自动重试（间隔递增）；仍未成功的条目记入 failed
-    明细，绝不谎报为成功。返回真实结果：成功 N 个 / 失败 M 个及原因。
+    明细，绝不谎报为成功。limit>0 时单次最多处理 limit 个（默认全量），剩余数量
+    通过 remaining 返回——调用方按 remaining 循环调用直到为 0，避免单次调用
+    耗时过长触发对话层工具超时（v0.7.33）。
     """
     _require_login(account)
     mid = my_info(account)["mid"]
@@ -1492,6 +1494,7 @@ def unfollow_all(account: str = "yui", dry_run: bool = False) -> dict:
                     _API + "/x/relation/followings",
                     {"vmid": int(mid), "pn": pn, "ps": 50, "order": "desc", "order_type": 0},
                     account=account,
+                    timeout=15,
                 )
             ).get("data") or {}
         except BiliError as exc:
@@ -1510,8 +1513,10 @@ def unfollow_all(account: str = "yui", dry_run: bool = False) -> dict:
             "total": len(followings),
             "list": [{"fid": f.get("mid") or f.get("fid"), "uname": f.get("uname", "")} for f in followings],
         }
+    batch = followings[:limit] if limit and limit > 0 else followings
+    remaining = len(followings) - len(batch)
     ok, failed = 0, []
-    for f in followings:
+    for f in batch:
         fid = f.get("mid") or f.get("fid")
         uname = f.get("uname", "") or str(fid)
         last = None
@@ -1525,17 +1530,18 @@ def unfollow_all(account: str = "yui", dry_run: bool = False) -> dict:
                 last = exc
                 # 风控/验证码类失败：加长间隔重试；其余（账号状态等）直接放弃该条
                 if ("风控" in exc.message or "验证" in exc.message or exc.code in ("REL_2_REL_NOT_EFFECTED", "REL_2_-412", "REL_2_BIZ_-412")):
-                    time.sleep(2.0 * (attempt + 1))
+                    time.sleep(1.5 * (attempt + 1))
                 else:
                     break
         if last:
             failed.append({"fid": fid, "uname": uname, "reason": last.message})
-        time.sleep(0.5)  # 取关间隔，避免连发触发风控
+        time.sleep(0.3)  # 取关间隔，避免连发触发风控
     return {
         "account": _account_label(account),
         "total": len(followings),
         "ok": ok,
         "failed": failed,
+        "remaining": remaining,
     }
 
 
