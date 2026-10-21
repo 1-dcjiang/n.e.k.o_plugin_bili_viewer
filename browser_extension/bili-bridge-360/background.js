@@ -200,7 +200,11 @@ async function pushAudioState() {
 
 function scheduleTab() {
   clearTimeout(pushTimer);
-  pushTimer = setTimeout(() => { pushTab(); pushDom(); pushShot(); }, 800);
+  pushTimer = setTimeout(() => {
+    pushTab(); pushDom(); pushShot();
+    // 标签切换/URL 变化：音频捕获需重绑到当前标签（tabCapture 一次只捕获一个标签）
+    if (audioEnabled && !audioStarting) startAudioCapture();
+  }, 800);
 }
 
 chrome.cookies.onChanged.addListener((changeInfo) => {
@@ -257,8 +261,13 @@ async function startAudioCapture() {
     const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     const tab = tabs && tabs[0];
     if (!tab || !tab.id || !tab.url || tab.url.indexOf("bilibili.com") < 0) {
-      // 当前不在 B站 页：仍开启捕获，切到 B站 页后 tabCapture 以最新活动标签为准
-      throw new Error("not-on-bilibili");
+      // 当前不在 B站 页：先记住开关意图（v0.2.8 修复"一直关闭"——
+      // 旧版这里 throw 导致开关永远开不起来），等切到 B站 标签后由
+      // 标签监听/下一轮 alarm 自动启动捕获。
+      audioEnabled = true;
+      await chrome.storage.local.set({ [AUDIO_STATE_KEY]: true });
+      pushAudioState();
+      return;
     }
     const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
     await chrome.runtime.sendMessage({ type: "start-audio", streamId: streamId });
@@ -311,9 +320,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return undefined;
 });
 
-// 启动时恢复声音捕获开关（后台静默；用户开启过才自动恢复）
+// 启动时恢复声音捕获开关（v0.2.8 永久开启：从未设置过=开，用户显式关闭过才保持关）
 chrome.storage.local.get(AUDIO_STATE_KEY).then((saved) => {
-  audioEnabled = Boolean(saved[AUDIO_STATE_KEY]);
+  audioEnabled = saved[AUDIO_STATE_KEY] !== false;
   if (audioEnabled) startAudioCapture();
 });
 

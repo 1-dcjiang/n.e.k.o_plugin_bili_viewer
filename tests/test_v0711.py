@@ -255,7 +255,7 @@ def test_ext_package_has_all_six_files(pkg_name):
 @pytest.mark.parametrize("pkg_name", ["bili-bridge-chrome", "bili-bridge-edge", "bili-bridge-360"])
 def test_ext_manifest_has_audio_permissions(pkg_name):
     manifest = json.loads(_read_ext(pkg_name, "manifest.json"))
-    assert manifest["version"] == "0.2.7"
+    assert manifest["version"] == "0.2.8"
     assert "tabCapture" in manifest["permissions"]
     assert "offscreen" in manifest["permissions"]
 
@@ -303,6 +303,24 @@ def test_ext_background_pushes_audio_state_all_packages():
         assert "pushAudioState" in bg
         assert "/api/extension-audio-state" in bg
         assert "audioEnabled" in bg
+        # v0.2.8 永久开启：启动恢复默认开（从未设置过=开）
+        assert "!== false" in bg
+        # v0.2.8 不在 B站 页不抛错（记住意图），切到 B站 自动启动
+        assert "not-on-bilibili" not in bg
+        assert "记住开关意图" in bg
+        # 标签切换自动重绑音频捕获
+        assert "startAudioCapture()" in bg
+        popup = _read_ext(pkg_name, "popup.js")
+        assert "!== false" in popup  # popup 状态兜底同样默认开
+
+
+def test_ext_background_recovers_enabled_default_on():
+    """扩展启动恢复逻辑：storage 未设置或值为 true → audioEnabled 为 true（永久开启）。"""
+    # 恢复表达式 `saved[AUDIO_STATE_KEY] !== false`：undefined/true→开，仅 false→关
+    for pkg_name in ("bili-bridge-chrome", "bili-bridge-edge", "bili-bridge-360"):
+        bg = _read_ext(pkg_name, "background.js")
+        assert "saved[AUDIO_STATE_KEY] !== false" in bg
+        assert "if (audioEnabled) startAudioCapture()" in bg
 
 
 def test_receive_ext_audio_state_records_enabled():

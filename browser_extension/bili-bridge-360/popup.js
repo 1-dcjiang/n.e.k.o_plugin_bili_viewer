@@ -41,7 +41,7 @@ async function refresh() {
     enabled = Boolean(resp && resp.enabled);
   } catch (e) {
     const saved = await chrome.storage.local.get("audio_capture_enabled");
-    enabled = Boolean(saved.audio_capture_enabled);
+    enabled = saved.audio_capture_enabled !== false;  // 永久开启：未设置过=开
   }
   au.textContent = enabled ? "开启（后台静默）" : "关闭";
   au.className = enabled ? "ok" : "bad";
