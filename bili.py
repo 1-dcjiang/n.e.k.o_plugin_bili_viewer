@@ -1346,13 +1346,13 @@ def _resolve_uname(target: str, account: str = "yui") -> str:
     if re.fullmatch(r"\d{1,12}", target):
         try:
             data = _http_get(
-                _API + "/x/space/wbi/acc/info",
+                _API + "/x/web-interface/card",
                 {"mid": int(target)},
                 account=account,
             )
-            info = data.get("data") or {}
-            if info.get("name"):
-                return str(info["name"])
+            card = ((data.get("data") or {}).get("card")) or {}
+            if card.get("name"):
+                return str(card["name"])
         except BiliError:
             pass
         return target
@@ -1641,8 +1641,8 @@ def edit_video(bvid: str, title: str | None = None, desc: str | None = None, tag
     return {"bvid": bvid, "title": form["title"], "desc": form["desc"], "tag": form["tag"], "ok": True}
 
 
-def live_send_danmaku(room: str, text: str, account: str = "main") -> dict:
-    """向直播间发送一条弹幕。account=main 主账号 / yui 小号。
+def live_send_danmaku(room: str, text: str, account: str = "yui") -> dict:
+    """向直播间发送一条弹幕。account=yui 小号（默认）/ main 主账号。
 
     注意：msg/send 的 roomid 必须是页面显示的房间号（URL 上的数字，
     与 B站 Web 端一致），不能用 room_init 解析出的真实 room_id——
