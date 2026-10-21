@@ -256,6 +256,8 @@ class _PanelHandler(BaseHTTPRequestHandler):
             })
             return
         if self.path.startswith("/api/pending-command"):
+            now = time.time()
+            _CMD_QUEUE[:] = [c for c in _CMD_QUEUE if now - (c.get("created") or now) < 600]
             cmd = _CMD_QUEUE[0] if _CMD_QUEUE else {}
             self._json(200, cmd or {"id": None})
             return

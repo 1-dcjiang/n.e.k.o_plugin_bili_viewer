@@ -1694,7 +1694,7 @@ def live_send_danmaku(room: str, text: str, account: str = "yui") -> dict:
     }
 
 
-def send_video_danmaku(bvid: str, text: str, progress_ms: int = 0, account: str = "main") -> dict:
+def send_video_danmaku(bvid: str, text: str, progress_ms: int = 0, account: str = "yui") -> dict:
     """向视频投递一条普通弹幕（默认出现在视频开头时间点）。account=main 主账号 / yui 小号。
 
     参数：

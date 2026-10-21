@@ -242,8 +242,13 @@ async function checkCommands() {
     if (!cmd || !cmd.id) return;
     if (cmd.type === "enter-live" && cmd.room) {
       try {
-        const t = await chrome.tabs.create({ url: `https://live.bilibili.com/${cmd.room}`, active: false });
-        if (t && t.id) { try { await chrome.tabs.update(t.id, { active: false }); } catch (e) {} }
+        const url = `https://live.bilibili.com/${cmd.room}`;
+        const all = await chrome.tabs.query({});
+        const has = all.some(t => t.url && t.url.startsWith(`https://live.bilibili.com/${cmd.room}`));
+        if (!has) {
+          const t = await chrome.tabs.create({ url, active: false });
+          if (t && t.id) { try { await chrome.tabs.update(t.id, { active: false }); } catch (e) {} }
+        }
       } catch (e) {}
     }
     await fetch(`${PANEL_URL}/api/pending-command`, {
