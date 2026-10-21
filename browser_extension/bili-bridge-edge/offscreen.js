@@ -1,6 +1,6 @@
-// B站接入桥 (Chrome) —— offscreen 声音采集（v0.7.11）
-// 接收 background 转发的 tabCapture streamId，用 AudioContext 采集标签页音频，
-// 每段约 8 秒组装成 16kHz/16bit/单声道 wav（base64）推送到本机插件
+// B站接入桥 (Chrome) —— offscreen 声音采集（v0.2.13）
+// 接收 background 转发的 tabCapture streamId，用 AudioContext + AudioWorkletNode
+// 采集标签页音频，每段约 8 秒组装成 16kHz/16bit/单声道 wav（base64）推送到本机插件
 // http://127.0.0.1:8765/api/extension-audio；数据只走本机回环，不上外网。
 // 一次性授权（扩展弹层开启声音）后持续静默运行，不抢界面、不播报。
 
@@ -86,13 +86,6 @@ function flushSegment() {
   pushSegment(samples);
 }
 
-function onAudioProcess(e) {
-  const input = e.inputBuffer.getChannelData(0);
-  if (!collecting) return;
-  // 拷贝当前帧（getChannelData 返回可被复用的缓冲，不能持有引用）
-  for (let i = 0; i < input.length; i++) pcmBuffer.push(input[i]);
-}
-
 async function startCapture(streamId) {
   stopCapture();
   collecting = true;
@@ -115,7 +108,7 @@ async function startCapture(streamId) {
   audioEl.play().catch(() => {});
   audioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
   // Chrome 自动播放策略：非用户手势下新建的 AudioContext 默认 suspended，
-  // 不 resume 则 ScriptProcessor 永远不产出数据（0 音频推送）——必须显式启动。
+  // 不 resume 则音频图永远不产出数据（0 音频推送）——必须显式启动。
   // offscreen 声明 AUDIO_PLAYBACK reason 后此处 resume 可成功。
   if (audioContext.state !== "running") {
     audioContext.resume().catch(() => {});
@@ -130,10 +123,20 @@ async function startCapture(streamId) {
   // 推送字段都以实际采样率为准，避免 ASR 听到变速内容
   currentRate = audioContext.sampleRate || SAMPLE_RATE;
   sourceNode = audioContext.createMediaStreamSource(stream);
-  processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+  // v0.2.13：ScriptProcessorNode 已废弃，改用 AudioWorkletNode（独立音频线程）
+  await audioContext.audioWorklet.addModule(chrome.runtime.getURL("audio-processor.js"));
+  processorNode = new AudioWorkletNode(audioContext, "bili-pcm-processor", {
+    numberOfInputs: 1,
+    numberOfOutputs: 1,
+    outputChannelCount: [1],
+  });
   sourceNode.connect(processorNode);
   // 分析链路不连 destination（回放由 audioEl 负责，避免双重声音）
-  processorNode.onaudioprocess = onAudioProcess;
+  processorNode.port.onmessage = (e) => {
+    if (!collecting) return;
+    const samples = e.data;
+    for (let i = 0; i < samples.length; i++) pcmBuffer.push(samples[i]);
+  };
   segmentTimer = setInterval(flushSegment, SEGMENT_SECONDS * 1000);
   // 通知 background 已就绪（供状态回显）
   chrome.runtime.sendMessage({ type: "audio-state", running: true }).catch(() => {});
@@ -143,7 +146,12 @@ function stopCapture() {
   collecting = false;
   if (segmentTimer) { clearInterval(segmentTimer); segmentTimer = null; }
   pcmBuffer = [];
-  if (processorNode) { try { processorNode.disconnect(); } catch (e) {} processorNode = null; }
+  if (processorNode) {
+    try { processorNode.port.postMessage("pause"); } catch (e) {}
+    try { processorNode.port.onmessage = null; } catch (e) {}
+    try { processorNode.disconnect(); } catch (e) {}
+    processorNode = null;
+  }
   if (sourceNode) { try { sourceNode.disconnect(); } catch (e) {} sourceNode = null; }
   if (audioContext) { try { audioContext.close(); } catch (e) {} audioContext = null; }
   if (stream) { try { stream.getTracks().forEach((t) => t.stop()); } catch (e) {} stream = null; }
