@@ -976,7 +976,7 @@ class BiliViewerPlugin(NekoPluginBase):
         output = bili.format_now_watching(info)
         # v0.7.16 机器阻断：感知结果不是'任务'，禁止完成话术与汇报腔
         output = f"（感知到的实况，不是任务、无需汇报：{output}直接以实况回答用户即可；严禁'任务完成/搞定啦/完成啦/已确认'等完成话术与开场白。）"
-        return {"output": output, "is_error": False, "watching": info}
+        return {"output": output, "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "watching": info}
 
     @llm_tool(
         name="bili_my_info",
@@ -1162,7 +1162,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 see["_source"] = "api"
         except bili.BiliError as exc:
             return _wrap_err(exc)
-        return {"output": bili.render_see(see), "is_error": False, "result": see}
+        return {"output": bili.render_see(see), "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": see}
 
     @llm_tool(
         name="bili_see_video",
@@ -1223,7 +1223,7 @@ class BiliViewerPlugin(NekoPluginBase):
                     ]
         except bili.BiliError as exc:
             return _wrap_err(exc)
-        return {"output": bili.render_see(see), "is_error": False, "result": see}
+        return {"output": bili.render_see(see), "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": see}
 
     @llm_tool(
         name="bili_live_send_danmaku",
@@ -1832,6 +1832,7 @@ class BiliViewerPlugin(NekoPluginBase):
             "output": f"已读取你屏幕当前画面截图（{shot.get('title') or shot.get('url') or ''}，"
             f"保存于 {path}，{shot.get('size') or 0} 字节）。",
             "is_error": False,
+            "meta": {"agent": {"delivery": "silent"}},
             "result": {"path": path, "title": shot.get("title", ""), "at": shot.get("at", 0)},
         }
 
@@ -1871,6 +1872,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 "output": "暂时没有听到声音。",
                 "is_error": True,
                 "error": "NO_AUDIO",
+                "meta": {"agent": {"delivery": "silent"}},
                 "result": {
                     "reason": reason,
                     "audio_enabled": bool(state.get("enabled")),
@@ -1881,6 +1883,7 @@ class BiliViewerPlugin(NekoPluginBase):
         return {
             "output": asr["text"],
             "is_error": False,
+            "meta": {"agent": {"delivery": "silent"}},
             "result": {"text": asr["text"], "at": asr.get("at", 0)},
         }
 
@@ -1986,6 +1989,7 @@ class BiliViewerPlugin(NekoPluginBase):
                         "直接以实况回答用户即可；严禁'任务完成/搞定啦/完成啦/已确认'等完成话术与开场白。）"
                     ),
                     "is_error": False,
+                    "meta": {"agent": {"delivery": "silent"}},
                     "result": parsed,
                 }
         return {

@@ -278,7 +278,7 @@ def test_ext_package_has_all_six_files(pkg_name):
 @pytest.mark.parametrize("pkg_name", ["bili-bridge-chrome", "bili-bridge-edge", "bili-bridge-360"])
 def test_ext_manifest_has_audio_permissions(pkg_name):
     manifest = json.loads(_read_ext(pkg_name, "manifest.json"))
-    assert manifest["version"] == "0.2.13"
+    assert manifest["version"] == "0.2.14"
     assert "tabCapture" in manifest["permissions"]
     assert "offscreen" in manifest["permissions"]
 
@@ -629,7 +629,7 @@ def test_ext_source_synced_across_packages():
 
     def _source_block(text: str) -> str:
         start = text.index("async function pushCookie()")
-        end = text.index("async function pushAudioState()")
+        end = text.index("async function pushAudioState(")
         return text[start:end]
 
     for src in (edge, pkg360):
