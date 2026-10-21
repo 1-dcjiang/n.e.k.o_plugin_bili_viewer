@@ -36,6 +36,11 @@ _DANMAKU_BUF: collections.deque = collections.deque(maxlen=120)  # (sender, text
 _MENTION_NOTIFY: dict = {"at": 0.0, "text": "", "sender": ""}
 _YUI_NICKNAMES = ("yui小猫娘", "小猫娘", "yui")  # 弹幕 @ 匹配昵称（小号默认昵称）
 
+# v0.7.35：扩展指令队列——插件工具把"进入直播间"等命令写入，扩展 alarm 轮询拉取执行
+_CMD_QUEUE: list = []          # [{id, type, room, created}]
+_CMD_SEQ: int = 0
+
+
 # v0.2.18：扩展推送的登录态按 uid 自保鲜（框架仅首次落盘，之后登录态变化时插件仍读旧文件
 # 会 AUTH_FAILED——"绑定账号老是掉"根因之一）。只保留 B站 请求必需的核心字段，稳定写入。
 _COOKIE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -250,6 +255,10 @@ class _PanelHandler(BaseHTTPRequestHandler):
                 "bound": bool(payload.get("bound")),
             })
             return
+        if self.path.startswith("/api/pending-command"):
+            cmd = _CMD_QUEUE[0] if _CMD_QUEUE else {}
+            self._json(200, cmd or {"id": None})
+            return
         self._send(200, "text/html; charset=utf-8", _PAGE.encode("utf-8"))
 
     def do_POST(self) -> None:
@@ -262,6 +271,31 @@ class _PanelHandler(BaseHTTPRequestHandler):
             except Exception as exc:  # 绑定动作绝不让面板崩溃
                 payload = {"ok": False, "detail": f"接入异常：{exc}"}
             self._json(200, payload)
+            return
+        if self.path.startswith("/api/queue-command"):
+            global _CMD_SEQ
+            try:
+                body = json.loads(self.rfile.read(4096).decode("utf-8") or "{}")
+            except Exception:
+                body = {}
+            cmd_type = body.get("type") or ""
+            room = body.get("room") or ""
+            if cmd_type == "enter-live" and str(room).isdigit():
+                _CMD_SEQ += 1
+                _CMD_QUEUE.append({"id": _CMD_SEQ, "type": "enter-live", "room": str(room), "created": time.time()})
+                self._json(200, {"queued": True, "id": _CMD_SEQ})
+            else:
+                self._json(400, {"error": "bad command"})
+            return
+        if self.path.startswith("/api/pending-command"):
+            try:
+                body = json.loads(self.rfile.read(4096).decode("utf-8") or "{}")
+            except Exception:
+                body = {}
+            ack = body.get("ack")
+            if ack is not None:
+                _CMD_QUEUE[:] = [c for c in _CMD_QUEUE if c.get("id") != ack]
+            self._json(200, {"ok": True})
             return
         if self.path.startswith("/api/extension-cookie"):
             body = self._read_json_body()

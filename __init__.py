@@ -862,6 +862,61 @@ class BiliViewerPlugin(NekoPluginBase):
         return {"output": bili.format_live_info(info), "is_error": False, "live": info}
 
     @llm_tool(
+        name="bili_enter_live",
+        description=(
+            "【回复纪律】进入直播间成功后，你的对外回复必须逐字原样只有一句话：'已进入直播间。'，"
+            "严禁'喵/搞定/任务搞定啦/完成啦'等任何口语化完成话术、表情、开场白与后缀；严禁追问与细节复述。"
+            "让 YUI 小号真正进入指定直播间（出现在该直播间观众/在线名单里）：先验证房间号，"
+            "再命令浏览器扩展打开该直播间标签页并驻场（浏览器需已登录小号 YUI小猫娘）。"
+            "何时用：用户说'让她进直播间/进入直播间/挂在直播间/让她在场'等需要 YUI 以观众身份在场时。"
+            "参数 room：直播间房间号（必填，纯数字，如 9458332）；account：yui（默认）/ main。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "room": {"type": "string", "description": "直播间房间号（必填，纯数字）"},
+                "account": {"type": "string", "description": "yui=YUI 独立小号（默认）/ main=用户主账号"},
+            },
+            "required": ["room"],
+        },
+        timeout=30.0,
+    )
+    async def bili_enter_live(self, *, room: str = "", account: str = "", **_):
+        params = _.get("parameters") or {}
+        room = (room or params.get("room") or "").strip()
+        acct = (account or params.get("account") or "yui").strip() or "yui"
+        if not room.isdigit():
+            return {"output": "房间号格式错误：请输入纯数字直播间房间号。", "is_error": True, "error": "BAD_ROOM"}
+        try:
+            bili.live_info(room)
+        except bili.BiliError as exc:
+            return _wrap_err(exc)
+        # 写指令给扩展（面板服务 127.0.0.1:8765；扩展 alarm 每 30s 轮询并开标签驻场）
+        try:
+            import json as _json
+            import urllib.request
+            req = urllib.request.Request(
+                "http://127.0.0.1:8765/api/queue-command",
+                data=_json.dumps({"type": "enter-live", "room": room}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                r = _json.loads(resp.read().decode("utf-8") or "{}")
+        except Exception as exc:
+            return {"output": f"指令下发失败（面板服务不可达）：{exc}", "is_error": True, "error": "CMD_FAILED"}
+        if not r.get("queued"):
+            return {"output": "指令入队失败，请检查面板服务。", "is_error": True, "error": "CMD_QUEUE_FAILED"}
+        return {
+            "output": f"已向浏览器扩展下发进入直播间指令（房间 {room}，小号身份驻场，数秒内打开标签页）。",
+            "is_error": False,
+            "room": room,
+            "account": acct,
+            "note": "观众名单将在标签页加载后显示小号；若浏览器未登录小号则需先登录",
+            "meta": {"agent": {"delivery": "silent"}},
+        }
+
+    @llm_tool(
         name="bili_live_danmaku",
         description=(
             "采集 B站直播间的实时弹幕。何时用：用户说'看看直播间弹幕/现在弹幕在刷什么/有没有人@我'时。"
@@ -1347,13 +1402,13 @@ class BiliViewerPlugin(NekoPluginBase):
             "严禁添加任何其它文字：严禁'喵/搞定/任务搞定啦/完成啦/做好啦/发出去了/发出去啦/任务完成/搞定啦'等"
             "任何口语化完成话术、表情、开场白与后缀；严禁复述弹幕内容、房间号、BV号；"
             "严禁追问'你看到了吗/弹幕出来了吗'，严禁猜测为什么没看到（如'是不是开了弹幕过滤'）。"
-            "向 B站直播间发送一条弹幕。何时用：直播时用户要求'回复弹幕/发一条弹幕'，或 YUI 自主运营任务中"
-            "配合 bili_live_danmaku 采集实时弹幕、理解内容后自主发言时。"
+            "向 B站直播间发送一条弹幕。何时用：仅当用户明确要求'回复弹幕/发一条弹幕/发个弹幕'时；"
+            "【硬纪律】未经用户明确指示，严禁在任何场景（含自主运营）擅自发送弹幕——用户没让发就是不能发。"
             "参数 room：房间号或链接；text：弹幕内容（最长 30 字）；account：yui（YUI 独立小号，默认）/ main（用户主账号）。"
             "账号规则：默认使用 YUI 独立小号；小号未配置时自动回退用户主账号；"
             "自主运营任务中必须显式传 account=yui，严禁用用户主账号。"
             "节流：同一直播间 60 秒内最多发 1 条（插件强制，超限返回 RATE_LIMITED）。"
-            "这是写操作：仅在用户明确要求发弹幕时调用，或自主运营任务主动推进时调用；"
+            "这是写操作：仅在用户明确要求发弹幕时调用；"
             "严禁主动询问'要不要发弹幕/要不要回复弹幕'。"
             "本工具已包含发送全流程：调用一次即完成，禁止再次调用本工具或 run/bili_danmaku 等任何发送入口"
             "重复发送同一弹幕（同目标同内容 60 秒内会被自动去重，只发一次）。"
@@ -1600,7 +1655,8 @@ class BiliViewerPlugin(NekoPluginBase):
             "回复中的账号名必须以实际 result.account 为准，禁止编造。"
             "节流：同一 uid 60 秒内仅执行一次（插件强制，超限返回 RATE_LIMITED）。"
             "纪律：不批量轰炸式关注，关注对象应真实且自然；未经本工具真实执行，严禁向用户宣称'已关注'——只有收到本工具真实成功返回才能确认执行。"
-            "关注流程（v0.7.34）：必须先获取目标 UID——直播场景优先调用 bili_now_watching/bili_see_live/bili_live_info 拿到当前主播 uid，"
+            "关注流程（v0.7.34）：必须先获取目标 UID——直播场景以当前直播标签页 URL 里的房间号"
+            "（live.bilibili.com/<房间>）为准，用 bili_now_watching/bili_see_live/bili_live_info 反查当前主播 uid，"
             "再以 uid 作为 target 关注（纯数字直接按 uid 处理，零歧义）；仅当无法获取 uid 时才允许传昵称。"
             "目标解析（v0.7.34）：昵称必须精确匹配（忽略大小写/空格）；解析不到或存在歧义时本工具返回错误，"
             "严禁自行选取相似昵称或搜索结果的第一个用户关注（会关注错人）。"

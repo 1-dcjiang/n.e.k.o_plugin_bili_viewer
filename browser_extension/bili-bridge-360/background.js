@@ -229,9 +229,30 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 
 chrome.alarms.create("bili-bridge-push", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "bili-bridge-push") { pushCookie(); pushTab(); pushDom(); pushShot(); pushAudioState(); }
+  if (alarm.name === "bili-bridge-push") { pushCookie(); pushTab(); pushDom(); pushShot(); pushAudioState(); checkCommands(); }
   ensureAudioSession();
 });
+
+// v0.2.20：插件指令轮询——插件写入的"进入直播间"等命令在此拉取并执行（打开标签页驻场）
+async function checkCommands() {
+  try {
+    const resp = await fetch(`${PANEL_URL}/api/pending-command`);
+    if (!resp.ok) return;
+    const cmd = await resp.json();
+    if (!cmd || !cmd.id) return;
+    if (cmd.type === "enter-live" && cmd.room) {
+      try {
+        const t = await chrome.tabs.create({ url: `https://live.bilibili.com/${cmd.room}`, active: false });
+        if (t && t.id) { try { await chrome.tabs.update(t.id, { active: false }); } catch (e) {} }
+      } catch (e) {}
+    }
+    await fetch(`${PANEL_URL}/api/pending-command`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ack: cmd.id }),
+    }).catch(() => {});
+  } catch (e) {}
+}
 
 chrome.runtime.onInstalled.addListener(() => {
   pushCookie();
