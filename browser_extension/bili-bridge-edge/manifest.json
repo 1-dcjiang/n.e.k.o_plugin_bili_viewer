@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "B站接入桥 (Edge)",
+  "version": "0.2.3",
+  "description": "Microsoft Edge 专用版：把 B站登录态、当前浏览内容与页面实况（直播弹幕/视频进度/屏幕画面截图）实时同步给本机 N.E.K.O bili_viewer 插件：仅推送至 127.0.0.1 本机服务，数据不经过任何外部网络。本版仅供 Edge 使用，与 Chrome/360 版本相互独立，可在多浏览器共存互不干扰。",
+  "permissions": ["cookies", "storage", "alarms", "tabs", "scripting", "activeTab"],
+  "host_permissions": [
+    "*://*.bilibili.com/*",
+    "http://127.0.0.1:8765/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "B站接入桥 (Edge)"
+  }
+}

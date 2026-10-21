@@ -1,7 +1,7 @@
 """desktop_deliver：桌面扩展包投放逻辑测试。
 
-覆盖：目录创建、扩展本体复制、bat 编码（GBK+CRLF）、txt 编码（UTF-8 BOM+CRLF）、
-幂等跳过、版本变更重新投放、缺失扩展返回 None。
+覆盖：三浏览器目录创建（Chrome/Edge/360）、扩展本体复制、bat 编码（GBK+CRLF）、
+txt 编码（UTF-8 BOM+CRLF）、幂等跳过、版本变更重新投放、缺失扩展返回 None。
 """
 
 from __future__ import annotations
@@ -11,14 +11,18 @@ import os
 # SDK 顶层导入链依赖 utils.plugin_card_fields，测试必须在函数内导入插件模块
 # （desktop_deliver 本身是纯 stdlib，无此问题，但包 __init__ 有）
 
+_EXT_DIRS = ("bili-bridge", "bili-bridge-edge", "bili-bridge-360")
+_EXT_FILES = ("manifest.json", "background.js", "popup.html", "popup.js")
+
 
 def _make_plugin_dir(tmp_path) -> str:
     plugin_dir = os.path.join(str(tmp_path), "plugin_root")
-    ext = os.path.join(plugin_dir, "browser_extension", "bili-bridge")
-    os.makedirs(ext, exist_ok=True)
-    for f in ("manifest.json", "background.js", "popup.html", "popup.js"):
-        with open(os.path.join(ext, f), "w", encoding="utf-8") as fh:
-            fh.write("{}")
+    for ext in _EXT_DIRS:
+        d = os.path.join(plugin_dir, "browser_extension", ext)
+        os.makedirs(d, exist_ok=True)
+        for f in _EXT_FILES:
+            with open(os.path.join(d, f), "w", encoding="utf-8") as fh:
+                fh.write("{}")
     with open(os.path.join(plugin_dir, "plugin.toml"), "w", encoding="utf-8") as fh:
         fh.write('version = "9.9.9"\n')
     return plugin_dir
@@ -31,10 +35,11 @@ def test_delivers_folder_and_files(tmp_path):
     desktop = os.path.join(str(tmp_path), "Desktop")
     delivery = desktop_deliver.ensure_desktop_package(plugin_dir, desktop=desktop)
     assert delivery and delivery == os.path.join(desktop, "B站接入桥扩展")
-    ext = os.path.join(delivery, "bili-bridge")
-    for f in ("manifest.json", "background.js", "popup.html", "popup.js"):
-        assert os.path.isfile(os.path.join(ext, f))
-    assert os.path.isfile(os.path.join(delivery, "一键安装B站接入桥.bat"))
+    for ext in _EXT_DIRS:
+        for f in _EXT_FILES:
+            assert os.path.isfile(os.path.join(delivery, ext, f))
+    for name in ("Chrome", "Edge", "360"):
+        assert os.path.isfile(os.path.join(delivery, f"一键安装B站接入桥({name}).bat"))
     assert os.path.isfile(os.path.join(delivery, "使用说明.txt"))
     assert os.path.isfile(os.path.join(delivery, ".delivered_version"))
 
@@ -46,7 +51,7 @@ def test_bat_is_gbk_crlf(tmp_path):
     delivery = desktop_deliver.ensure_desktop_package(
         plugin_dir, desktop=os.path.join(str(tmp_path), "Desktop")
     )
-    bat = os.path.join(delivery, "一键安装B站接入桥.bat")
+    bat = os.path.join(delivery, "一键安装B站接入桥(Chrome).bat")
     data = open(bat, "rb").read()
     # 无 UTF-8 BOM，首字节是 '@'（@echo off）
     assert data[:3] != b"\xef\xbb\xbf"
@@ -58,6 +63,34 @@ def test_bat_is_gbk_crlf(tmp_path):
     assert "B站接入桥" in text
     assert "@echo off" in text
     assert "chrome://extensions" in text
+
+
+def test_edge_bat_uses_edge_extensions_page(tmp_path):
+    from plugin.plugins.bili_viewer import desktop_deliver
+
+    plugin_dir = _make_plugin_dir(tmp_path)
+    delivery = desktop_deliver.ensure_desktop_package(
+        plugin_dir, desktop=os.path.join(str(tmp_path), "Desktop")
+    )
+    bat = os.path.join(delivery, "一键安装B站接入桥(Edge).bat")
+    text = open(bat, encoding="gbk").read()
+    assert "bili-bridge-edge" in text
+    assert "edge://extensions" in text
+    assert "msedge.exe" in text
+
+
+def test_360_bat_mentions_360_exe_and_page(tmp_path):
+    from plugin.plugins.bili_viewer import desktop_deliver
+
+    plugin_dir = _make_plugin_dir(tmp_path)
+    delivery = desktop_deliver.ensure_desktop_package(
+        plugin_dir, desktop=os.path.join(str(tmp_path), "Desktop")
+    )
+    bat = os.path.join(delivery, "一键安装B站接入桥(360).bat")
+    text = open(bat, encoding="gbk").read()
+    assert "bili-bridge-360" in text
+    assert "chrome://extensions" in text
+    assert "360se" in text or "360Chrome" in text
 
 
 def test_txt_is_utf8_bom_crlf(tmp_path):
@@ -73,7 +106,9 @@ def test_txt_is_utf8_bom_crlf(tmp_path):
     assert b"\n" not in data.replace(b"\r\n", b"")
     text = data.decode("utf-8-sig")
     assert "B站接入桥" in text
-    assert "一键安装B站接入桥.bat" in text
+    assert "一键安装B站接入桥(Chrome).bat" in text
+    assert "一键安装B站接入桥(Edge).bat" in text
+    assert "一键安装B站接入桥(360).bat" in text
 
 
 def test_idempotent_skip_when_version_unchanged(tmp_path):
@@ -82,7 +117,7 @@ def test_idempotent_skip_when_version_unchanged(tmp_path):
     plugin_dir = _make_plugin_dir(tmp_path)
     desktop = os.path.join(str(tmp_path), "Desktop")
     delivery = desktop_deliver.ensure_desktop_package(plugin_dir, desktop=desktop)
-    bat = os.path.join(delivery, "一键安装B站接入桥.bat")
+    bat = os.path.join(delivery, "一键安装B站接入桥(Chrome).bat")
     mtime = os.path.getmtime(bat)
     # 同一版本再次调用：跳过重建
     delivery2 = desktop_deliver.ensure_desktop_package(plugin_dir, desktop=desktop)
