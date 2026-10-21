@@ -1,4 +1,4 @@
-// B站接入桥 (Edge) —— offscreen 声音采集（v0.7.11）
+// B站接入桥 (Chrome) —— offscreen 声音采集（v0.7.11）
 // 接收 background 转发的 tabCapture streamId，用 AudioContext 采集标签页音频，
 // 每段约 8 秒组装成 16kHz/16bit/单声道 wav（base64）推送到本机插件
 // http://127.0.0.1:8765/api/extension-audio；数据只走本机回环，不上外网。
@@ -77,6 +77,9 @@ async function pushSegment(samples) {
 
 function flushSegment() {
   if (!collecting) return;
+  if (audioContext && audioContext.state === "suspended") {
+    audioContext.resume().catch(() => {});
+  }
   const samples = pcmBuffer;
   pcmBuffer = [];
   pushSegment(samples);
@@ -101,6 +104,17 @@ async function startCapture(streamId) {
     },
   });
   audioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
+  // Chrome 自动播放策略：非用户手势下新建的 AudioContext 默认 suspended，
+  // 不 resume 则 ScriptProcessor 永远不产出数据（0 音频推送）——必须显式启动
+  if (audioContext.state !== "running") {
+    audioContext.resume().catch(() => {});
+  }
+  // 部分内核中途挂起：每段推送前检查一次，suspended 则再次 resume
+  const _ensureRunning = () => {
+    if (audioContext && audioContext.state === "suspended") {
+      audioContext.resume().catch(() => {});
+    }
+  };
   // 部分内核不支持 sampleRate 构造参数（回退到默认 48k）：记录实际值，wav 头与
   // 推送字段都以实际采样率为准，避免 ASR 听到变速内容
   currentRate = audioContext.sampleRate || SAMPLE_RATE;
