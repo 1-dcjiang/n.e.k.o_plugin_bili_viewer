@@ -189,6 +189,15 @@ function scheduleCookie() {
   pushTimer = setTimeout(() => { pushCookie(); }, 800);
 }
 
+async function pushAudioState() {
+  try {
+    await postJson("/api/extension-audio-state", {
+      enabled: Boolean(audioEnabled),
+      at: Date.now(),
+    });
+  } catch (e) { /* 插件未就绪：下一轮心跳重试 */ }
+}
+
 function scheduleTab() {
   clearTimeout(pushTimer);
   pushTimer = setTimeout(() => { pushTab(); pushDom(); pushShot(); }, 800);
@@ -207,7 +216,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 
 chrome.alarms.create("bili-bridge-push", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "bili-bridge-push") { pushCookie(); pushTab(); pushDom(); pushShot(); }
+  if (alarm.name === "bili-bridge-push") { pushCookie(); pushTab(); pushDom(); pushShot(); pushAudioState(); }
   ensureAudioSession();
 });
 
@@ -216,6 +225,7 @@ chrome.runtime.onInstalled.addListener(() => {
   pushTab();
   pushDom();
   pushShot();
+  pushAudioState();
 });
 
 // ─────────── 声音捕获（v0.2.5，tabCapture + offscreen） ───────────
@@ -254,6 +264,7 @@ async function startAudioCapture() {
     await chrome.runtime.sendMessage({ type: "start-audio", streamId: streamId });
     audioEnabled = true;
     await chrome.storage.local.set({ [AUDIO_STATE_KEY]: true });
+    pushAudioState();
   } catch (e) {
     // B站 页未激活等场景：保持开关意图，等标签切换后再试
   } finally {
@@ -271,6 +282,7 @@ async function stopAudioCapture() {
   }
   audioEnabled = false;
   await chrome.storage.local.set({ [AUDIO_STATE_KEY]: false });
+  pushAudioState();
 }
 
 function ensureAudioSession() {
@@ -310,3 +322,4 @@ pushCookie();
 pushTab();
 pushDom();
 pushShot();
+pushAudioState();

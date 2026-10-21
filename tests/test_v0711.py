@@ -255,7 +255,7 @@ def test_ext_package_has_all_six_files(pkg_name):
 @pytest.mark.parametrize("pkg_name", ["bili-bridge-chrome", "bili-bridge-edge", "bili-bridge-360"])
 def test_ext_manifest_has_audio_permissions(pkg_name):
     manifest = json.loads(_read_ext(pkg_name, "manifest.json"))
-    assert manifest["version"] == "0.2.6"
+    assert manifest["version"] == "0.2.7"
     assert "tabCapture" in manifest["permissions"]
     assert "offscreen" in manifest["permissions"]
 
@@ -291,3 +291,166 @@ def test_ext_background_has_audio_state_and_recovery():
     assert "start-audio" in bg
     assert "stop-audio" in bg
     assert "ensureAudioSession" in bg
+
+
+# ══════════════ v0.7.14：ASR 外部桥 + 声音状态回显 ══════════════
+
+
+def test_ext_background_pushes_audio_state_all_packages():
+    """三扩展包都要向插件推送声音捕获开关状态（/api/extension-audio-state）。"""
+    for pkg_name in ("bili-bridge-chrome", "bili-bridge-edge", "bili-bridge-360"):
+        bg = _read_ext(pkg_name, "background.js")
+        assert "pushAudioState" in bg
+        assert "/api/extension-audio-state" in bg
+        assert "audioEnabled" in bg
+
+
+def test_receive_ext_audio_state_records_enabled():
+    pkg = _pkg()
+    inst = _make_instance(pkg)
+    res = inst._receive_ext_audio_state({"enabled": True, "at": 123.0})
+    assert res["ok"] is True
+    state = getattr(inst, "_ext_audio_state", None)
+    assert state is not None and state["enabled"] is True and state["at"] == 123.0
+    inst._receive_ext_audio_state({"enabled": False, "at": 456.0})
+    assert getattr(inst, "_ext_audio_state", None)["enabled"] is False
+
+
+def test_listen_audio_diagnostic_reason_capture_disabled():
+    """声音开关未开启时：output 简短如实说明，result 给出链路诊断。"""
+    import asyncio
+
+    pkg = _pkg()
+    inst = _make_instance(pkg)
+    inst._receive_ext_audio_state({"enabled": False, "at": time.time()})
+    res = asyncio.run(inst.bili_listen_audio())
+    assert res["is_error"] is True
+    assert res["output"] == "暂时没有听到声音。"
+    assert res["result"]["reason"] == "capture_disabled"
+    assert res["result"]["audio_enabled"] is False
+
+
+def test_listen_audio_diagnostic_reason_no_audio():
+    """开关开启但从未收到音频段：reason=no_audio_received。"""
+    import asyncio
+
+    pkg = _pkg()
+    inst = _make_instance(pkg)
+    inst._receive_ext_audio_state({"enabled": True, "at": time.time()})
+    res = asyncio.run(inst.bili_listen_audio())
+    assert res["result"]["reason"] == "no_audio_received"
+
+
+def test_find_asr_python_prefers_env(monkeypatch):
+    """BILI_ASR_PYTHON 环境变量优先于候选路径（v0.7.14 外部桥）。"""
+    import tempfile
+
+    pkg = _pkg()
+    inst = _make_instance(pkg)
+    fake = os.path.join(tempfile.gettempdir(), "fake_asr_python.exe")
+    try:
+        open(fake, "w").close()
+        monkeypatch.setenv("BILI_ASR_PYTHON", fake)
+        assert inst._find_asr_python() == os.path.normpath(fake)
+    finally:
+        try:
+            os.remove(fake)
+        except OSError:
+            pass
+
+
+def test_whisper_model_returns_callable_bridge():
+    """_whisper_model 返回可调用桥（不 import faster-whisper），不可用时返回 None。"""
+    pkg = _pkg()
+    inst = _make_instance(pkg)
+    fn = inst._whisper_model()
+    assert callable(fn)
+    assert inst._whisper_model() is fn  # 缓存
+
+
+def test_asr_bridge_transcribe_protocol(monkeypatch):
+    """外部桥协议：发送 transcribe 请求、解析响应文本；桥关闭时降级 None。"""
+    pkg = _pkg()
+    inst = _make_instance(pkg)
+    written = []
+
+    class FakeStdin:
+        def write(self, s):
+            written.append(s)
+
+        def flush(self):
+            pass
+
+    class FakeStdout:
+        def __init__(self, lines):
+            self._lines = list(lines)
+
+        def readline(self):
+            return self._lines.pop(0) if self._lines else ""
+
+    class FakeProc:
+        """鸭子类型 Popen：poll/kill/returncode 自持，不触碰真实句柄。"""
+
+        def __init__(self, lines):
+            self.returncode = None
+            self.killed = False
+            self.stdin = FakeStdin()
+            self.stdout = FakeStdout(list(lines))
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.killed = True
+            self.returncode = 1
+
+    fake_proc = FakeProc([json.dumps({"ok": True, "text": "主播说大家好"}) + "\n"])
+    inst._asr_bridge_proc = fake_proc
+    text = inst._asr_transcribe_via_bridge(r"C:\fake.wav", "zh")
+    assert text == "主播说大家好"
+    assert "fake.wav" in written[0]
+
+    # 桥返回错误 → None 且进程被清理（可立即重启）
+    fake_proc2 = FakeProc([json.dumps({"ok": False, "error": "boom"}) + "\n"])
+    inst._asr_bridge_proc = fake_proc2
+    inst._asr_bridge_at = 0.0
+    assert inst._asr_transcribe_via_bridge(r"C:\fake.wav") is None
+    assert getattr(inst, "_asr_bridge_proc", None) is None
+    assert getattr(inst, "_asr_bridge_at", 0.0) == 0.0  # 冷却立即释放
+    assert fake_proc2.killed is True
+
+    # 桥无输出（关闭）→ None
+    fake_proc3 = FakeProc([])
+    inst._asr_bridge_proc = fake_proc3
+    inst._asr_bridge_at = 0.0
+    assert inst._asr_transcribe_via_bridge(r"C:\fake.wav") is None
+
+
+def test_asr_worker_uses_callable_bridge(monkeypatch):
+    """ASR worker 用桥 callable 转写，文本落入 _ext_asr_data（v0.7.14）。"""
+    import threading
+
+    pkg = _pkg()
+    inst = _make_instance(pkg)
+    calls = []
+
+    def fake_bridge(path, lang):
+        calls.append((path, lang))
+        return " 直播里在说 hello  "
+
+    monkeypatch.setattr(inst, "_whisper_model", lambda: fake_bridge)
+    inst._ext_audio_data = {"path": r"C:\fake.wav", "sample_rate": 16000, "seq": 7, "at": time.time()}
+    inst._asr_worker_evt = threading.Event()
+    inst._asr_worker_evt.set()
+    t = threading.Thread(target=inst._asr_worker_loop, name="t-asr", daemon=True)
+    t.start()
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if getattr(inst, "_ext_asr_data", None):
+            break
+        time.sleep(0.05)
+    inst._asr_worker_stop = True
+    t.join(timeout=2)
+    asr = getattr(inst, "_ext_asr_data", None)
+    assert asr is not None and asr["text"] == "直播里在说 hello" and asr["seq"] == 7
+    assert calls and calls[0] == (r"C:\fake.wav", "zh")

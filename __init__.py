@@ -23,6 +23,8 @@ import json
 import logging
 import os
 import re
+import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -1097,8 +1099,11 @@ class BiliViewerPlugin(NekoPluginBase):
             "或 YUI 需要理解直播内容后回复用户时。参数 room：房间号或链接（可省略，省略时自动感知当前正在看的直播）。"
             "回复纪律：只陈述实况本身（标题/主播/在线/最近弹幕），"
             "禁止'系统又同步/系统刚给我确认了/房间号没错/确定是这个直播间/你现在看的还是'等任何开场白与确认话术，"
-            "禁止复述房间号，禁止猜测弹幕为何没显示（如'是不是开了弹幕过滤/只看主播'），"
-            "禁止主动询问'要不要发弹幕/要不要回复弹幕'。"
+            "严禁'喵/喵呜/呜'等语气词、表情与客套话开头（回复直接以内容本身开始）；"
+            "禁止复述房间号，禁止复述或模仿别人刚说过的话；"
+            "禁止猜测弹幕为何没显示（如'是不是开了弹幕过滤/只看主播'），"
+            "禁止主动询问'要不要发弹幕/要不要回复弹幕'；"
+            "只在用户询问或需要感知内容时调用，没人问就不主动汇报。"
         ),
         parameters={
             "type": "object",
@@ -1159,7 +1164,10 @@ class BiliViewerPlugin(NekoPluginBase):
             "或 YUI 需要理解视频内容后回复用户时。参数 bvid：BV号（可省略，省略时自动感知当前正在看的视频）。"
             "回复纪律：只陈述实况本身（标题/UP主/进度/近期弹幕），"
             "禁止'系统又同步/系统刚给我确认了/BV号没错/你现在看的还是'等任何开场白与确认话术，"
-            "禁止复述BV号，禁止猜测弹幕为何没显示，禁止主动询问'要不要发弹幕/要不要回复弹幕'。"
+            "严禁'喵/喵呜/呜'等语气词、表情与客套话开头（回复直接以内容本身开始）；"
+            "禁止复述BV号，禁止复述或模仿别人刚说过的话；"
+            "禁止猜测弹幕为何没显示，禁止主动询问'要不要发弹幕/要不要回复弹幕'；"
+            "只在用户询问或需要感知内容时调用，没人问就不主动汇报。"
         ),
         parameters={
             "type": "object",
@@ -1742,7 +1750,12 @@ class BiliViewerPlugin(NekoPluginBase):
             "里正在说的话（如主播念弹幕、解说内容）时。无需参数；转写结果 30 秒内新鲜，"
             "过期或无声时如实说明。"
             "回复纪律：听到内容后直接转述内容本身（主播/视频里正在说的话），"
-            "不加'我听到了/系统转写了/刚刚的声音是'等开场白；没听到时如实说明，禁止猜测。"
+            "不加'我听到了/系统转写了/刚刚的声音是'等开场白；"
+            "严禁'喵/喵呜/呜'等语气词、表情与客套话开头（回复直接以内容本身开始）；"
+            "没听到时只如实说明（如'目前没听到声音'），严禁猜测原因——"
+            "严禁'是不是主播暂时没说话/是不是静音了/是不是麦克风坏了/是不是开了弹幕过滤'等任何猜测句式；"
+            "严禁复述或模仿别人刚说过的话（如群友刚问过的'没听到声音'，不要再原样重复一遍）；"
+            "只在用户询问或需要感知内容时调用，没人问就不主动汇报。"
         ),
         parameters={"type": "object", "properties": {}, "required": []},
         timeout=20.0,
@@ -1750,10 +1763,26 @@ class BiliViewerPlugin(NekoPluginBase):
     async def bili_listen_audio(self, **_):
         asr = self._ext_asr_text()
         if not asr:
+            # 如实说明没听到；诊断细节放 result（YUI 可据此如实转述，禁止猜测原因）
+            state = getattr(self, "_ext_audio_state", None) or {}
+            last_audio = getattr(self, "_ext_audio_data", None)
+            reason = "no_audio_received"
+            if not (state.get("enabled")):
+                reason = "capture_disabled"
+            elif not last_audio:
+                reason = "no_audio_received"
+            else:
+                reason = "silence_or_stale"
             return {
-                "output": "暂时没有听到声音（扩展未采集、无声或已过期）。",
+                "output": "暂时没有听到声音。",
                 "is_error": True,
                 "error": "NO_AUDIO",
+                "result": {
+                    "reason": reason,
+                    "audio_enabled": bool(state.get("enabled")),
+                    "audio_enabled_at": state.get("at"),
+                    "last_audio_at": last_audio.get("at") if last_audio else None,
+                },
             }
         return {
             "output": asr["text"],
@@ -2152,21 +2181,108 @@ class BiliViewerPlugin(NekoPluginBase):
         """返回最近一次声音段的元数据；无则返回 None（不判新鲜：ASR 由 worker 排队处理）。"""
         return getattr(self, "_ext_audio_data", None)
 
-    def _whisper_model(self):
-        """faster-whisper 懒加载（首次转写时才加载，失败可降级跳过）。"""
-        model = getattr(self, "_asr_model", None)
-        if model is None:
-            # 直连 hf.co 可能因证书失败 → 用镜像兜底；关闭 xet 免 symlink 警告
-            os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-            os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+    def _receive_ext_audio_state(self, body: dict) -> dict:
+        """扩展推送的声音捕获开关状态（诊断用）：记录 enabled 与时间，供面板/YUI 判断链路。"""
+        enabled = bool(body.get("enabled"))
+        self._ext_audio_state = {"enabled": enabled, "at": float(body.get("at") or 0) or time.time()}
+        _logger.info("ext audio state: enabled=%s", enabled)
+        return {"ok": True, "detail": "已记录声音捕获状态"}
+
+    def _find_asr_python(self) -> str | None:
+        """寻找可执行外部 ASR 桥的 Python 解释器（必须装有 faster-whisper）。
+
+        优先级：环境变量 BILI_ASR_PYTHON > 开发 venv 固定候选 > PATH 上的 python。
+        返回 None 表示找不到可用解释器（声音转写降级为空，不影响插件其余功能）。
+        """
+        env = (os.environ.get("BILI_ASR_PYTHON") or "").strip()
+        if env and os.path.isfile(env):
+            return env
+        candidates = [
+            # N.E.K.O 源码仓库 venv（本机开发环境，已装 faster-whisper 1.2.1）
+            os.path.join(os.environ.get("LOCALAPPDATA") or "", "..", "N.E.K.O", ".venv", "Scripts", "python.exe"),
+            os.path.join(str(Path.home()), "N.E.K.O", ".venv", "Scripts", "python.exe"),
+        ]
+        for cand in candidates:
             try:
-                from faster_whisper import WhisperModel  # 本机 venv 已装（1.2.1），缺席时降级
-                model = WhisperModel(_ASR_MODEL, device=_ASR_DEVICE, compute_type=_ASR_COMPUTE_TYPE)
-            except Exception as exc:
-                _logger.warning("faster-whisper 加载失败，声音转写降级为空：%s", exc)
-                model = None
-            self._asr_model = model
-        return model
+                if os.path.isfile(os.path.normpath(cand)):
+                    return os.path.normpath(cand)
+            except OSError:
+                continue
+        for name in ("python", "python3"):
+            found = shutil.which(name)
+            if found:
+                return found
+        return None
+
+    def _ensure_asr_bridge(self):
+        """确保外部 ASR 桥常驻子进程存活（幂等）。不可用返回 None。"""
+        proc = getattr(self, "_asr_bridge_proc", None)
+        if proc is not None and proc.poll() is None:
+            return proc
+        # 冷却：启动失败/崩溃后 60s 内不反复拉起，避免日志风暴
+        if time.time() - getattr(self, "_asr_bridge_at", 0.0) < 60.0:
+            return None
+        py = self._find_asr_python()
+        if not py:
+            _logger.warning("未找到可用的外部 Python（BILI_ASR_PYTHON 或 N.E.K.O venv），声音转写降级为空")
+            self._asr_bridge_at = time.time()
+            return None
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "asr_bridge.py")
+        try:
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            proc = subprocess.Popen(
+                [py, script],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                bufsize=1,
+                creationflags=flags,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("ASR 桥启动失败：%s", exc)
+            proc = None
+        self._asr_bridge_proc = proc
+        self._asr_bridge_at = time.time()
+        return proc
+
+    def _asr_transcribe_via_bridge(self, path: str, lang: str = "zh") -> str | None:
+        """经外部 ASR 桥转写 wav：返回文本（可能为空字符串）；失败返回 None。"""
+        proc = self._ensure_asr_bridge()
+        if proc is None:
+            return None
+        try:
+            proc.stdin.write(json.dumps({"op": "transcribe", "path": path, "lang": lang}) + "\n")
+            proc.stdin.flush()
+            line = proc.stdout.readline()
+            if not line:
+                raise RuntimeError("bridge closed")
+            data = json.loads(line)
+            if data.get("ok"):
+                return data.get("text") or ""
+            raise RuntimeError(data.get("error") or "asr error")
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("ASR 桥转写失败：%s", exc)
+            try:
+                proc.kill()
+            except Exception:  # noqa: BLE001
+                pass
+            self._asr_bridge_proc = None
+            self._asr_bridge_at = 0.0  # 立即允许下次拉起（冷却从失败时刻起算）
+            return None
+
+    def _whisper_model(self):
+        """返回可用的转写 callable f(path, lang)->text；不可用返回 None。
+
+        v0.7.14：N.E.K.O 打包运行时（projectneko_server.exe）不含 faster-whisper，
+        改由外部 Python 常驻桥（asr_bridge.py）承担转写，进程内不再直接 import。
+        """
+        bridge = getattr(self, "_asr_bridge_fn", None)
+        if bridge is None:
+            bridge = self._asr_transcribe_via_bridge
+            self._asr_bridge_fn = bridge
+        return bridge
 
     def _kick_asr(self) -> None:
         """确保 ASR 后台 worker 线程在跑（幂等；startup 或首次收到声音段时启动）。"""
@@ -2175,6 +2291,7 @@ class BiliViewerPlugin(NekoPluginBase):
             if worker is not None and worker.is_alive():
                 return
             self._asr_worker_evt = threading.Event()
+            self._asr_worker_stop = False
             worker = threading.Thread(target=self._asr_worker_loop, name="bili-asr", daemon=True)
             self._asr_worker_thread = worker
             worker.start()
@@ -2184,10 +2301,11 @@ class BiliViewerPlugin(NekoPluginBase):
 
         转写是 CPU 密集操作，串行排队；若上一段仍在转写，新段跳过（不积压，
         保证 YUI 听到的是最近内容）。全部异常都静默降级，绝不影响插件主流程。
+        _asr_worker_stop 置真后线程在下个空闲点退出（插件关闭/测试用）。
         """
         model: object = None
         last_seq: int | None = None
-        while True:
+        while not getattr(self, "_asr_worker_stop", False):
             try:
                 if not self._asr_worker_evt.wait(timeout=1.0):
                     continue
@@ -2200,9 +2318,7 @@ class BiliViewerPlugin(NekoPluginBase):
                         model = self._whisper_model()
                     text = ""
                     if model is not None:
-                        segments, _info = model.transcribe(seg["path"], language="zh", vad_filter=False)
-                        parts = [s.text.strip() for s in segments]
-                        text = "".join(parts).strip()
+                        text = (model(seg["path"], "zh") or "").strip()
                     if text:
                         self._ext_asr_data = {
                             "text": text[:500],
@@ -2332,6 +2448,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 dom_fn=self._receive_ext_dom,
                 shot_fn=self._receive_ext_shot,
                 audio_fn=self._receive_ext_audio,
+                audio_state_fn=self._receive_ext_audio_state,
             )
             self._bind_panel = panel
         return panel.ensure_started()
