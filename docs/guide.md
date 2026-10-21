@@ -100,7 +100,7 @@ v0.7.1 起 YUI 独立小号**完全后台化**：所有自主行动与内容同�
 
 | 扩展目录 | 适用浏览器 | 扩展显示名 |
 |---|---|---|
-| `browser_extension/bili-bridge` | Google Chrome | B站接入桥 |
+| `browser_extension/bili-bridge-chrome` | Google Chrome | B站接入桥 (Chrome) |
 | `browser_extension/bili-bridge-edge` | Microsoft Edge | B站接入桥 (Edge) |
 | `browser_extension/bili-bridge-360` | 360 安全/极速浏览器 | B站接入桥 (360) |
 
@@ -108,7 +108,7 @@ v0.7.1 起 YUI 独立小号**完全后台化**：所有自主行动与内容同�
 
 1. 打开对应浏览器的扩展管理页（Chrome/360 为 `chrome://extensions`，Edge 为 `edge://extensions`），开启右上角"开发者模式"；
 2. 点"加载已解压的扩展程序"，选择对应扩展目录：
-   Chrome 选 `bili-bridge`、Edge 选 `bili-bridge-edge`、360 选 `bili-bridge-360`
+   Chrome 选 `bili-bridge-chrome`、Edge 选 `bili-bridge-edge`、360 选 `bili-bridge-360`
    （从 GitHub Releases 下载源码 zip 解压即可找到；插件启动也会自动把三包投放到桌面
    `桌面\B站接入桥扩展`，并生成单个三扩展压缩包 `桌面\B站接入桥扩展_v版本.zip`
    内含三扩展独立文件夹+名字与三份安装脚本，双击对应浏览器的安装脚本即可自动复制+打开扩展页）；

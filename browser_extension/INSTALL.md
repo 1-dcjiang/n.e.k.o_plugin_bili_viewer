@@ -7,7 +7,7 @@
 
 | 目录 | 浏览器 | 扩展显示名 | 安装脚本 |
 |---|---|---|---|
-| `bili-bridge` | Google Chrome | B站接入桥 | `一键安装B站接入桥(Chrome).bat` |
+| `bili-bridge-chrome` | Google Chrome | B站接入桥 (Chrome) | `一键安装B站接入桥(Chrome).bat` |
 | `bili-bridge-edge` | Microsoft Edge | B站接入桥 (Edge) | `一键安装B站接入桥(Edge).bat` |
 | `bili-bridge-360` | 360 安全/极速浏览器 | B站接入桥 (360) | `一键安装B站接入桥(360).bat` |
 
@@ -29,7 +29,7 @@
 
 1. 打开对应浏览器的扩展管理页，开启右上角「开发者模式」
 2. 点「加载已解压的扩展程序」，选择本目录下对应扩展文件夹
-   （Chrome 选 `bili-bridge`、Edge 选 `bili-bridge-edge`、360 选 `bili-bridge-360`）
+   （Chrome 选 `bili-bridge-chrome`、Edge 选 `bili-bridge-edge`、360 选 `bili-bridge-360`）
 
 ## 验证
 

@@ -27,9 +27,9 @@ _REQUIRED_EXT_FILES = ("manifest.json", "background.js", "popup.html", "popup.js
 # dst 为目标目录（用户文档下），page 为扩展管理页，exes 为可执行文件候选路径
 _EXT_PACKAGES: tuple[dict, ...] = (
     {
-        "ext_dir": "bili-bridge",
+        "ext_dir": "bili-bridge-chrome",
         "name": "Chrome",
-        "dst": "bili-bridge-extension",
+        "dst": "bili-bridge-chrome-extension",
         "page": "chrome://extensions",
         "exes": (
             r"%ProgramFiles%\Google\Chrome\Application\chrome.exe",
@@ -138,9 +138,9 @@ README_TXT = """============================================================
   弹幕/评论/直播/管理你的稿件/回复直播弹幕等。
 
 本包内置三个浏览器专用扩展（相互独立，可多浏览器共存互不干扰）：
-  bili-bridge         → Chrome 专用（名称：B站接入桥）
-  bili-bridge-edge    → Edge 专用（名称：B站接入桥 (Edge)）
-  bili-bridge-360     → 360 安全/极速浏览器专用（名称：B站接入桥 (360)）
+  bili-bridge-chrome   → Chrome 专用（名称：B站接入桥 (Chrome)）
+  bili-bridge-edge     → Edge 专用（名称：B站接入桥 (Edge)）
+  bili-bridge-360      → 360 安全/极速浏览器专用（名称：B站接入桥 (360)）
 按你实际使用的浏览器，运行对应的安装脚本即可。
 
 装一次扩展，之后登录/退出 B站都会自动同步，不用再管它。
@@ -326,12 +326,12 @@ def _write_delivery_zip(delivery: str, target_root: str, version: str) -> str | 
 def ensure_desktop_package(plugin_dir: str, version: str | None = None, desktop: str | None = None) -> str | None:
     """把 B站接入桥 扩展包（Chrome/Edge/360）投放/更新到桌面。幂等，失败静默返回 None。
 
-    参数 plugin_dir 为插件安装目录（含 browser_extension/bili-bridge* 三包）。
+    参数 plugin_dir 为插件安装目录（含 browser_extension/bili-bridge-* 三包）。
     desktop 仅供测试注入；返回投放后的完整目录路径（未投放返回 None）。
     """
     try:
         src_root = os.path.join(plugin_dir, "browser_extension")
-        if not os.path.isfile(os.path.join(src_root, "bili-bridge", "manifest.json")):
+        if not os.path.isfile(os.path.join(src_root, "bili-bridge-chrome", "manifest.json")):
             return None
         ver = version or _plugin_version(plugin_dir)
         target_root = desktop or _desktop_dir()

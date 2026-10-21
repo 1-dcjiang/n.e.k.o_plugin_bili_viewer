@@ -13,7 +13,7 @@ import zipfile
 # SDK 顶层导入链依赖 utils.plugin_card_fields，测试必须在函数内导入插件模块
 # （desktop_deliver 本身是纯 stdlib，无此问题，但包 __init__ 有）
 
-_EXT_DIRS = ("bili-bridge", "bili-bridge-edge", "bili-bridge-360")
+_EXT_DIRS = ("bili-bridge-chrome", "bili-bridge-edge", "bili-bridge-360")
 _EXT_FILES = ("manifest.json", "background.js", "popup.html", "popup.js")
 
 

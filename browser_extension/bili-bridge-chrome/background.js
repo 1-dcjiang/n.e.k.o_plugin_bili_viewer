@@ -1,14 +1,17 @@
-// B站接入桥 (bili-bridge) v0.2.3
+// B站接入桥 (Chrome) v0.2.4 —— Google Chrome 专用版
 // 1) 把 B站登录态直连推送给本机 bili_viewer 插件（POST 127.0.0.1:8765，不上外网）；
 // 2) 把当前活动标签页（URL+标题）实时推送给插件，让 YUI 精确感知你在看什么；
 // 3) 在 B站 直播/视频页注入脚本读取页面实况（直播弹幕列表/在线人数/视频进度），
-//    让 YUI 能"看到"直播间与视频正在发生的内容（v0.2.2，需 scripting 权限）；
-// 4) 截取当前活动标签页画面（captureVisibleTab）推送给插件，让 YUI 能看到画面本身
-//    （v0.2.3，需 activeTab 权限；JPEG 压缩后仅推送 127.0.0.1，不上外网）。
+//    让 YUI 能"看到"直播间与视频正在发生的内容（需 scripting 权限）；
+// 4) 截取当前活动标签页画面（captureVisibleTab）推送给插件（需 activeTab 权限；
+//    JPEG 压缩后仅推送 127.0.0.1，不上外网）。
+// 本版与 Edge/360 版本相互独立：推送 source 标记为 bili-bridge-chrome-extension，
+// 插件日志可区分来源，多浏览器共存互不干扰。
 // 触发时机：安装/浏览器启动立即推送；cookie 变化（onChanged 防抖）；
 // 标签页切换/URL 变化（tabs 监听防抖）；alarms 30 秒兜底（MV3 SW 休眠时由 alarm 唤醒）；
 // 推送失败 4 秒快速重试（插件重启后 5 秒内即可恢复感知，不再等下一轮 alarm）。
 
+const EXT_SOURCE = "bili-bridge-chrome-extension";
 const PANEL_URL = "http://127.0.0.1:8765";
 
 // 与插件 cdp_cookie._KEEP_NAMES 保持一致的 B站凭证名
@@ -64,7 +67,7 @@ async function pushCookie() {
     const cookies = await chrome.cookies.getAll({ domain: "bilibili.com" });
     const cookie = buildCookieString(cookies);
     await postJson("/api/extension-cookie", {
-      cookie, at: Date.now(), source: "bili-bridge-extension",
+      cookie, at: Date.now(), source: EXT_SOURCE,
     });
   } catch (e) { scheduleRetry(); }
 }
