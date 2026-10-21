@@ -351,6 +351,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return undefined;
 });
 
+// 快捷键命令（v0.2.16）：Ctrl+Shift+Y 授权并开启声音采集。
+// Chrome MV3 的 tabCapture 要求扩展先被用户手势"invoke"一次（点击 action 或触发命令），
+// 之后 alarm 自动采集才被授权；用户按一次快捷键即完成授权并立即启动采集。
+// 关闭声音请使用扩展弹窗（popup）里的开关，快捷键只负责开启。
+chrome.commands.onCommand.addListener((command) => {
+  if (command === "toggle-audio") {
+    startAudioCapture();
+  }
+});
+
 // 启动时恢复声音捕获开关（v0.2.8 永久开启：从未设置过=开，用户显式关闭过才保持关）
 chrome.storage.local.get(AUDIO_STATE_KEY).then((saved) => {
   audioEnabled = saved[AUDIO_STATE_KEY] !== false;

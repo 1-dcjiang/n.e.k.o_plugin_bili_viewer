@@ -1289,30 +1289,88 @@ def _resolve_uname(target: str, account: str = "yui") -> str:
     return target
 
 
+def _account_label(account: str = "yui") -> str:
+    """账号标签：主账号 / 小号（附昵称，用于操作结果明确当前作用于哪个账号）。"""
+    name = "小号" if account == "yui" else "主账号"
+    try:
+        info = my_info(account)
+        if info.get("uname"):
+            name += f"（{info['uname']}）"
+    except BiliError:
+        pass
+    return name
+
+
+def _resolve_room_uid(room_id: int, account: str = "yui") -> int | None:
+    """直播房间号 → 主播 uid（关注/取关按 uid 操作，纯数字输入可能是房间号而非 uid）。"""
+    try:
+        data = (_http_get(_LIVE_API + "/room/v1/Room/room_init", {"id": int(room_id)}, account=account)).get("data") or {}
+        uid = data.get("uid")
+        return int(uid) if uid else None
+    except BiliError:
+        return None
+
+
 def modify_relation(target: str, action: str = "follow", account: str = "yui") -> dict:
     """关注/取消关注指定用户（按 uid 或昵称）。action=follow / unfollow。
 
     account=main 主账号 / yui 小号（默认）；写操作需该账号 Cookie 含 bili_jct。
+    数字目标若按 uid 操作报"用户不存在"，自动按直播房间号反查主播 uid 重试一次
+    （直播间 9458332 等房间号 ≠ uid，此前会误报"用户不存在"，v0.7.28 修复）。
     """
     _require_login(account)
-    mid = _resolve_uid(target, account)
-    uname = _resolve_uname(target, account)
     act = 1 if action in ("follow", "关注", "subscribe") else 2
     csrf = _csrf(account)
     if not csrf:
         raise BiliError("Cookie 缺少 bili_jct（CSRF token），无法执行关注/取关", "NO_CSRF")
+    raw = (target or "").strip()
+    mid = _resolve_uid(raw, account)
+    uname = _resolve_uname(raw, account)
     form = {"fid": mid, "act": act, "re_src": 11, "csrf": csrf}
     try:
         data = _http_post(_API + "/x/relation/modify", form, account=account)
     except BiliError as exc:
-        raise BiliError(
-            ("关注失败" if act == 1 else "取关失败") + f"（{uname}，uid {mid}）：" + exc.message,
-            f"REL_{act}_{exc.code}",
-        ) from exc
+        # 纯数字目标 + 用户不存在：可能把房间号当 uid 了，反查一次主播 uid 重试
+        if re.fullmatch(r"\d{1,12}", raw) and ("不存在" in exc.message or exc.code in ("BIZ_-404", "-404", 404)):
+            room_uid = _resolve_room_uid(int(raw), account)
+            if room_uid and room_uid != mid:
+                mid = room_uid
+                uname = _resolve_uname(str(mid), account)
+                form["fid"] = mid
+                try:
+                    data = _http_post(_API + "/x/relation/modify", form, account=account)
+                except BiliError as exc2:
+                    raise BiliError(
+                        ("关注失败" if act == 1 else "取关失败") + f"（{uname}，uid {mid}）：" + exc2.message,
+                        f"REL_{act}_{exc2.code}",
+                    ) from exc2
+            else:
+                raise BiliError(
+                    ("关注失败" if act == 1 else "取关失败") + f"（{uname}，uid {mid}）：" + exc.message,
+                    f"REL_{act}_{exc.code}",
+                ) from exc
+        else:
+            raise BiliError(
+                ("关注失败" if act == 1 else "取关失败") + f"（{uname}，uid {mid}）：" + exc.message,
+                f"REL_{act}_{exc.code}",
+            ) from exc
+    # 操作后复查（v0.7.28：防"假成功"——接口返回 code=0 但关注关系未实际变化时明确报错）
+    try:
+        rel = (_http_get(_API + "/x/relation", {"fid": mid}, account=account)).get("data") or {}
+        attr = int(rel.get("attribute", 0) or 0)
+    except BiliError:
+        attr = None  # 复查接口失败不阻断（可能临时风控），以接口结果为准
+    if attr is not None:
+        if act == 1 and attr == 0:
+            raise BiliError("关注未生效（接口返回成功但关注状态未变化，可能被风控延迟，请稍后重试）", "REL_NOT_EFFECTED")
+        if act == 2 and attr != 0:
+            raise BiliError("取关未生效（接口返回成功但关注状态未变化，可能被风控延迟，请稍后重试）", "REL_NOT_EFFECTED")
+    acct = _account_label(account)
     return {
         "mid": mid,
         "uname": uname,
         "action": "follow" if act == 1 else "unfollow",
+        "account": acct,
         "following": bool(data.get("data")),
         "message": data.get("message") or "",
     }

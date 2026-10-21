@@ -1472,14 +1472,17 @@ class BiliViewerPlugin(NekoPluginBase):
     @llm_tool(
         name="bili_follow_user",
         description=(
-            "【回复纪律·最高优先】操作成功后，你的对外回复必须逐字原样只有一句话：'已关注。'"
-            "严禁添加任何其它文字：严禁'喵/搞定/任务搞定啦/完成啦/做好啦/发出去了/任务完成/搞定啦'等"
+            "【回复纪律·最高优先】操作成功后，你的对外回复必须逐字原样只有一句话：'已关注（小号）。'"
+            "或（当 account=main 时）'已关注（主账号）。'，除账号名外严禁添加任何其它文字："
+            "严禁'喵/搞定/任务搞定啦/完成啦/做好啦/发出去了/任务完成/搞定啦'等"
             "任何口语化完成话术、表情、开场白与后缀；严禁复述昵称、uid、操作细节；严禁追问。"
             "让指定账号关注一个 B站 用户（UP主/主播）。何时用：用户要求'关注/点关注/关注这个UP主'，"
             "或 YUI 自主运营时主动关注感兴趣的内容创作者时。"
-            "参数 target：目标用户 uid 或昵称（必填，支持链接中的 uid）；"
+            "参数 target：目标用户 uid 或昵称（必填，支持链接中的 uid；若给的是直播房间号如 9458332，"
+            "插件会自动反查该直播间主播的 uid 再关注，不会误报'用户不存在'）；"
             "account：yui（独立小号，默认）/ main（用户主账号）。"
-            "账号规则：默认 YUI 独立小号；小号未配置自动回退主账号；自主运营必须 account=yui。"
+            "账号规则：默认 YUI 独立小号；小号未配置自动回退主账号；自主运营必须 account=yui；"
+            "回复中的账号名必须以实际 result.account 为准，禁止编造。"
             "节流：同一 uid 60 秒内仅执行一次（插件强制，超限返回 RATE_LIMITED）。"
             "纪律：不批量轰炸式关注，关注对象应真实且自然。"
         ),
@@ -1496,9 +1499,13 @@ class BiliViewerPlugin(NekoPluginBase):
     async def bili_follow_user(self, *, target: str = "", account: str = "", **_):
         params = _.get("parameters") or {}
         target = (target or params.get("target") or "").strip()
-        account = self._resolve_account(account or params.get("account") or "")
+        raw_account = (account or params.get("account") or "").strip()
+        account = self._resolve_account(raw_account)
         if not target:
             return {"output": "请提供要关注的用户 uid 或昵称。", "is_error": True, "error": "EMPTY_TARGET"}
+        if account == "main" and raw_account != "main":
+            # 用户未显式指定主账号，是"默认小号"回退来的：小号未绑定，禁止静默操作主账号
+            return {"output": "YUI 小号尚未绑定（当前只有主账号），请先在浏览器登录小号完成绑定；如需操作主账号请显式指定 account=main。", "is_error": True, "error": "NO_YUI_ACCOUNT"}
         key = f"follow:{target}"
         if account == "yui":
             if not self._yui_rate_reserve("relation", key, 60):
@@ -1509,19 +1516,23 @@ class BiliViewerPlugin(NekoPluginBase):
             if account == "yui":
                 self._yui_rate_rollback("relation", key)
             return self._wrap_auth(exc, "关注")
-        return {"output": "已关注。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": result}
+        label = "主账号" if account == "main" else "小号"
+        return {"output": f"已关注（{label}）。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": result}
 
     @llm_tool(
         name="bili_unfollow_user",
         description=(
-            "【回复纪律·最高优先】操作成功后，你的对外回复必须逐字原样只有一句话：'已取消关注。'"
-            "严禁添加任何其它文字：严禁'喵/搞定/任务搞定啦/完成啦/做好啦/发出去了/任务完成/搞定啦'等"
+            "【回复纪律·最高优先】操作成功后，你的对外回复必须逐字原样只有一句话：'已取消关注（小号）。'"
+            "或（当 account=main 时）'已取消关注（主账号）。'，除账号名外严禁添加任何其它文字："
+            "严禁'喵/搞定/任务搞定啦/完成啦/做好啦/发出去了/任务完成/搞定啦'等"
             "任何口语化完成话术、表情、开场白与后缀；严禁复述昵称、uid、操作细节；严禁追问。"
             "让指定账号取消关注一个 B站 用户（UP主/主播）。何时用：用户要求'取关/取消关注/拉黑前先取关'，"
             "或 YUI 自主运营时清理不再关注的创作者时。"
-            "参数 target：目标用户 uid 或昵称（必填）；"
+            "参数 target：目标用户 uid 或昵称（必填；若给的是直播房间号如 9458332，"
+            "插件会自动反查该直播间主播的 uid 再取关）；"
             "account：yui（独立小号，默认）/ main（用户主账号）。"
-            "账号规则：默认 YUI 独立小号；小号未配置自动回退主账号；自主运营必须 account=yui。"
+            "账号规则：默认 YUI 独立小号；小号未配置自动回退主账号；自主运营必须 account=yui；"
+            "回复中的账号名必须以实际 result.account 为准，禁止编造。"
             "节流：同一 uid 60 秒内仅执行一次（插件强制，超限返回 RATE_LIMITED）。"
             "纪律：仅在确实不再需要关注时取关，动作自然。"
         ),
@@ -1538,9 +1549,12 @@ class BiliViewerPlugin(NekoPluginBase):
     async def bili_unfollow_user(self, *, target: str = "", account: str = "", **_):
         params = _.get("parameters") or {}
         target = (target or params.get("target") or "").strip()
-        account = self._resolve_account(account or params.get("account") or "")
+        raw_account = (account or params.get("account") or "").strip()
+        account = self._resolve_account(raw_account)
         if not target:
             return {"output": "请提供要取消关注的用户 uid 或昵称。", "is_error": True, "error": "EMPTY_TARGET"}
+        if account == "main" and raw_account != "main":
+            return {"output": "YUI 小号尚未绑定（当前只有主账号），请先在浏览器登录小号完成绑定；如需操作主账号请显式指定 account=main。", "is_error": True, "error": "NO_YUI_ACCOUNT"}
         key = f"unfollow:{target}"
         if account == "yui":
             if not self._yui_rate_reserve("relation", key, 60):
@@ -1551,7 +1565,8 @@ class BiliViewerPlugin(NekoPluginBase):
             if account == "yui":
                 self._yui_rate_rollback("relation", key)
             return self._wrap_auth(exc, "取消关注")
-        return {"output": "已取消关注。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": result}
+        label = "主账号" if account == "main" else "小号"
+        return {"output": f"已取消关注（{label}）。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": result}
 
     @llm_tool(
         name="bili_yui_dynamic",
