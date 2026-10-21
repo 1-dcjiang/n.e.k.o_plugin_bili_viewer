@@ -1224,14 +1224,27 @@ def my_info(account: str = "yui") -> dict:
         raise BiliError("无法读取账号信息（登录态无效）", "AUTH_FAILED")
     level_info = data.get("level_info") or {}
     vip = data.get("vipStatus", 0)
+    mid = data.get("mid")
+    following = data.get("following", 0) or 0
+    follower = data.get("follower", 0) or 0
+    # nav 的关注/粉丝字段可能缺失或被隐私隐藏返回 0（曾误报"关注和粉丝都是0"）：
+    # 用公开 relation/stat 接口补查，仅当返回明确数值时覆盖。
+    try:
+        stat = (_http_get(_API + "/x/relation/stat", {"vmid": mid}, account=account)).get("data") or {}
+        if stat.get("following") is not None:
+            following = int(stat.get("following") or 0)
+        if stat.get("follower") is not None:
+            follower = int(stat.get("follower") or 0)
+    except BiliError:
+        pass
     return {
-        "mid": data.get("mid"),
+        "mid": mid,
         "uname": data.get("uname", ""),
         "level": level_info.get("current_level", 0),
         "coins": data.get("money", 0),
         "vip": bool(vip),
-        "following": data.get("following", 0),
-        "follower": data.get("follower", 0),
+        "following": following,
+        "follower": follower,
     }
 
 
@@ -1299,6 +1312,48 @@ def _account_label(account: str = "yui") -> str:
     except BiliError:
         pass
     return name
+
+
+def set_account_role(role: str = "yui", uid: int | None = None, force: bool = False) -> dict:
+    """声明账号角色：把当前绑定的登录账号标记为小号（yui）或主账号（main）。
+
+    典型场景（v0.7.30）：用户明确说"这个账号是小号"时调用——把已绑定的主账号登录态
+    复制为小号 Cookie，此后默认操作账号（小号）真正作用在该账号上，无需重新登录。
+    role：yui（标记为小号，默认）/ main（标记为主账号）。uid：可选，校验当前 Cookie 账号。
+    force：目标角色 Cookie 已存在时是否覆盖（默认 False 防误覆盖）。
+    """
+    if role not in ("main", "yui"):
+        raise BiliError(f"不支持的角色：{role}（仅支持 yui 小号 / main 主账号）", "BAD_ROLE")
+    src_account = "main" if role == "yui" else "yui"
+    src = _cookie(src_account)
+    if not src:
+        raise BiliError(
+            f"当前未绑定{'主账号' if src_account == 'main' else '小号'}登录态（Cookie 为空），无法标记为{'小号' if role == 'yui' else '主账号'}",
+            "NO_COOKIE",
+        )
+    if uid is not None:
+        info = my_info(src_account)
+        if info.get("mid") != int(uid):
+            raise BiliError(f"uid 不匹配：当前登录账号是 {info.get('mid')}，不是 {uid}，请先切换到目标账号再声明", "UID_MISMATCH")
+    dst = _cookie("yui" if role == "yui" else "main")
+    if dst and not force:
+        raise BiliError(
+            f"{'小号' if role == 'yui' else '主账号'} Cookie 已存在，覆盖可能弄错账号身份；确认无误请重传 force=true",
+            "DST_EXISTS",
+        )
+    src_path = os.path.join(_YUI_COOKIE_DIR, _MAIN_COOKIE_FILE if src_account == "main" else _YUI_COOKIE_FILE)
+    dst_path = os.path.join(_YUI_COOKIE_DIR, _YUI_COOKIE_FILE if role == "yui" else _MAIN_COOKIE_FILE)
+    with open(src_path, "r", encoding="utf-8", errors="replace") as fh:
+        content = fh.read()
+    with open(dst_path, "w", encoding="utf-8") as fh:
+        fh.write(content)
+    info = my_info(role)
+    return {
+        "role": role,
+        "mid": info.get("mid"),
+        "uname": info.get("uname", ""),
+        "detail": f"已将 uid {info.get('mid')}（{info.get('uname', '')}）标记为{'小号' if role == 'yui' else '主账号'}。此后默认操作账号（小号）真正作用在该账号上。",
+    }
 
 
 def _resolve_room_uid(room_id: int, account: str = "yui") -> int | None:

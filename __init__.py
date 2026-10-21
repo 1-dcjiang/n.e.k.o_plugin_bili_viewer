@@ -1042,6 +1042,45 @@ class BiliViewerPlugin(NekoPluginBase):
         return {"output": bili.format_my_info(info), "is_error": False, "account": info}
 
     @llm_tool(
+        name="bili_set_account_role",
+        description=(
+            "【角色声明】把当前绑定的 B站 账号标记为小号或主账号。"
+            "何时用：用户明确说明'这个账号是小号/大号'（例如 YUI 报出 uid 后用户回应'这个是小号'）时调用——"
+            "把当前登录账号的角色固定下来，此后默认操作账号（小号）真正作用在该账号上，关注/取关/发弹幕都走它。"
+            "参数 role：yui=标记为小号（默认）/ main=标记为主账号；uid：可选（校验当前账号是否匹配）；"
+            "force：目标角色 Cookie 已存在时是否覆盖（默认 false 防误覆盖）。"
+            "成功后回复用户确认标记结果（严禁'搞定/任务完成'类话术）。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "role": {"type": "string", "description": "yui=标记为小号（默认）/ main=标记为主账号"},
+                "uid": {"type": "integer", "description": "要声明的账号 uid（可选，用于校验）"},
+                "force": {"type": "boolean", "description": "目标角色 Cookie 已存在时是否覆盖（默认 false）"},
+            },
+            "required": [],
+        },
+        timeout=20.0,
+    )
+    async def bili_set_account_role(self, *, role: str = "yui", uid: int = 0, force: bool = False, **_):
+        params = _.get("parameters") or {}
+        role = (role or params.get("role") or "yui").strip()
+        try:
+            uid = int(uid if uid else params.get("uid") or 0) or None
+        except (TypeError, ValueError):
+            uid = None
+        try:
+            result = bili.set_account_role(role, uid=uid, force=bool(force or params.get("force", False)))
+        except bili.BiliError as exc:
+            return _wrap_err(exc)
+        return {
+            "output": result["detail"],
+            "is_error": False,
+            "meta": {"agent": {"delivery": "silent"}},
+            **{k: v for k, v in result.items() if k in ("role", "mid", "uname")},
+        }
+
+    @llm_tool(
         name="bili_my_videos",
         description=(
             "查看 B站账号的投稿稿件列表。何时用：用户说'看看我的稿件/我的投稿'时。"
