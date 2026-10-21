@@ -25,6 +25,8 @@
 | `bili_yui_dynamic` | 用独立小号发 B站文字动态（v0.7.0；每日限 6 条） |
 | `bili_yui_upload` | 用独立小号投稿视频（v0.7.0；文件放插件目录 yui_uploads/，每日限 2 条） |
 | `bili_yui_status` | 查询独立小号绑定状态与今日自主额度（v0.7.0） |
+| `bili_accounts` | 查询大小号视图：昵称/uid/绑定时间/默认角色（v0.7.10，YUI 分清大小号） |
+| `bili_set_roles` | 修改大小号归属：交换角色 / 按 uid 指定角色（v0.7.10，后期说明修改） |
 
 ## 使用示例（对 YUI 说）
 
@@ -56,11 +58,15 @@ v0.7.1 起 YUI 独立小号**完全后台化**：所有自主行动与内容同�
 
 ### 配置（小号凭证）
 
-方式 A（推荐）：在插件目录创建 `yui_cookie.txt`，内容为小号的完整 Cookie 字符串（需含 `SESSDATA`；写操作还需 `bili_jct`）。插件目录即 `C:\Users\jh\AppData\Local\N.E.K.O\.neko-plugin-installations\plugins\bili_viewer\`。
+方式 A（推荐，v0.7.10 双账号绑定）：打开接入面板（bili_bind_web），用浏览器先后登录两个 B站账号——**第一个登录的账号自动成为大号（main），第二个登录的账号自动成为小号（yui，默认操作账号）**，绑定持久化到插件目录 main_cookie.txt / yui_cookie.txt，无需手动复制 Cookie。大小号归属后期可随时说明修改（bili_set_roles 交换角色）。
 
-方式 B：设置环境变量 `BILI_YUI_COOKIE`（优先级高于文件）。
+方式 B（手动）：小号 Cookie 保存到插件目录 `yui_cookie.txt`（需含 `SESSDATA`；写操作还需 `bili_jct`）。插件目录即 `C:\Users\jh\AppData\Local\N.E.K.O\.neko-plugin-installations\plugins\bili_viewer\`。
 
-未配置小号时：写操作自动回退主账号（不影响原功能）；配置后：弹幕/评论/动态/投稿/改稿件/查看自己的稿件与账号信息默认全部走小号——未说明用哪个账号时一律默认小号（v0.7.9 统一规则），显式传 `account=main` 才用主账号。
+方式 C：设置环境变量 `BILI_YUI_COOKIE`（优先级高于文件）。
+
+未配置小号时：写操作自动回退主账号（不影响原功能）；配置后：弹幕/评论/动态/投稿/改稿件/查看自己的稿件与账号信息默认全部走小号——未说明用哪个账号时一律默认小号（v0.7.9 统一规则），显式传 `account=main` 才用大号。
+
+YUI 分清大小号：调用 bili_accounts 可查询大号/小号的昵称、uid、绑定时间与默认角色；bili_set_roles 可交换大小号归属（仅文件层绑定的账号可互换，环境变量优先时请手动调整）。
 
 ### 自主运营规则（防封号硬限制）
 

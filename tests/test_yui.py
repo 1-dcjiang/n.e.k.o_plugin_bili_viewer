@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 
 
 def _make_inst(monkeypatch) -> "object":
@@ -38,6 +39,175 @@ def test_cookie_account_segregation(monkeypatch, tmp_path) -> None:
     # 环境变量优先于文件
     monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=yui8; bili_jct=yui8j")
     assert bili._cookie("yui") == "SESSDATA=yui8; bili_jct=yui8j"
+
+
+# ══════════ 双账号归位（v0.7.10）：第一个登录=大号，第二个登录=小号，可后期互换 ══════════
+
+
+def test_main_cookie_file_fallback(monkeypatch, tmp_path) -> None:
+    """v0.7.10：主账号 Cookie 也支持插件目录 main_cookie.txt（绑定持久化）。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.delenv("BILI_COOKIE", raising=False)
+    monkeypatch.delenv("BILI_YUI_COOKIE", raising=False)
+    monkeypatch.setattr(bili, "_YUI_COOKIE_DIR", str(tmp_path))
+    (tmp_path / "main_cookie.txt").write_text("SESSDATA=mainf; bili_jct=mainfj", encoding="utf-8")
+    assert bili._cookie("main") == "SESSDATA=mainf; bili_jct=mainfj"
+    # env 优先于文件
+    monkeypatch.setenv("BILI_COOKIE", "SESSDATA=maine; bili_jct=mainej")
+    assert bili._cookie("main") == "SESSDATA=maine; bili_jct=mainej"
+
+
+def test_cookie_uid_parse(monkeypatch) -> None:
+    """v0.7.10：从 Cookie 解析 uid（DedeUserID，无需网络）。"""
+    from plugin.plugins.bili_viewer import bili
+
+    assert bili.cookie_uid("SESSDATA=x; DedeUserID=123456; bili_jct=y") == 123456
+    assert bili.cookie_uid("SESSDATA=x; DedeUserID=88; bili_jct=y") == 88
+    assert bili.cookie_uid("SESSDATA=x; bili_jct=y") is None
+
+
+def _pkg() -> "object":
+    """包模块即 __init__.py（BiliViewerPlugin 的全局命名空间）。"""
+    import plugin.plugins.bili_viewer as _pkg_mod
+
+    return _pkg_mod
+
+
+def test_assign_cookie_first_is_main_second_is_yui(monkeypatch, tmp_path) -> None:
+    """v0.7.10：按登录顺序归位——第一个登录的账号=大号，第二个=小号（默认操作账号）。"""
+    from plugin.plugins.bili_viewer import bili
+
+    pkg = _pkg()
+
+    monkeypatch.delenv("BILI_COOKIE", raising=False)
+    monkeypatch.delenv("BILI_YUI_COOKIE", raising=False)
+    monkeypatch.setattr(bili, "_YUI_COOKIE_DIR", str(tmp_path))
+    monkeypatch.setattr(pkg, "_accounts_path", lambda: str(tmp_path / "accounts.json"))
+    inst = _make_inst(monkeypatch)
+
+    # 第一个登录（uid=111）
+    r1 = inst._assign_cookie("SESSDATA=a; DedeUserID=111; bili_jct=a1", 0, "extension")
+    assert r1["bound"] is True and "大号" in r1["detail"]
+    assert bili._cookie("main") == "SESSDATA=a; DedeUserID=111; bili_jct=a1"
+    assert (tmp_path / "main_cookie.txt").read_text(encoding="utf-8") == "SESSDATA=a; DedeUserID=111; bili_jct=a1"
+    acc = pkg._read_accounts()
+    assert acc["main"]["uid"] == 111
+
+    # 第二个登录（uid=222）→ 自动成为小号
+    r2 = inst._assign_cookie("SESSDATA=b; DedeUserID=222; bili_jct=b2", 0, "extension")
+    assert r2["bound"] is True and "小号" in r2["detail"]
+    assert bili._cookie("yui") == "SESSDATA=b; DedeUserID=222; bili_jct=b2"
+    assert (tmp_path / "yui_cookie.txt").read_text(encoding="utf-8") == "SESSDATA=b; DedeUserID=222; bili_jct=b2"
+    acc = pkg._read_accounts()
+    assert acc["yui"]["uid"] == 222
+
+    # 重复推送同一 uid → 刷新不新增
+    r3 = inst._assign_cookie("SESSDATA=b2; DedeUserID=222; bili_jct=b2b", 1, "extension")
+    assert r3["bound"] is True and "小号" in r3["detail"]
+    acc = pkg._read_accounts()
+    assert set(acc) == {"main", "yui"}
+    assert acc["yui"]["uid"] == 222
+
+    # 第三个账号 → 拒绝（大小号都已绑定）
+    r4 = inst._assign_cookie("SESSDATA=c; DedeUserID=333; bili_jct=c3", 0, "extension")
+    assert r4["bound"] is False
+    assert bili._cookie("yui") == "SESSDATA=b2; DedeUserID=222; bili_jct=b2b"  # 未被覆盖
+    assert bili._cookie("main") == "SESSDATA=a; DedeUserID=111; bili_jct=a1"
+
+
+def test_set_roles_swap(monkeypatch, tmp_path) -> None:
+    """v0.7.10：后期说明修改——交换大小号（文件互换 + 角色映射互换 + env 同步）。"""
+    from plugin.plugins.bili_viewer import bili
+
+    pkg = _pkg()
+
+    monkeypatch.delenv("BILI_COOKIE", raising=False)
+    monkeypatch.delenv("BILI_YUI_COOKIE", raising=False)
+    monkeypatch.setattr(bili, "_YUI_COOKIE_DIR", str(tmp_path))
+    monkeypatch.setattr(pkg, "_accounts_path", lambda: str(tmp_path / "accounts.json"))
+    inst = _make_inst(monkeypatch)
+    inst._assign_cookie("SESSDATA=a; DedeUserID=111; bili_jct=a1", 0, "extension")
+    inst._assign_cookie("SESSDATA=b; DedeUserID=222; bili_jct=b2", 0, "extension")
+
+    out = asyncio.run(inst.bili_set_roles(action="swap"))
+    assert out.get("is_error") is False
+    # 文件互换：原小号（uid222）现在是大号
+    assert bili._cookie("main") == "SESSDATA=b; DedeUserID=222; bili_jct=b2"
+    assert bili._cookie("yui") == "SESSDATA=a; DedeUserID=111; bili_jct=a1"
+    acc = pkg._read_accounts()
+    assert acc["main"]["uid"] == 222
+    assert acc["yui"]["uid"] == 111
+    # 运行期 env 同步
+    assert os.environ.get("BILI_COOKIE") == "SESSDATA=b; DedeUserID=222; bili_jct=b2"
+    assert os.environ.get("BILI_YUI_COOKIE") == "SESSDATA=a; DedeUserID=111; bili_jct=a1"
+
+
+def test_set_roles_by_uid(monkeypatch, tmp_path) -> None:
+    """v0.7.10：按 uid 把账号设为指定角色。"""
+    from plugin.plugins.bili_viewer import bili
+
+    pkg = _pkg()
+
+    monkeypatch.delenv("BILI_COOKIE", raising=False)
+    monkeypatch.delenv("BILI_YUI_COOKIE", raising=False)
+    monkeypatch.setattr(bili, "_YUI_COOKIE_DIR", str(tmp_path))
+    monkeypatch.setattr(pkg, "_accounts_path", lambda: str(tmp_path / "accounts.json"))
+    inst = _make_inst(monkeypatch)
+    inst._assign_cookie("SESSDATA=a; DedeUserID=111; bili_jct=a1", 0, "extension")
+    inst._assign_cookie("SESSDATA=b; DedeUserID=222; bili_jct=b2", 0, "extension")
+    # 把 uid=222 设为小号（它当前是大号 → 等价互换）
+    out = asyncio.run(inst.bili_set_roles(uid=222, role="yui"))
+    assert out.get("is_error") is False
+    assert bili._cookie("yui") == "SESSDATA=b; DedeUserID=222; bili_jct=b2"
+    assert bili._cookie("main") == "SESSDATA=a; DedeUserID=111; bili_jct=a1"
+    # 再设回大号
+    out2 = asyncio.run(inst.bili_set_roles(uid=222, role="main"))
+    assert out2.get("is_error") is False
+    assert bili._cookie("main") == "SESSDATA=b; DedeUserID=222; bili_jct=b2"
+
+
+def test_set_roles_env_locked(monkeypatch, tmp_path) -> None:
+    """v0.7.10：env 覆盖文件层的账号无法互换（避免误清空）。"""
+    from plugin.plugins.bili_viewer import bili
+
+    pkg = _pkg()
+
+    monkeypatch.setattr(bili, "_YUI_COOKIE_DIR", str(tmp_path))
+    monkeypatch.setattr(pkg, "_accounts_path", lambda: str(tmp_path / "accounts.json"))
+    inst = _make_inst(monkeypatch)
+    monkeypatch.setenv("BILI_COOKIE", "SESSDATA=a; DedeUserID=111; bili_jct=a1")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=b; DedeUserID=222; bili_jct=b2")
+    out = asyncio.run(inst.bili_set_roles(action="swap"))
+    assert out.get("error") == "ENV_LOCKED"
+    # 文件层账号可互换
+    (tmp_path / "main_cookie.txt").write_text("SESSDATA=a; DedeUserID=111; bili_jct=a1", encoding="utf-8")
+    (tmp_path / "yui_cookie.txt").write_text("SESSDATA=b; DedeUserID=222; bili_jct=b2", encoding="utf-8")
+    out2 = asyncio.run(inst.bili_set_roles(action="swap"))
+    assert out2.get("is_error") is False
+
+
+def test_bili_accounts_view(monkeypatch, tmp_path) -> None:
+    """v0.7.10：YUI 分清大小号——bili_accounts 返回双账号视图与默认角色。"""
+    from plugin.plugins.bili_viewer import bili
+
+    pkg = _pkg()
+
+    monkeypatch.delenv("BILI_COOKIE", raising=False)
+    monkeypatch.delenv("BILI_YUI_COOKIE", raising=False)
+    monkeypatch.setattr(bili, "_YUI_COOKIE_DIR", str(tmp_path))
+    monkeypatch.setattr(pkg, "_accounts_path", lambda: str(tmp_path / "accounts.json"))
+    inst = _make_inst(monkeypatch)
+    inst._assign_cookie("SESSDATA=a; DedeUserID=111; bili_jct=a1", 0, "extension")
+    inst._assign_cookie("SESSDATA=b; DedeUserID=222; bili_jct=b2", 0, "extension")
+    monkeypatch.setattr(bili, "my_info", lambda role: {"uname": "大号名" if role == "main" else "小号名", "mid": 111 if role == "main" else 222, "level": 6})
+    out = asyncio.run(inst.bili_accounts())
+    assert out.get("is_error") is False
+    assert "大号" in out["output"] and "小号" in out["output"]
+    assert "默认使用" in out["output"] and "yui" in out["output"]
+    assert out["result"]["main"]["uid"] == 111
+    assert out["result"]["yui"]["uid"] == 222
+    assert out["result"]["default_role"] == "yui"
 
 
 def test_yui_require_login_message(monkeypatch) -> None:

@@ -56,8 +56,10 @@ class BiliError(Exception):
 # ══════════════ 基础 HTTP ══════════════
 
 _YUI_COOKIE_FILE = "yui_cookie.txt"  # 插件目录下的 YUI 专属小号 Cookie 文件（与本机主账号 BILI_COOKIE 完全隔离）
+_MAIN_COOKIE_FILE = "main_cookie.txt"  # 插件目录下的主账号 Cookie 文件（网页接入/扩展/CDP 绑定的持久化存储，v0.7.10）
 _YUI_COOKIE_DIR = os.path.dirname(os.path.abspath(__file__))  # 可注入目录便于测试
 _yui_cookie_file_cache: tuple[float, str] = (0.0, "")  # (mtime, 内容)，避免 watcher 高频轮询反复读盘
+_main_cookie_file_cache: tuple[float, str] = (0.0, "")
 
 
 def _yui_cookie_from_file() -> str:
@@ -85,11 +87,75 @@ def _yui_cookie_from_file() -> str:
     return content
 
 
+def _main_cookie_from_file() -> str:
+    """从插件目录 main_cookie.txt 读取主账号 Cookie（绑定持久化，v0.7.10）。"""
+    global _main_cookie_file_cache
+    p = os.path.join(_YUI_COOKIE_DIR, _MAIN_COOKIE_FILE)
+    try:
+        mtime = os.path.getmtime(p)
+    except OSError:
+        _main_cookie_file_cache = (0.0, "")
+        return ""
+    cache_ts, cache_val = _main_cookie_file_cache
+    if cache_ts == mtime and cache_val:
+        return cache_val
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+    except OSError:
+        content = ""
+    _main_cookie_file_cache = (mtime, content)
+    return content
+
+
+def write_main_cookie_file(cookie: str) -> None:
+    """持久化主账号 Cookie 到插件目录 main_cookie.txt（绑定流程调用，v0.7.10）。
+
+    不手动清缓存：mtime 已变化，下次读取自然重读文件。
+    """
+    p = os.path.join(_YUI_COOKIE_DIR, _MAIN_COOKIE_FILE)
+    try:
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(cookie.strip())
+    except OSError:
+        pass  # 文件写失败不致命（env/配置层仍可生效）
+
+
+def write_yui_cookie_file(cookie: str) -> None:
+    """持久化小号 Cookie 到插件目录 yui_cookie.txt（第二个登录的账号自动归位，v0.7.10）。"""
+    global _yui_cookie_file_cache
+    _yui_cookie_file_cache = (0.0, "")
+    p = os.path.join(_YUI_COOKIE_DIR, _YUI_COOKIE_FILE)
+    try:
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(cookie.strip())
+    except OSError:
+        pass
+
+
+def cookie_uid(cookie: str) -> int | None:
+    """从 Cookie 中解析 B站账号 uid（DedeUserID 字段，无需网络）。"""
+    import re as _re
+
+    m = _re.search(r"(?:^|;)\s*DedeUserID=(\d+)", str(cookie or ""))
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
 def _cookie(account: str = "main") -> str:
-    """账号 Cookie：main=用户主账号（BILI_COOKIE）；yui=YUI 独立小号（BILI_YUI_COOKIE 或 yui_cookie.txt）。"""
+    """账号 Cookie：main=主账号（env BILI_COOKIE > 插件目录 main_cookie.txt）；
+    yui=YUI 独立小号（env BILI_YUI_COOKIE > 插件目录 yui_cookie.txt）。
+
+    v0.7.10：绑定流程按登录顺序归位——第一个登录的账号持久化为 main_cookie.txt（大号），
+    第二个登录的账号自动归为 yui_cookie.txt（小号，默认操作账号）。
+    """
     if account == "yui":
         return os.environ.get("BILI_YUI_COOKIE", "").strip() or _yui_cookie_from_file()
-    return os.environ.get("BILI_COOKIE", "").strip()
+    return os.environ.get("BILI_COOKIE", "").strip() or _main_cookie_from_file()
 
 
 def _http_get(url: str, params: dict | None = None, timeout: float = _TIMEOUT, account: str = "main") -> dict:

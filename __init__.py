@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import os
 import re
@@ -73,6 +74,34 @@ _COOKIE_SOURCE_MANUAL = "manual"
 _COOKIE_SOURCE_AUTO = "auto"
 _COOKIE_SOURCE_EXTENSION = "extension"
 _COOKIE_SOURCE_NONE = "none"
+
+# 账号角色映射（v0.7.10）：记录大小号归属与绑定顺序，供 YUI 分清大小号、后期说明修改。
+# 文件格式：{"main": {"uid": int, "bound_at": float}, "yui": {"uid": int, "bound_at": float}}
+# 默认规则：第一个绑定/登录的账号 = main（大号），第二个绑定/登录的账号 = yui（小号，默认操作账号）。
+_ACCOUNTS_FILE = "accounts.json"
+
+
+def _accounts_path() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), _ACCOUNTS_FILE)
+
+
+def _read_accounts() -> dict:
+    try:
+        with open(_accounts_path(), "r", encoding="utf-8") as f:
+            data = json.loads(f.read())
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def _write_accounts(accounts: dict) -> None:
+    try:
+        with open(_accounts_path(), "w", encoding="utf-8") as f:
+            f.write(json.dumps(accounts, ensure_ascii=False, indent=2))
+    except Exception:
+        pass  # 角色映射写失败不致命（仅影响大小号视图与自动归位记忆）
 
 
 def _apply_cookie_from_config(cfg: dict, env: dict) -> str:
@@ -479,10 +508,8 @@ class BiliViewerPlugin(NekoPluginBase):
             _status, auto_cookie, _detail = cdp_cookie._STATUS_FAIL, "", "CDP 接入异常"
         result["detail"] = _detail or "未接入"
         if auto_cookie and "SESSDATA=" in auto_cookie:
-            os.environ["BILI_COOKIE"] = auto_cookie
-            self._cookie_source = _COOKIE_SOURCE_AUTO
-            result.update({"ok": True, "bound": True, "detail": f"已自动接入 B站登录态（{_detail}）"})
-            return result
+            # v0.7.10：CDP 通道同样按登录顺序归位大小号
+            return self._assign_cookie(auto_cookie, 0, _COOKIE_SOURCE_AUTO)
         if _status == cdp_cookie._STATUS_NO_BROWSER:
             try:
                 _fstatus, _fcookie, _fd = cookie_auto.detect_bili_cookie()
@@ -491,10 +518,7 @@ class BiliViewerPlugin(NekoPluginBase):
                     and _fcookie
                     and "SESSDATA=" in _fcookie
                 ):
-                    os.environ["BILI_COOKIE"] = _fcookie
-                    self._cookie_source = _COOKIE_SOURCE_AUTO
-                    result.update({"ok": True, "bound": True, "detail": f"已从浏览器数据自动读取 B站登录态（{_fd}）"})
-                    return result
+                    return self._assign_cookie(_fcookie, 0, _COOKIE_SOURCE_AUTO)
             except Exception:
                 pass  # 文件兜底失败不致命
         return result
@@ -1497,6 +1521,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 "output": (
                     "YUI 小号未配置。配置方法：把 B站小号的完整 Cookie（含 SESSDATA 与 bili_jct）"
                     "保存到插件目录的 yui_cookie.txt 文件（或设置环境变量 BILI_YUI_COOKIE）。"
+                    "也可以打开接入面板绑定第二个账号：第一个登录的账号自动成为大号，第二个登录的自动成为小号（v0.7.10）。"
                     "配置后 YUI 即可用独立小号跟随你同步行动、自主发弹幕/评论/动态/投稿，与你的主账号完全隔离。"
                 ),
                 "is_error": True,
@@ -1511,6 +1536,125 @@ class BiliViewerPlugin(NekoPluginBase):
             "is_error": False,
             "result": info,
         }
+
+    @llm_tool(
+        name="bili_accounts",
+        description=(
+            "查询当前绑定的 B站大小号视图：大号（main，第一个登录的账号）与小号（yui，第二个登录的账号，"
+            "默认操作账号）各自的昵称/uid/来源/绑定时间。何时用：用户问'哪个是大号/小号''现在用的哪个账号'"
+            "'YUI 用的是谁的账号'，或 YUI 需要分清大小号再行动时。"
+            "返回两个账号的 uid（可从 uid 判断身份），未配置的账号标注'未配置'。"
+            "大小号归属默认为绑定顺序：第一个登录=大号，第二个登录=小号；如需交换请用 bili_set_roles。"
+        ),
+        parameters={"type": "object", "properties": {}, "required": []},
+        timeout=25.0,
+    )
+    async def bili_accounts(self, **_):
+        accounts = _read_accounts()
+        rows = []
+        for role, label in (("main", "大号(main，第一个登录的账号)"), ("yui", "小号(yui，第二个登录的账号，默认操作)")):
+            cookie = bili._cookie(role)
+            uid = accounts.get(role, {}).get("uid")
+            bound_at = accounts.get(role, {}).get("bound_at")
+            if not cookie:
+                rows.append(f"{label}：未配置")
+                continue
+            if uid is None:
+                uid = bili.cookie_uid(cookie)
+            if bound_at:
+                try:
+                    bound_txt = time.strftime("%m-%d %H:%M", time.localtime(float(bound_at)))
+                except (TypeError, ValueError, OSError):
+                    bound_txt = ""
+            else:
+                bound_txt = ""
+            try:
+                info = bili.my_info(role)
+                ident = f"{info['uname']}（uid {info['mid']}，Lv{info['level']}）"
+            except bili.BiliError:
+                ident = f"uid {uid if uid is not None else '未知'}"
+            rows.append(f"{label}：{ident}｜来源{('绑定于 ' + bound_txt) if bound_txt else '配置'}")
+        default_txt = "yui（小号）" if bili._cookie("yui") else "main（大号，小号未配置时的回退）"
+        return {
+            "output": "\n".join(rows) + f"\n未说明时默认使用：{default_txt}",
+            "is_error": False,
+            "result": {
+                "main": {
+                    "uid": accounts.get("main", {}).get("uid"),
+                    "bound_at": accounts.get("main", {}).get("bound_at"),
+                    "configured": bool(bili._cookie("main")),
+                },
+                "yui": {
+                    "uid": accounts.get("yui", {}).get("uid"),
+                    "bound_at": accounts.get("yui", {}).get("bound_at"),
+                    "configured": bool(bili._cookie("yui")),
+                },
+                "default_role": "yui" if bili._cookie("yui") else "main",
+            },
+        }
+
+    @llm_tool(
+        name="bili_set_roles",
+        description=(
+            "修改大小号归属（v0.7.10）：把两个已绑定账号的角色互换，或按 uid 把指定账号设为指定角色。"
+            "何时用：用户后期说明'把小号当大号用''交换一下大小号''以后都用那个账号操作'时。"
+            "参数 action：swap=交换大小号（默认）；uid：要设为目标角色的账号 uid；role：目标角色（main 或 yui）。"
+            "规则：大小号归属默认按绑定顺序（第一个登录=大号，第二个登录=小号），本工具用于后期修改；"
+            "仅支持文件层配置的账号互换（环境变量优先时请手动调整 BILI_COOKIE / BILI_YUI_COOKIE 后重试）。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["swap"], "description": "swap=交换大小号（默认）"},
+                "uid": {"type": "integer", "description": "目标账号 uid（与 role 配合：把该账号设为指定角色）"},
+                "role": {"type": "string", "enum": ["main", "yui"], "description": "目标角色（与 uid 配合）"},
+            },
+            "required": [],
+        },
+        timeout=20.0,
+    )
+    async def bili_set_roles(self, *, action: str = "", uid: int = 0, role: str = "", **_):
+        params = _.get("parameters") or {}
+        action = (action or params.get("action") or "swap").strip()
+        uid = int(uid if uid else params.get("uid") or 0) or 0
+        role = (role or params.get("role") or "").strip()
+        main_file = bili._main_cookie_from_file()
+        yui_file = bili._yui_cookie_from_file()
+        # 安全（v0.7.10）：只有账号 cookie 与文件层完全一致（绑定流程持久化）才允许互换；
+        # 来自环境变量/配置覆盖的账号无法程序化互换，提示手动调整，避免误清空账号。
+        main_effective = bili._cookie("main")
+        yui_effective = bili._cookie("yui")
+        if main_effective and main_effective != main_file:
+            return {"output": "大号 Cookie 来自环境变量或配置（非文件层），无法自动互换；请手动调整 BILI_COOKIE 后重试。", "is_error": True, "error": "ENV_LOCKED"}
+        if yui_effective and yui_effective != yui_file:
+            return {"output": "小号 Cookie 来自环境变量或配置（非文件层），无法自动互换；请手动调整 BILI_YUI_COOKIE 后重试。", "is_error": True, "error": "ENV_LOCKED"}
+        if not main_file and not yui_file:
+            return {"output": "当前没有文件层绑定的账号，无法修改角色；请先通过接入面板绑定两个账号（第一个登录=大号，第二个登录=小号）。", "is_error": True, "error": "NO_ACCOUNTS"}
+        # 定位目标账号当前角色（uid 指定时）
+        if uid and role in ("main", "yui"):
+            cur = None
+            for r in ("main", "yui"):
+                c = bili._cookie(r)
+                if c and bili.cookie_uid(c) == uid:
+                    cur = r
+                    break
+            if cur is None:
+                return {"output": f"没有绑定 uid={uid} 的账号。", "is_error": True, "error": "NO_ACCOUNT"}
+            if cur == role:
+                return {"output": f"uid={uid} 的账号本来就是{role}，无需修改。", "is_error": False, "result": {"ok": True, "unchanged": True}}
+            # uid 账号当前角色≠目标角色 → 等价于交换大小号
+        # 统一动作：交换大小号（文件互换 + 角色映射互换 + 运行期 env 同步）
+        bili.write_yui_cookie_file(main_file)
+        bili.write_main_cookie_file(yui_file)
+        accounts = _read_accounts()
+        main_rec, yui_rec = accounts.get("main") or {}, accounts.get("yui") or {}
+        accounts["main"], accounts["yui"] = yui_rec, main_rec
+        _write_accounts(accounts)
+        os.environ["BILI_COOKIE"] = bili._main_cookie_from_file()
+        os.environ["BILI_YUI_COOKIE"] = bili._yui_cookie_from_file()
+        if uid and role in ("main", "yui"):
+            return {"output": f"已把 uid={uid} 的账号设为{role}（原{role}的账号自动换到另一角色）。", "is_error": False, "result": {"ok": True, "uid": uid, "role": role}}
+        return {"output": "已交换大小号：原小号现在是大号，原大号现在是小号（未说明时仍默认操作小号）。", "is_error": False, "result": {"ok": True, "swapped": True}}
 
     @llm_tool(
         name="bili_see_screen",
@@ -1710,20 +1854,63 @@ class BiliViewerPlugin(NekoPluginBase):
     def _ext_last_seen(self) -> float:
         return float(getattr(self, "_ext_last_seen_ts", 0) or 0)
 
-    def _receive_ext_cookie(self, cookie: str, at: int) -> dict:
-        """接收浏览器扩展（B站接入桥）推送的登录态：写入环境变量并标记来源。
+    def _assign_cookie(self, cookie: str, at: int, source: str) -> dict:
+        """按登录顺序把 Cookie 归位到账号（v0.7.10）：第一个登录=大号(main)，第二个登录=小号(yui)。
 
-        仅接受 127.0.0.1 本机来源（面板服务本身只监听本机）；cookie 不上传不写日志。
-        扩展推送的 at 为空（首次握手）时用当前时间。
+        - 与当前大号同一 uid → 刷新大号（更新时间戳）；
+        - 与当前小号同一 uid → 刷新小号；
+        - 尚未有大号 → 归为大号并持久化（main_cookie.txt）；
+        - 已有大号且 uid 不同 → 归为小号并持久化（yui_cookie.txt，默认操作账号）；
+        - 大小号都已存在且新 uid 都不匹配 → 拒绝（提示先说明替换哪个角色）。
+        结果同步写入环境变量（运行期生效）+ accounts.json（角色映射记忆）。
         """
         ts = float(at) if at and at > 0 else time.time()
         self._ext_last_seen_ts = ts
         cookie = str(cookie or "").strip()
-        if "SESSDATA=" in cookie:
+        if "SESSDATA=" not in cookie:
+            return {"ok": True, "bound": False, "detail": "扩展已推送，但浏览器中没有有效 B站登录态"}
+        uid = bili.cookie_uid(cookie)
+        accounts = _read_accounts()
+        main_uid = accounts.get("main", {}).get("uid")
+        yui_uid = accounts.get("yui", {}).get("uid")
+        now = time.time()
+        if uid is not None and uid == main_uid:
+            # 刷新大号
+            accounts.setdefault("main", {})["bound_at"] = now
+            _write_accounts(accounts)
             os.environ["BILI_COOKIE"] = cookie
-            self._cookie_source = _COOKIE_SOURCE_EXTENSION
-            return {"ok": True, "bound": True, "detail": "已通过浏览器扩展接入 B站登录态"}
-        return {"ok": True, "bound": False, "detail": "扩展已推送，但浏览器中没有有效 B站登录态"}
+            self._cookie_source = source
+            return {"ok": True, "bound": True, "detail": "已刷新大号（main）登录态"}
+        if uid is not None and uid == yui_uid:
+            # 刷新小号
+            accounts.setdefault("yui", {})["bound_at"] = now
+            _write_accounts(accounts)
+            os.environ["BILI_YUI_COOKIE"] = cookie
+            return {"ok": True, "bound": True, "detail": "已刷新小号（yui）登录态"}
+        if main_uid is None:
+            # 第一个登录的账号 → 大号（持久化到 main_cookie.txt）
+            bili.write_main_cookie_file(cookie)
+            accounts["main"] = {"uid": uid, "bound_at": now}
+            _write_accounts(accounts)
+            os.environ["BILI_COOKIE"] = cookie
+            self._cookie_source = source
+            return {"ok": True, "bound": True, "detail": "已绑定大号（第一个登录的账号，main）"}
+        # 已有大号且新 uid 不同 → 第二个登录的账号自动成为小号（yui，默认操作账号）
+        if yui_uid is None or uid is None:
+            bili.write_yui_cookie_file(cookie)
+            accounts["yui"] = {"uid": uid, "bound_at": now}
+            _write_accounts(accounts)
+            os.environ["BILI_YUI_COOKIE"] = cookie
+            return {"ok": True, "bound": True, "detail": "已绑定小号（第二个登录的账号，yui），未说明时默认用它操作"}
+        return {"ok": True, "bound": False, "detail": "大小号都已绑定；新账号未匹配，如需替换请说明要替换大号还是小号"}
+
+    def _receive_ext_cookie(self, cookie: str, at: int) -> dict:
+        """接收浏览器扩展（B站接入桥）推送的登录态：按登录顺序归位大小号（v0.7.10）。
+
+        仅接受 127.0.0.1 本机来源（面板服务本身只监听本机）；cookie 不上传不写日志。
+        扩展推送的 at 为空（首次握手）时用当前时间。
+        """
+        return self._assign_cookie(cookie, at, _COOKIE_SOURCE_EXTENSION)
 
     def _receive_ext_tab(self, url: str, title: str, at: int) -> dict:
         """接收浏览器扩展推送的当前活动标签页（URL + 标题），供精确感知。
