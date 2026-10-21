@@ -1,10 +1,13 @@
-// B站接入桥 (Chrome) v0.2.4 —— Google Chrome 专用版
+// B站接入桥 (Chrome) v0.2.5 —— Google Chrome 专用版
 // 1) 把 B站登录态直连推送给本机 bili_viewer 插件（POST 127.0.0.1:8765，不上外网）；
 // 2) 把当前活动标签页（URL+标题）实时推送给插件，让 YUI 精确感知你在看什么；
 // 3) 在 B站 直播/视频页注入脚本读取页面实况（直播弹幕列表/在线人数/视频进度），
 //    让 YUI 能"看到"直播间与视频正在发生的内容（需 scripting 权限）；
 // 4) 截取当前活动标签页画面（captureVisibleTab）推送给插件（需 activeTab 权限；
-//    JPEG 压缩后仅推送 127.0.0.1，不上外网）。
+//    JPEG 压缩后仅推送 127.0.0.1，不上外网）；
+// 5) v0.2.5 声音捕获：popup 一次性开启后，tabCapture 捕获 B站 标签页音频，
+//    offscreen document 采集成 wav 分段推送插件（本地 ASR 转文字让 YUI 听到）；
+//    开关状态记忆在 storage，浏览器/扩展重启后自动恢复（后台静默，不抢界面）。
 // 本版与 Edge/360 版本相互独立：推送 source 标记为 bili-bridge-chrome-extension，
 // 插件日志可区分来源，多浏览器共存互不干扰。
 // 触发时机：安装/浏览器启动立即推送；cookie 变化（onChanged 防抖）；
@@ -13,6 +16,7 @@
 
 const EXT_SOURCE = "bili-bridge-chrome-extension";
 const PANEL_URL = "http://127.0.0.1:8765";
+const AUDIO_STATE_KEY = "audio_capture_enabled";
 
 // 与插件 cdp_cookie._KEEP_NAMES 保持一致的 B站凭证名
 const KEEP_NAMES = new Set([
@@ -204,6 +208,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 chrome.alarms.create("bili-bridge-push", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "bili-bridge-push") { pushCookie(); pushTab(); pushDom(); pushShot(); }
+  ensureAudioSession();
 });
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -211,6 +216,87 @@ chrome.runtime.onInstalled.addListener(() => {
   pushTab();
   pushDom();
   pushShot();
+});
+
+// ─────────── 声音捕获（v0.2.5，tabCapture + offscreen） ───────────
+
+let audioEnabled = false;
+let audioStarting = false;
+
+async function ensureOffscreenDoc() {
+  const existing = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
+  if (existing && existing.length > 0) return;
+  await chrome.offscreen.createDocument({
+    url: "offscreen.html",
+    reasons: ["USER_MEDIA"],
+    justification: "捕获 B站 直播/视频标签页声音，推送本机插件让 YUI 听到（仅 127.0.0.1 回环）",
+  });
+}
+
+async function startAudioCapture() {
+  if (audioStarting) return;
+  audioStarting = true;
+  try {
+    await ensureOffscreenDoc();
+    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const tab = tabs && tabs[0];
+    if (!tab || !tab.id || !tab.url || tab.url.indexOf("bilibili.com") < 0) {
+      // 当前不在 B站 页：仍开启捕获，切到 B站 页后 tabCapture 以最新活动标签为准
+      throw new Error("not-on-bilibili");
+    }
+    const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
+    await chrome.runtime.sendMessage({ type: "start-audio", streamId: streamId });
+    audioEnabled = true;
+    await chrome.storage.local.set({ [AUDIO_STATE_KEY]: true });
+  } catch (e) {
+    // B站 页未激活等场景：保持开关意图，等标签切换后再试
+  } finally {
+    audioStarting = false;
+  }
+}
+
+async function stopAudioCapture() {
+  try {
+    await chrome.runtime.sendMessage({ type: "stop-audio" });
+  } catch (e) { /* offscreen 不存在时静默 */ }
+  const existing = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] }).catch(() => []);
+  if (existing && existing.length > 0) {
+    await chrome.offscreen.closeDocument().catch(() => {});
+  }
+  audioEnabled = false;
+  await chrome.storage.local.set({ [AUDIO_STATE_KEY]: false });
+}
+
+function ensureAudioSession() {
+  if (!audioEnabled || audioStarting) return;
+  // SW 被唤醒（alarm/消息）时若 offscreen 已随 SW 关闭则重开；捕获持续到标签页切换。
+  chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] })
+    .then((existing) => {
+      if (!existing || existing.length === 0) startAudioCapture();
+    })
+    .catch(() => startAudioCapture());
+}
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg && msg.type === "start-audio-request") {
+    startAudioCapture().then(() => sendResponse({ ok: true, enabled: audioEnabled }));
+    return true;
+  }
+  if (msg && msg.type === "stop-audio-request") {
+    stopAudioCapture().then(() => sendResponse({ ok: true, enabled: false }));
+    return true;
+  }
+  if (msg && msg.type === "audio-state-query") {
+    sendResponse({ enabled: audioEnabled });
+    return false;
+  }
+  return undefined;
+});
+
+// 启动时恢复声音捕获开关（后台静默；用户开启过才自动恢复）
+chrome.storage.local.get(AUDIO_STATE_KEY).then((saved) => {
+  audioEnabled = Boolean(saved[AUDIO_STATE_KEY]);
+  if (audioEnabled) startAudioCapture();
 });
 
 // 浏览器/扩展启动时立即推送一次

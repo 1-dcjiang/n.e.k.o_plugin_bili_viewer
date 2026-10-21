@@ -14,6 +14,7 @@ import gzip
 import hashlib
 import json
 import os
+import random
 import re
 import socket
 import ssl
@@ -158,6 +159,43 @@ def _cookie(account: str = "main") -> str:
     return os.environ.get("BILI_COOKIE", "").strip() or _main_cookie_from_file()
 
 
+def _open_with_retry(req, timeout: float, retries: int = 3, jitter: bool = False):
+    """urlopen 网络层自动重试（防拦截加固，v0.7.11）。
+
+    - jitter=True（写操作默认）：每次调用前随机等待 0.3~1.2s，让 YUI 自主发起的高频
+      写请求（弹幕/评论/动态/投稿）时间分布更自然，降低被 B站 风控识别为机器的概率；
+    - 网络错误/超时/HTTP 5xx：指数退避重试 retries 次（基数 0.8/1.8/3.6s ± 随机抖动）；
+    - HTTP 4xx 与业务错误码不重试：避免把同一写操作重复提交放大风险。
+    """
+    if jitter:
+        time.sleep(random.uniform(0.3, 1.2))
+    last: BaseException | None = None
+    for i in range(retries + 1):
+        if i:
+            time.sleep(random.uniform(0.5, 1.5) * _RETRY_BASE[i - 1])
+        try:
+            return urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            if exc.code >= 500 and i < retries:
+                last = exc
+                continue
+            raise BiliError(f"接口 HTTP {exc.code}", "HTTP_ERROR") from exc
+        except urllib.error.URLError as exc:
+            if i < retries:
+                last = exc
+                continue
+            raise BiliError(f"网络错误：{exc.reason}", "NETWORK") from exc
+        except socket.timeout as exc:
+            if i < retries:
+                last = exc
+                continue
+            raise BiliError("请求超时", "TIMEOUT") from exc
+    raise BiliError(f"网络错误：{last}", "NETWORK") from last
+
+
+_RETRY_BASE = (0.8, 1.8, 3.6)
+
+
 def _http_get(url: str, params: dict | None = None, timeout: float = _TIMEOUT, account: str = "main") -> dict:
     """GET JSON 接口；返回解析后的 dict。"""
     if params:
@@ -170,7 +208,7 @@ def _http_get(url: str, params: dict | None = None, timeout: float = _TIMEOUT, a
     if _cookie(account):
         req.add_header("Cookie", _cookie(account))
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _open_with_retry(req, timeout) as resp:
             raw = resp.read()
     except urllib.error.HTTPError as exc:
         raise BiliError(f"接口 HTTP {exc.code}", "HTTP_ERROR") from exc
@@ -221,7 +259,7 @@ def _get_mixin_key() -> str:
     if _cookie():
         req.add_header("Cookie", _cookie())
     try:
-        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+        with _open_with_retry(req, _TIMEOUT) as resp:
             raw = resp.read()
     except urllib.error.HTTPError as exc:
         raise BiliError(f"接口 HTTP {exc.code}", "HTTP_ERROR") from exc
@@ -450,7 +488,7 @@ def _fetch_raw(url: str, params: dict) -> bytes:
     if _cookie():
         req.add_header("Cookie", _cookie())
     try:
-        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+        with _open_with_retry(req, _TIMEOUT) as resp:
             raw = resp.read()
     except urllib.error.HTTPError as exc:
         raise BiliError(f"弹幕接口 HTTP {exc.code}", "HTTP_ERROR") from exc
@@ -535,7 +573,7 @@ def video_subtitle(bvid: str, cid: int | None = None, lan: str = "zh-CN") -> str
         url = "https:" + url
     req = urllib.request.Request(url, headers={"User-Agent": _UA, "Referer": f"https://www.bilibili.com/video/{bvid}"})
     try:
-        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+        with _open_with_retry(req, _TIMEOUT) as resp:
             payload = json.loads(resp.read())
     except (urllib.error.URLError, ValueError, socket.timeout) as exc:
         raise BiliError(f"字幕获取失败：{exc}", "SUBTITLE_FAIL") from exc
@@ -1160,7 +1198,7 @@ def _http_post(url: str, form: dict, timeout: float = _TIMEOUT, account: str = "
     if _cookie(account):
         req.add_header("Cookie", _cookie(account))
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _open_with_retry(req, timeout, jitter=True) as resp:
             raw = resp.read()
     except urllib.error.HTTPError as exc:
         raise BiliError(f"接口 HTTP {exc.code}", "HTTP_ERROR") from exc
@@ -1425,7 +1463,7 @@ def _http_post_json(
     if _cookie(account):
         req.add_header("Cookie", _cookie(account))
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _open_with_retry(req, timeout, jitter=True) as resp:
             raw = resp.read()
     except urllib.error.HTTPError as exc:
         raise BiliError(f"接口 HTTP {exc.code}", "HTTP_ERROR") from exc
@@ -1544,7 +1582,7 @@ def _http_multipart(url: str, fields: dict, files: dict, account: str = "yui", t
     if _cookie(account):
         req.add_header("Cookie", _cookie(account))
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _open_with_retry(req, timeout, jitter=True) as resp:
             raw = resp.read()
     except urllib.error.HTTPError as exc:
         raise BiliError(f"接口 HTTP {exc.code}", "HTTP_ERROR") from exc

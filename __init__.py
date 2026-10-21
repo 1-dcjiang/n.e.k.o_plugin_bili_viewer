@@ -39,6 +39,19 @@ _SCREENSHOT_PATH = os.path.join(
     os.environ.get("LOCALAPPDATA") or str(Path.home()), "N.E.K.O", "bili_viewer_screen.jpg"
 )
 
+# 扩展声音落盘位置（v0.7.11）：浏览器扩展把 B站 标签页音频分段（wav）推到本机，
+# 插件侧用本地 faster-whisper 转成文字，静默注入 YUI，让 YUI 能"听到"直播/视频的声音。
+# 数据只落本机、只在本机转写，不上传任何外部网络。
+_AUDIO_PATH = os.path.join(
+    os.environ.get("LOCALAPPDATA") or str(Path.home()), "N.E.K.O", "bili_viewer_audio.wav"
+)
+_AUDIO_MAX_RAW = 4 * 1024 * 1024      # 单段 wav 落盘上限（8s/16k/16bit ≈ 256KB，留足余量）
+_AUDIO_ASR_MIN_SECS = 0.5             # 短于 0.5s 的段跳过转写（几乎无内容）
+_ASR_RESULT_WINDOW = 30.0             # ASR 结果新鲜窗口（秒）：过期视为没听到
+_ASR_MODEL = "tiny"                   # faster-whisper 模型：tiny 本机 CPU 最快（约 1~3s/8s 段）
+_ASR_COMPUTE_TYPE = "int8"
+_ASR_DEVICE = "cpu"
+
 
 def _wrap_err(exc: bili.BiliError) -> dict:
     return {
@@ -533,6 +546,21 @@ class BiliViewerPlugin(NekoPluginBase):
                 pass  # 后台绑定失败不影响插件
 
         threading.Thread(target=_run, name="bili-bg-bind", daemon=True).start()
+
+    def _wrap_auth(self, exc: bili.BiliError, action: str) -> dict:
+        """AUTH_FAILED 自愈（v0.7.11）：登录态失效时后台触发一次重绑。
+
+        浏览器扩展（B站接入桥）在线时会自动推送新登录态；CDP 可用时也会静默探测。
+        触发后提示稍后重试，绝不让 YUI 卡死在过期凭证上。
+        """
+        if exc.code == "AUTH_FAILED":
+            self._bg_bind()
+            return {
+                "output": f"{action}失败：登录态失效，已自动尝试重新接入浏览器获取新登录态，请稍后重试。",
+                "is_error": True,
+                "error": "AUTH_FAILED",
+            }
+        return _wrap_err(exc)
 
     @lifecycle(id="startup")
     async def on_startup(self, **_):
@@ -1044,7 +1072,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 account=account,
             )
         except bili.BiliError as exc:
-            return _wrap_err(exc)
+            return self._wrap_auth(exc, "修改稿件")
         return {
             "output": f"稿件已更新：{result['title']}\n简介：{result['desc'][:100] or '无'}\n标签：{result['tag'] or '无'}",
             "is_error": False,
@@ -1239,7 +1267,7 @@ class BiliViewerPlugin(NekoPluginBase):
             if account == "yui":
                 self._yui_rate_rollback("danmaku", f"live:{room}")
             self._record_send_result("live", False, exc.code, exc.message, room)
-            return _wrap_err(exc)
+            return self._wrap_auth(exc, "发送弹幕")
         self._mark_danmaku_sent("live", room, text, 0)
         self._record_send_result("live", True, "", result.get("server") or "", room, dmid=result.get("dmid") or "")
         return {"output": "弹幕已发送。", "is_error": False, "result": result}
@@ -1318,7 +1346,7 @@ class BiliViewerPlugin(NekoPluginBase):
             if account == "yui":
                 self._yui_rate_rollback("danmaku", f"video:{bvid}")
             self._record_send_result("video", False, exc.code, exc.message, bvid)
-            return _wrap_err(exc)
+            return self._wrap_auth(exc, "发送弹幕")
         self._mark_danmaku_sent("video", bvid, text, progress)
         self._record_send_result("video", True, "", result.get("server") or "", bvid)
         return {
@@ -1407,7 +1435,7 @@ class BiliViewerPlugin(NekoPluginBase):
         except bili.BiliError as exc:
             if account == "yui":
                 self._yui_rate_rollback("comment", key)
-            return _wrap_err(exc)
+            return self._wrap_auth(exc, "发送评论")
         return {"output": "评论已发送。", "is_error": False, "result": {"ok": True, "oid": oid, "type": type_id}}
 
     @llm_tool(
@@ -1436,7 +1464,7 @@ class BiliViewerPlugin(NekoPluginBase):
             bili.post_dynamic(text, account="yui")
         except bili.BiliError as exc:
             self._yui_daily_release("dynamic")
-            return _wrap_err(exc)
+            return self._wrap_auth(exc, "发布动态")
         return {"output": "动态已发布。", "is_error": False, "result": {"ok": True}}
 
     @llm_tool(
@@ -1499,7 +1527,7 @@ class BiliViewerPlugin(NekoPluginBase):
             bili.submit_video(file_path, title, desc=desc, tags=tags, tid=tid, account="yui")
         except bili.BiliError as exc:
             self._yui_daily_release("upload")
-            return _wrap_err(exc)
+            return self._wrap_auth(exc, "投稿")
         finally:
             with self._yui_upload_lock:
                 self._yui_uploading = False
@@ -1683,6 +1711,34 @@ class BiliViewerPlugin(NekoPluginBase):
             f"保存于 {path}，{shot.get('size') or 0} 字节）。",
             "is_error": False,
             "result": {"path": path, "title": shot.get("title", ""), "at": shot.get("at", 0)},
+        }
+
+    @llm_tool(
+        name="bili_listen_audio",
+        description=(
+            "读取用户当前 B站 标签页的声音转写（浏览器扩展后台采集标签页音频，"
+            "本机 faster-whisper 转成文字，全部本地处理、不上外网）。何时用：用户问"
+            "'你听到声音吗''直播里在说什么''视频在讲什么'，或 YUI 需要知道直播/视频"
+            "里正在说的话（如主播念弹幕、解说内容）时。无需参数；转写结果 30 秒内新鲜，"
+            "过期或无声时如实说明。"
+            "回复纪律：听到内容后直接转述内容本身（主播/视频里正在说的话），"
+            "不加'我听到了/系统转写了/刚刚的声音是'等开场白；没听到时如实说明，禁止猜测。"
+        ),
+        parameters={"type": "object", "properties": {}, "required": []},
+        timeout=20.0,
+    )
+    async def bili_listen_audio(self, **_):
+        asr = self._ext_asr_text()
+        if not asr:
+            return {
+                "output": "暂时没有听到声音（扩展未采集、无声或已过期）。",
+                "is_error": True,
+                "error": "NO_AUDIO",
+            }
+        return {
+            "output": asr["text"],
+            "is_error": False,
+            "result": {"text": asr["text"], "at": asr.get("at", 0)},
         }
 
     # ══════════ 自动路由入口（plugin_entry：TaskExecutor 评估可见） ══════════
@@ -2027,6 +2083,132 @@ class BiliViewerPlugin(NekoPluginBase):
             return None
         return shot
 
+    # ══════════ 扩展声音通道（v0.7.11：让 YUI 能"听到"直播/视频） ══════════
+
+    def _asr_lock(self) -> threading.Lock:
+        lock = getattr(self, "_asr_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._asr_lock = lock
+        return lock
+
+    def _receive_ext_audio(self, body: dict) -> dict:
+        """接收浏览器扩展推送的标签页声音段（wav base64 dataURL），落盘并排队 ASR。
+
+        音频仅本地保存（_AUDIO_PATH）与本地转写（faster-whisper），不上传、不写日志正文。
+        校验：仅接受 data:audio/wav;base64 前缀；限制落盘体积；无声段由扩展侧跳过。
+        """
+        audio = str(body.get("audio") or "")
+        if not audio or "," not in audio:
+            return {"ok": False, "detail": "声音数据为空或格式异常"}
+        header = audio.split(",", 1)[0].strip()
+        if not header.startswith("data:audio/") or not header.lower().endswith(";base64"):
+            return {"ok": False, "detail": "声音数据格式不受支持（仅 data:audio/*;base64）"}
+        try:
+            raw = base64.b64decode(audio.split(",", 1)[1], validate=True)
+        except Exception as exc:
+            return {"ok": False, "detail": f"声音解码失败：{exc}"}
+        if not raw:
+            return {"ok": False, "detail": "声音内容为空"}
+        if len(raw) > _AUDIO_MAX_RAW:
+            return {"ok": False, "detail": f"声音体积过大（>{_AUDIO_MAX_RAW} 字节），已拒绝落盘"}
+        try:
+            os.makedirs(os.path.dirname(_AUDIO_PATH), exist_ok=True)
+            with open(_AUDIO_PATH, "wb") as f:
+                f.write(raw)
+        except Exception as exc:
+            return {"ok": False, "detail": f"声音落盘失败：{exc}"}
+        self._ext_audio_data = {
+            "path": _AUDIO_PATH,
+            "sample_rate": int(body.get("sample_rate") or 0) or 16000,
+            "seq": int(body.get("seq") or 0) or 0,
+            "at": float(body.get("at") or 0) or time.time(),
+        }
+        _logger.info("ext audio received: seq=%s bytes=%d rate=%s", self._ext_audio_data["seq"], len(raw), self._ext_audio_data["sample_rate"])
+        self._kick_asr()
+        return {"ok": True, "detail": "已保存当前声音段"}
+
+    def _ext_audio(self) -> dict | None:
+        """返回最近一次声音段的元数据；无则返回 None（不判新鲜：ASR 由 worker 排队处理）。"""
+        return getattr(self, "_ext_audio_data", None)
+
+    def _whisper_model(self):
+        """faster-whisper 懒加载（首次转写时才加载，失败可降级跳过）。"""
+        model = getattr(self, "_asr_model", None)
+        if model is None:
+            # 直连 hf.co 可能因证书失败 → 用镜像兜底；关闭 xet 免 symlink 警告
+            os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+            os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+            try:
+                from faster_whisper import WhisperModel  # 本机 venv 已装（1.2.1），缺席时降级
+                model = WhisperModel(_ASR_MODEL, device=_ASR_DEVICE, compute_type=_ASR_COMPUTE_TYPE)
+            except Exception as exc:
+                _logger.warning("faster-whisper 加载失败，声音转写降级为空：%s", exc)
+                model = None
+            self._asr_model = model
+        return model
+
+    def _kick_asr(self) -> None:
+        """确保 ASR 后台 worker 线程在跑（幂等；startup 或首次收到声音段时启动）。"""
+        with self._asr_lock():
+            worker = getattr(self, "_asr_worker_thread", None)
+            if worker is not None and worker.is_alive():
+                return
+            self._asr_worker_evt = threading.Event()
+            worker = threading.Thread(target=self._asr_worker_loop, name="bili-asr", daemon=True)
+            self._asr_worker_thread = worker
+            worker.start()
+
+    def _asr_worker_loop(self) -> None:
+        """后台 ASR 循环：有新声音段且空闲时转写，结果静默写入 _ext_asr_data。
+
+        转写是 CPU 密集操作，串行排队；若上一段仍在转写，新段跳过（不积压，
+        保证 YUI 听到的是最近内容）。全部异常都静默降级，绝不影响插件主流程。
+        """
+        model: object = None
+        last_seq: int | None = None
+        while True:
+            try:
+                if not self._asr_worker_evt.wait(timeout=1.0):
+                    continue
+                self._asr_worker_evt.clear()
+                seg = self._ext_audio()
+                if not seg or seg.get("seq") == last_seq:
+                    continue
+                try:
+                    if model is None:
+                        model = self._whisper_model()
+                    text = ""
+                    if model is not None:
+                        segments, _info = model.transcribe(seg["path"], language="zh", vad_filter=False)
+                        parts = [s.text.strip() for s in segments]
+                        text = "".join(parts).strip()
+                    if text:
+                        self._ext_asr_data = {
+                            "text": text[:500],
+                            "lang": "zh",
+                            "at": time.time(),
+                            "seq": seg.get("seq"),
+                        }
+                        _logger.info("ext audio asr ok: seq=%s chars=%d", seg.get("seq"), len(text))
+                    else:
+                        _logger.info("ext audio asr empty: seq=%s（无声或噪音）", seg.get("seq"))
+                except Exception as exc:
+                    _logger.warning("ext audio asr failed: %s", exc)
+                finally:
+                    last_seq = seg.get("seq")
+            except Exception:
+                pass
+
+    def _ext_asr_text(self) -> dict | None:
+        """返回新鲜（30s 内）的最近 ASR 转写结果；无或过期返回 None。"""
+        asr = getattr(self, "_ext_asr_data", None)
+        if not asr or not asr.get("text"):
+            return None
+        if time.time() - float(asr.get("at") or 0) > _ASR_RESULT_WINDOW:
+            return None
+        return asr
+
     def _ext_tab(self) -> dict | None:
         """返回新鲜（120s 内）的扩展标签页数据；无或过期返回 None。"""
         tab = getattr(self, "_ext_tab_data", None)
@@ -2129,6 +2311,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 tab_fn=self._receive_ext_tab,
                 dom_fn=self._receive_ext_dom,
                 shot_fn=self._receive_ext_shot,
+                audio_fn=self._receive_ext_audio,
             )
             self._bind_panel = panel
         return panel.ensure_started()

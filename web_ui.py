@@ -21,6 +21,7 @@ _PANEL_URL = f"http://{_PANEL_HOST}:{_PANEL_PORT}/"
 # 扩展通道请求体上限（字节）：截屏 base64（4K 屏 JPEG≈几 MB）与页面 DOM 实况
 # 远大于默认 64KB，按端点分别放宽；同时防止无上限的磁盘/内存滥用。
 _EXT_SHOT_MAX_BYTES = 16 * 1024 * 1024
+_EXT_AUDIO_MAX_BYTES = 8 * 1024 * 1024  # 扩展声音分段（wav base64）上限：8s/16k/16bit 约 256KB，放宽防丢段
 _EXT_DOM_MAX_BYTES = 2 * 1024 * 1024
 
 _PAGE = """<!DOCTYPE html>
@@ -212,6 +213,14 @@ class _PanelHandler(BaseHTTPRequestHandler):
                 payload = {"ok": False, "detail": f"扩展截屏推送处理异常：{exc}"}
             self._json(200, payload)
             return
+        if self.path.startswith("/api/extension-audio"):
+            body = self._read_json_body(_EXT_AUDIO_MAX_BYTES)
+            try:
+                payload = dict(self.server.audio_fn(body) or {"ok": False})
+            except Exception as exc:
+                payload = {"ok": False, "detail": f"扩展声音推送处理异常：{exc}"}
+            self._json(200, payload)
+            return
         self._json(404, {"error": "not found"})
 
 
@@ -221,13 +230,14 @@ class BindPanel:
     port 可覆盖（默认 8765），测试场景传入随机端口避免冲突。
     """
 
-    def __init__(self, status_fn, bind_fn, ext_fn=None, tab_fn=None, dom_fn=None, shot_fn=None, port: int = _PANEL_PORT) -> None:
+    def __init__(self, status_fn, bind_fn, ext_fn=None, tab_fn=None, dom_fn=None, shot_fn=None, audio_fn=None, port: int = _PANEL_PORT) -> None:
         self._status_fn = status_fn
         self._bind_fn = bind_fn
         self._ext_fn = ext_fn or (lambda _cookie, _at: {"ok": False, "detail": "扩展通道未启用"})
         self._tab_fn = tab_fn or (lambda _url, _title, _at: {"ok": True})
         self._dom_fn = dom_fn or (lambda _body: {"ok": False, "detail": "扩展DOM通道未启用"})
         self._shot_fn = shot_fn or (lambda _body: {"ok": False, "detail": "扩展截屏通道未启用"})
+        self._audio_fn = audio_fn or (lambda _body: {"ok": False, "detail": "扩展声音通道未启用"})
         self._port = port
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -245,6 +255,7 @@ class BindPanel:
             server.tab_fn = self._tab_fn
             server.dom_fn = self._dom_fn
             server.shot_fn = self._shot_fn
+            server.audio_fn = self._audio_fn
             thread = threading.Thread(target=server.serve_forever, name="bili-bind-panel", daemon=True)
             thread.start()
             self._server = server

@@ -14,7 +14,7 @@ import zipfile
 # （desktop_deliver 本身是纯 stdlib，无此问题，但包 __init__ 有）
 
 _EXT_DIRS = ("bili-bridge-chrome", "bili-bridge-edge", "bili-bridge-360")
-_EXT_FILES = ("manifest.json", "background.js", "popup.html", "popup.js")
+_EXT_FILES = ("manifest.json", "background.js", "popup.html", "popup.js", "offscreen.html", "offscreen.js")
 
 
 def _make_plugin_dir(tmp_path) -> str:

@@ -1,10 +1,16 @@
-// popup 状态展示：读取插件面板的扩展状态端点
+// popup 状态展示 + 声音捕获开关（v0.2.5）
 const PANEL_URL = "http://127.0.0.1:8765";
+
+function fmtUname(s) {
+  return s || "—";
+}
 
 async function refresh() {
   const st = document.getElementById("st");
   const at = document.getElementById("at");
   const tab = document.getElementById("tab");
+  const au = document.getElementById("au");
+  const btn = document.getElementById("btn");
   try {
     const r = await fetch(`${PANEL_URL}/api/extension-status`);
     const s = await r.json();
@@ -28,6 +34,36 @@ async function refresh() {
     st.className = "bad";
     at.textContent = "—";
   }
+  // 声音状态（查询 background；失败时读本地 storage 兜底）
+  let enabled = false;
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: "audio-state-query" });
+    enabled = Boolean(resp && resp.enabled);
+  } catch (e) {
+    const saved = await chrome.storage.local.get("audio_capture_enabled");
+    enabled = Boolean(saved.audio_capture_enabled);
+  }
+  au.textContent = enabled ? "开启（后台静默）" : "关闭";
+  au.className = enabled ? "ok" : "bad";
+  btn.textContent = enabled ? "关闭声音" : "开启声音（让 YUI 听到直播/视频）";
+  btn.classList.toggle("off", enabled);
 }
+
+document.getElementById("btn").addEventListener("click", async () => {
+  const btn = document.getElementById("btn");
+  btn.disabled = true;
+  try {
+    const resp = await chrome.runtime.sendMessage({
+      type: document.getElementById("au").className === "ok" ? "stop-audio-request" : "start-audio-request",
+    });
+    if (resp && resp.ok) {
+      // 稍等 background 完成 offscreen 初始化后刷新状态
+      setTimeout(refresh, 800);
+    }
+  } catch (e) {
+    btn.textContent = "操作失败，请重试";
+  }
+  btn.disabled = false;
+});
 
 refresh();
