@@ -2023,25 +2023,29 @@ class BiliViewerPlugin(NekoPluginBase):
             return {"ok": True, "bound": True, "detail": "已绑定小号（第二个登录的账号，yui），未说明时默认用它操作"}
         return {"ok": True, "bound": False, "detail": "大小号都已绑定；新账号未匹配，如需替换请说明要替换大号还是小号"}
 
-    def _receive_ext_cookie(self, cookie: str, at: int) -> dict:
+    def _receive_ext_cookie(self, cookie: str, at: int, source: str | None = None) -> dict:
         """接收浏览器扩展（B站接入桥）推送的登录态：按登录顺序归位大小号（v0.7.10）。
 
         仅接受 127.0.0.1 本机来源（面板服务本身只监听本机）；cookie 不上传不写日志。
         扩展推送的 at 为空（首次握手）时用当前时间。
+        v0.7.21：记录来源浏览器（EXT_SOURCE），供 _ext_tab 多扩展并存时过滤标签页。
         """
+        self._ext_source = str(source or "").strip()
         return self._assign_cookie(cookie, at, _COOKIE_SOURCE_EXTENSION)
 
-    def _receive_ext_tab(self, url: str, title: str, at: int) -> dict:
+    def _receive_ext_tab(self, url: str, title: str, at: int, source: str | None = None) -> dict:
         """接收浏览器扩展推送的当前活动标签页（URL + 标题），供精确感知。
 
         tab 数据仅本地使用：驱动 bili_now_watching 与同步 watcher 的精确感知，
-        不上传、不写日志。
+        不上传、不写日志。v0.7.21：记录来源浏览器（EXT_SOURCE），供 _ext_tab
+        在 Chrome/Edge/360 多扩展并存时按 cookie 来源过滤，避免互相覆盖。
         """
         ts = float(at) if at and at > 0 else time.time()
         self._ext_last_seen_ts = ts
         self._ext_tab_data = {
             "url": str(url or "").strip(),
             "title": str(title or "").strip(),
+            "source": str(source or "").strip(),
             "at": ts,
         }
         return {"ok": True, "detail": "已记录当前活动标签页"}
@@ -2372,11 +2376,20 @@ class BiliViewerPlugin(NekoPluginBase):
         return asr
 
     def _ext_tab(self) -> dict | None:
-        """返回新鲜（120s 内）的扩展标签页数据；无或过期返回 None。"""
+        """返回新鲜（120s 内）的扩展标签页数据；无或过期返回 None。
+
+        v0.7.21：tab 推送带 source 后，优先返回与最近一次 cookie 来源（绑定浏览器）
+        一致的标签页（避免 Chrome/Edge 多扩展并存时互相覆盖）；cookie 来源未知时
+        返回最新 tab。
+        """
         tab = getattr(self, "_ext_tab_data", None)
         if not tab:
             return None
         if time.time() - float(tab.get("at") or 0) > web_ui._EXT_ONLINE_WINDOW:
+            return None
+        src = getattr(self, "_ext_source", "") or ""
+        tab_src = str(tab.get("source") or "")
+        if src and tab_src and src != tab_src:
             return None
         return tab
 

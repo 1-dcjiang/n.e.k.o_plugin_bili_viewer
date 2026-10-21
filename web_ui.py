@@ -180,8 +180,15 @@ class _PanelHandler(BaseHTTPRequestHandler):
         if self.path.startswith("/api/extension-cookie"):
             body = self._read_json_body()
             try:
-                payload = dict(self.server.ext_fn(body.get("cookie", ""), int(body.get("at", 0) or 0)) or {})
-                _logger.info("ext cookie: cookie_len=%s at=%s ok=%s", len(str(body.get("cookie", "") or "")), body.get("at"), payload.get("ok"))
+                payload = dict(
+                    self.server.ext_fn(
+                        body.get("cookie", ""),
+                        int(body.get("at", 0) or 0),
+                        str(body.get("source", "") or ""),
+                    )
+                    or {}
+                )
+                _logger.info("ext cookie: cookie_len=%s at=%s source=%s ok=%s", len(str(body.get("cookie", "") or "")), body.get("at"), body.get("source"), payload.get("ok"))
             except Exception as exc:
                 payload = {"ok": False, "detail": f"扩展推送处理异常：{exc}"}
                 _logger.info("ext cookie: ERROR %s", exc)
@@ -195,10 +202,11 @@ class _PanelHandler(BaseHTTPRequestHandler):
                         str(body.get("url", "") or ""),
                         str(body.get("title", "") or ""),
                         int(body.get("at", 0) or 0),
+                        str(body.get("source", "") or ""),
                     )
                     or {}
                 )
-                _logger.info("ext tab: url=%s title=%s", str(body.get("url", "") or "")[:100], str(body.get("title", "") or "")[:40])
+                _logger.info("ext tab: url=%s title=%s source=%s", str(body.get("url", "") or "")[:100], str(body.get("title", "") or "")[:40], body.get("source"))
             except Exception as exc:
                 payload = {"ok": False, "detail": f"扩展标签页推送处理异常：{exc}"}
                 _logger.info("ext tab: ERROR %s", exc)

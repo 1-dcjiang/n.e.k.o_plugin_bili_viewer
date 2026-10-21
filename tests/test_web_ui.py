@@ -82,13 +82,14 @@ def test_panel_bind_endpoint(monkeypatch, tmp_path):
 
 def test_extension_cookie_endpoint(monkeypatch, tmp_path):
     received = []
-    panel, url = _start_panel(lambda cookie, at: (received.append((cookie, at)) or {"ok": True, "bound": True}))
+    panel, url = _start_panel(lambda cookie, at, source="": (received.append((cookie, at, source)) or {"ok": True, "bound": True}))
     try:
         body = {"cookie": "SESSDATA=abc; bili_jct=xyz", "at": int(time.time() * 1000), "source": "bili-bridge-extension"}
         result = _http_json(url + "api/extension-cookie", method="POST", body=body)
         assert result["ok"] is True
         assert received and received[0][0] == "SESSDATA=abc; bili_jct=xyz"
         assert received[0][1] == body["at"]
+        assert received[0][2] == "bili-bridge-extension"
     finally:
         panel._server.shutdown()
 
@@ -132,12 +133,12 @@ def test_panel_stop_releases_port(monkeypatch, tmp_path):
 
 
 def test_panel_extension_tab_endpoint(monkeypatch, tmp_path):
-    """扩展标签页端点：POST /api/extension-tab → tab_fn 回调收到 url/title/at。"""
+    """扩展标签页端点：POST /api/extension-tab → tab_fn 回调收到 url/title/at/source。"""
     web_ui = _web_ui()
     received = []
 
-    def tab_fn(url, title, at):
-        received.append((url, title, at))
+    def tab_fn(url, title, at, source=""):
+        received.append((url, title, at, source))
         return {"ok": True}
 
     panel = web_ui.BindPanel(
@@ -154,10 +155,10 @@ def test_panel_extension_tab_endpoint(monkeypatch, tmp_path):
         r = _http_json(
             f"http://127.0.0.1:{port}/api/extension-tab",
             "POST",
-            {"url": "https://www.bilibili.com/video/BV1GJ411x7h7", "title": "测试_哔哩哔哩", "at": 123456},
+            {"url": "https://www.bilibili.com/video/BV1GJ411x7h7", "title": "测试_哔哩哔哩", "at": 123456, "source": "bili-bridge-chrome-extension"},
         )
         assert r.get("ok") is True
-        assert received == [("https://www.bilibili.com/video/BV1GJ411x7h7", "测试_哔哩哔哩", 123456)]
+        assert received == [("https://www.bilibili.com/video/BV1GJ411x7h7", "测试_哔哩哔哩", 123456, "bili-bridge-chrome-extension")]
     finally:
         panel.stop()
 
@@ -167,7 +168,7 @@ def test_panel_post_origin_blocked(monkeypatch, tmp_path):
     web_ui = _web_ui()
     received = []
 
-    def tab_fn(url, title, at):
+    def tab_fn(url, title, at, source=""):
         received.append(url)
         return {"ok": True}
 
@@ -251,8 +252,8 @@ def test_extension_cookie_body_still_limited(monkeypatch, tmp_path):
     web_ui = _web_ui()
     received = []
 
-    def ext_fn(cookie, at):
-        received.append((cookie, at))
+    def ext_fn(cookie, at, source=""):
+        received.append((cookie, at, source))
         return {"ok": True, "bound": True}
 
     panel = web_ui.BindPanel(

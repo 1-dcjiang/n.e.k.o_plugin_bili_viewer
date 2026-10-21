@@ -134,8 +134,7 @@ function readBiliDom() {
 
 async function pushDom() {
   try {
-    if (!windowFocused) return;
-    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const tabs = await chrome.tabs.query({ active: true });
     const tab = tabs && tabs[0];
     if (!tab || !tab.id || !tab.url) return;
     if (tab.url.indexOf("bilibili.com") < 0) return;
@@ -156,6 +155,7 @@ async function pushDom() {
       progress: data.progress,
       duration: data.duration,
       danmaku: data.danmaku,
+      source: EXT_SOURCE,
       at: Date.now(),
     });
   } catch (e) { /* 页面不可注入/无权限：静默，靠 API 兜底 */ }
@@ -163,8 +163,7 @@ async function pushDom() {
 
 async function pushShot() {
   try {
-    if (!windowFocused) return;
-    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const tabs = await chrome.tabs.query({ active: true });
     const tab = tabs && tabs[0];
     if (!tab || !tab.id || !tab.url) return;
     if (tab.url.startsWith("chrome://") || tab.url.startsWith("edge://") || tab.url.startsWith("chrome-extension://")) return;
@@ -175,6 +174,7 @@ async function pushShot() {
       image: dataUrl,
       url: tab.url,
       title: tab.title || "",
+      source: EXT_SOURCE,
       at: Date.now(),
     });
   } catch (e) { /* 标签页不可截（后台/受保护页）：静默 */ }
@@ -182,12 +182,11 @@ async function pushShot() {
 
 async function pushTab() {
   try {
-    if (!windowFocused) return;
-    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const tabs = await chrome.tabs.query({ active: true });
     const tab = tabs && tabs[0];
     if (!tab || !tab.url || tab.url.startsWith("chrome://") || tab.url.startsWith("edge://")) return;
     await postJson("/api/extension-tab", {
-      url: tab.url, title: tab.title || "", at: Date.now(),
+      url: tab.url, title: tab.title || "", source: EXT_SOURCE, at: Date.now(),
     });
   } catch (e) { scheduleRetry(); }
 }
