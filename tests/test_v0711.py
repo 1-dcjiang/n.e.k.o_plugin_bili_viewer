@@ -1,6 +1,6 @@
-"""v0.7.11 新增能力测试：声音通道（_receive_ext_audio / bili_listen_audio）、
-网络层自动重试（_open_with_retry）、AUTH_FAILED 自愈（_wrap_auth）、
-三扩展包标识对称（manifest 0.2.5 + EXT_SOURCE + 新增 offscreen 文件）。
+"""v0.7.11/0.7.12 新增能力测试：声音通道（_receive_ext_audio / bili_listen_audio）、
+网络层自动重试（_open_with_retry）、AUTH_FAILED 自愈（_wrap_auth + 60s 冷却）、
+三扩展包标识对称（manifest 0.2.6 + EXT_SOURCE + 新增 offscreen 文件）。
 
 注意：测试全程不触网（urlopen 由 monkeypatch 接管；ASR 模型懒加载不触发）。
 """
@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import time
 
 import pytest
 
@@ -210,6 +211,29 @@ def test_wrap_auth_passthrough_other_errors():
     assert "自动尝试" not in res["output"]
 
 
+def test_wrap_auth_rebind_cooldown_60s():
+    """v0.7.12：同实例 60s 内重复 AUTH_FAILED 不反复触发后台重绑。"""
+    pkg = _pkg()
+    inst = _make_instance(pkg)
+    rebound = []
+
+    def fake_bg_bind():
+        rebound.append(True)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(inst, "_bg_bind", fake_bg_bind)
+    exc = pkg.bili.BiliError("登录态失效", "AUTH_FAILED")
+    inst._auth_rebind_at = 0.0
+    inst._wrap_auth(exc, "发送弹幕")   # 首次：触发
+    assert rebound == [True]
+    inst._wrap_auth(exc, "发送弹幕")   # 冷却内：不再触发
+    assert rebound == [True]
+    inst._auth_rebind_at = time.time() - 61.0
+    inst._wrap_auth(exc, "发送弹幕")   # 冷却过期：再次触发
+    assert rebound == [True, True]
+    monkeypatch.undo()
+
+
 # ══════════════ 三扩展包标识对称（真实文件字节级） ══════════════
 
 _EXT_ROOT = os.path.join(
@@ -231,7 +255,7 @@ def test_ext_package_has_all_six_files(pkg_name):
 @pytest.mark.parametrize("pkg_name", ["bili-bridge-chrome", "bili-bridge-edge", "bili-bridge-360"])
 def test_ext_manifest_has_audio_permissions(pkg_name):
     manifest = json.loads(_read_ext(pkg_name, "manifest.json"))
-    assert manifest["version"] == "0.2.5"
+    assert manifest["version"] == "0.2.6"
     assert "tabCapture" in manifest["permissions"]
     assert "offscreen" in manifest["permissions"]
 

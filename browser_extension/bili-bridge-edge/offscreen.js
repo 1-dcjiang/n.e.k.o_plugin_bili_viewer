@@ -17,9 +17,11 @@ let pcmBuffer = [];             // 累积的 Float32 采样
 let segmentTimer = null;
 let collecting = false;
 let seq = 0;
+let currentRate = SAMPLE_RATE;  // 实际生效的采样率（AudioContext 可能回退到 48k）
 
 function buildWavBase64(samples) {
   // Float32 → Int16 PCM wav（44 字节头 + 数据），返回 base64 字符串
+  const rate = currentRate || SAMPLE_RATE;
   const n = samples.length;
   const dataLen = n * 2;
   const buf = new ArrayBuffer(44 + dataLen);
@@ -32,8 +34,8 @@ function buildWavBase64(samples) {
   view.setUint32(16, 16, true);
   view.setUint16(20, 1, true);          // PCM
   view.setUint16(22, 1, true);          // mono
-  view.setUint32(24, SAMPLE_RATE, true);
-  view.setUint32(28, SAMPLE_RATE * 2, true);
+  view.setUint32(24, rate, true);
+  view.setUint32(28, rate * 2, true);
   view.setUint16(32, 2, true);
   view.setUint16(34, 16, true);
   writeStr(36, "data");
@@ -65,7 +67,7 @@ async function pushSegment(samples) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         audio: `data:audio/wav;base64,${b64}`,
-        sample_rate: SAMPLE_RATE,
+        sample_rate: currentRate || SAMPLE_RATE,
         seq: seq,
         at: Date.now(),
       }),
@@ -99,6 +101,9 @@ async function startCapture(streamId) {
     },
   });
   audioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
+  // 部分内核不支持 sampleRate 构造参数（回退到默认 48k）：记录实际值，wav 头与
+  // 推送字段都以实际采样率为准，避免 ASR 听到变速内容
+  currentRate = audioContext.sampleRate || SAMPLE_RATE;
   sourceNode = audioContext.createMediaStreamSource(stream);
   processorNode = audioContext.createScriptProcessor(4096, 1, 1);
   sourceNode.connect(processorNode);

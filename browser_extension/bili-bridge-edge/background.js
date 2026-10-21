@@ -1,4 +1,4 @@
-// B站接入桥 (Edge) v0.2.5 —— Microsoft Edge 专用版
+// B站接入桥 (Edge) v0.2.6 —— Microsoft Edge 专用版
 // 1) 把 B站登录态直连推送给本机 bili_viewer 插件（POST 127.0.0.1:8765，不上外网）；
 // 2) 把当前活动标签页（URL+标题）实时推送给插件，让 YUI 精确感知你在看什么；
 // 3) 在 B站 直播/视频页注入脚本读取页面实况（直播弹幕列表/在线人数/视频进度），
@@ -224,6 +224,12 @@ let audioEnabled = false;
 let audioStarting = false;
 
 async function ensureOffscreenDoc() {
+  // 内核过旧（Chromium < 109）无 offscreen API 时声音能力不可用，静默跳过不报错
+  if (typeof chrome.offscreen === "undefined") {
+    audioEnabled = false;
+    await chrome.storage.local.set({ [AUDIO_STATE_KEY]: false });
+    throw new Error("offscreen-unsupported");
+  }
   const existing = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
   if (existing && existing.length > 0) return;
   await chrome.offscreen.createDocument({

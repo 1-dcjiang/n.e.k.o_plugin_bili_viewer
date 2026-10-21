@@ -552,9 +552,14 @@ class BiliViewerPlugin(NekoPluginBase):
 
         浏览器扩展（B站接入桥）在线时会自动推送新登录态；CDP 可用时也会静默探测。
         触发后提示稍后重试，绝不让 YUI 卡死在过期凭证上。
+        复查优化（v0.7.12）：重绑冷却 60s，避免连环失败时反复触发后台探测。
         """
         if exc.code == "AUTH_FAILED":
-            self._bg_bind()
+            now = time.time()
+            last = float(getattr(self, "_auth_rebind_at", 0) or 0)
+            if now - last > 60.0:
+                self._auth_rebind_at = now
+                self._bg_bind()
             return {
                 "output": f"{action}失败：登录态失效，已自动尝试重新接入浏览器获取新登录态，请稍后重试。",
                 "is_error": True,
