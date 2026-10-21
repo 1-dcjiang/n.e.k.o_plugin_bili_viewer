@@ -1301,7 +1301,8 @@ def format_my_info(info: dict) -> str:
 # ══════════════ 关注 / 取消关注（v0.7.26） ══════════════
 
 def _resolve_uid(target: str, account: str = "yui") -> int:
-    """把用户输入解析为 B站 uid：纯数字按 uid；否则按昵称搜索（取第一个结果）。"""
+    """把用户输入解析为 B站 uid：纯数字按 uid；否则按昵称搜索并精确匹配（忽略大小写/空格，
+    严禁取搜索结果的近似第一个——防关注错人，v0.7.34）。"""
     target = (target or "").strip()
     if not target:
         raise BiliError("目标为空：请提供要关注/取关的用户 uid 或昵称", "EMPTY_TARGET")
