@@ -498,3 +498,25 @@ def test_sense_paths_forbid_completion_phrasing():
     assert "感知实况不是'任务'" in src
     # bili_see_screen 描述
     assert "看到/没看到都是感知实况，不是'任务'" in src
+
+
+# ══════════════ v0.7.17：web_ui 路由顺序回归（audio-state 不能被 audio 前缀吞掉） ══════════════
+
+
+def _web_ui_src() -> str:
+    import pathlib
+
+    p = pathlib.Path(__file__).resolve().parents[1] / "web_ui.py"
+    return p.read_text(encoding="utf-8")
+
+
+def test_web_ui_audio_state_routed_before_audio():
+    """/api/extension-audio-state 必须先于 /api/extension-audio 判断，
+    否则 audio-state 请求体（无 base64 声音字段）会被 audio 处理器吞掉，
+    插件永远收不到捕获开关状态（v0.7.17 现场实测：POST audio-state 返回
+    '声音数据为空或格式异常'）。"""
+    src = _web_ui_src()
+    idx_state = src.index('startswith("/api/extension-audio-state")')
+    idx_audio = src.index('startswith("/api/extension-audio")')
+    assert idx_state < idx_audio, "audio-state 路由判断必须排在 audio 之前"
+

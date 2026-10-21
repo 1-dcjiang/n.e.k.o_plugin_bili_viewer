@@ -213,20 +213,22 @@ class _PanelHandler(BaseHTTPRequestHandler):
                 payload = {"ok": False, "detail": f"扩展截屏推送处理异常：{exc}"}
             self._json(200, payload)
             return
-        if self.path.startswith("/api/extension-audio"):
-            body = self._read_json_body(_EXT_AUDIO_MAX_BYTES)
-            try:
-                payload = dict(self.server.audio_fn(body) or {"ok": False})
-            except Exception as exc:
-                payload = {"ok": False, "detail": f"扩展声音推送处理异常：{exc}"}
-            self._json(200, payload)
-            return
+        # 注意：/api/extension-audio-state 必须先于 /api/extension-audio 判断，
+        # 否则会被 audio 前缀匹配吞掉（audio-state 请求体没有 base64 声音字段）。
         if self.path.startswith("/api/extension-audio-state"):
             body = self._read_json_body(64 * 1024)
             try:
                 payload = dict(self.server.audio_state_fn(body) or {"ok": False})
             except Exception as exc:
                 payload = {"ok": False, "detail": f"扩展声音状态推送处理异常：{exc}"}
+            self._json(200, payload)
+            return
+        if self.path.startswith("/api/extension-audio"):
+            body = self._read_json_body(_EXT_AUDIO_MAX_BYTES)
+            try:
+                payload = dict(self.server.audio_fn(body) or {"ok": False})
+            except Exception as exc:
+                payload = {"ok": False, "detail": f"扩展声音推送处理异常：{exc}"}
             self._json(200, payload)
             return
         self._json(404, {"error": "not found"})
