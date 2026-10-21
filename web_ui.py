@@ -11,6 +11,8 @@ from __future__ import annotations
 import collections
 import json
 import logging
+import os
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -33,6 +35,69 @@ _EXT_DOM_MAX_BYTES = 2 * 1024 * 1024
 _DANMAKU_BUF: collections.deque = collections.deque(maxlen=120)  # (sender, text, at)
 _MENTION_NOTIFY: dict = {"at": 0.0, "text": "", "sender": ""}
 _YUI_NICKNAMES = ("yui小猫娘", "小猫娘", "yui")  # 弹幕 @ 匹配昵称（小号默认昵称）
+
+# v0.2.18：扩展推送的登录态按 uid 自保鲜（框架仅首次落盘，之后登录态变化时插件仍读旧文件
+# 会 AUTH_FAILED——"绑定账号老是掉"根因之一）。只保留 B站 请求必需的核心字段，稳定写入。
+_COOKIE_DIR = os.path.dirname(os.path.abspath(__file__))
+_COOKIE_FILES = ("main_cookie.txt", "yui_cookie.txt")
+_COOKIE_KEEP = ("SESSDATA=", "bili_jct=", "DedeUserID=", "DedeUserName=", "bili_ticket=", "buvid3=", "buvid4=")
+
+
+def _core_cookie(cookie: str) -> str:
+    """只保留 B站 身份/凭证核心字段，丢弃页面临时 cookie，避免不同页面推送的
+    字段集合差异互相污染 cookie 文件（日志里 816B/846B 跳变的来源）。"""
+    if not cookie:
+        return ""
+    kept = [p for p in cookie.split("; ") if p and any(p.startswith(k) for k in _COOKIE_KEEP)]
+    return "; ".join(kept)
+
+
+def _refresh_ext_cookie(cookie: str) -> dict:
+    """扩展推送的有效登录态按 uid 刷新对应 cookie 文件（原子写）。
+
+    命中规则：role.json 声明的角色 uid 优先；其次按现有 cookie 文件里 DedeUserID 匹配；
+    全新 uid（两个文件都没有）不动——留给框架首次落盘逻辑。返回 {"uid","file","updated"}。
+    """
+    if not cookie or "SESSDATA=" not in cookie:
+        return {"updated": False}
+    m = re.search(r"DedeUserID=(\d+)", cookie)
+    if not m:
+        return {"updated": False}
+    uid = m.group(1)
+    core = _core_cookie(cookie)
+    if not core or "SESSDATA=" not in core:
+        return {"updated": False}
+    target = None
+    try:
+        roles = json.load(open(os.path.join(_COOKIE_DIR, "role.json"), encoding="utf-8")) or {}
+        if str(roles.get(uid)) == "yui":
+            target = "yui_cookie.txt"
+        elif str(roles.get(uid)) == "main":
+            target = "main_cookie.txt"
+    except (OSError, ValueError):
+        roles = {}
+    if not target:
+        for fn in _COOKIE_FILES:
+            p = os.path.join(_COOKIE_DIR, fn)
+            try:
+                if f"DedeUserID={uid}" in open(p, encoding="utf-8", errors="replace").read():
+                    target = fn
+                    break
+            except OSError:
+                continue
+    if not target:
+        return {"updated": False}
+    dst = os.path.join(_COOKIE_DIR, target)
+    tmp = dst + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(core)
+        os.replace(tmp, dst)
+        _logger.info("ext cookie refreshed: uid=%s file=%s len=%d", uid, target, len(core))
+        return {"updated": True, "uid": uid, "file": target}
+    except OSError as exc:
+        _logger.warning("ext cookie refresh failed: %s", exc)
+        return {"updated": False}
 
 
 def get_recent_danmaku(limit: int = 40) -> list:
@@ -201,6 +266,7 @@ class _PanelHandler(BaseHTTPRequestHandler):
         if self.path.startswith("/api/extension-cookie"):
             body = self._read_json_body()
             try:
+                _refresh_ext_cookie(body.get("cookie", ""))  # v0.2.18 插件侧登录态自保鲜
                 payload = dict(
                     self.server.ext_fn(
                         body.get("cookie", ""),
