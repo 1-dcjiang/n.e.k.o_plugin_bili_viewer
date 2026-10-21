@@ -913,19 +913,25 @@ class BiliViewerPlugin(NekoPluginBase):
     @llm_tool(
         name="bili_my_info",
         description=(
-            "查看当前 B站账号（BILI_COOKIE）信息。何时用：用户说'看看我的B站账号/我多少粉丝/我是大会员吗'时。"
-            "返回昵称、uid、等级、硬币、大会员状态、关注与粉丝数。需要配置 BILI_COOKIE 环境变量。"
+            "查看 B站账号信息。何时用：用户说'看看我的B站账号/我多少粉丝/我是大会员吗'时。"
+            "参数 account：yui=YUI 独立小号（默认）/ main=用户主账号。"
+            "账号规则：默认 YUI 独立小号；小号未配置自动回退主账号。"
+            "返回昵称、uid、等级、硬币、大会员状态、关注与粉丝数。需要对应账号已配置 Cookie。"
         ),
         parameters={
             "type": "object",
-            "properties": {},
+            "properties": {
+                "account": {"type": "string", "description": "yui=YUI 独立小号（默认）/ main=用户主账号"},
+            },
             "required": [],
         },
         timeout=20.0,
     )
-    async def bili_my_info(self, **_):
+    async def bili_my_info(self, *, account: str = "", **_):
+        params = _.get("parameters") or {}
+        account = self._resolve_account(account or params.get("account") or "")
         try:
-            info = bili.my_info()
+            info = bili.my_info(account)
         except bili.BiliError as exc:
             return _wrap_err(exc)
         return {"output": bili.format_my_info(info), "is_error": False, "account": info}
@@ -933,22 +939,25 @@ class BiliViewerPlugin(NekoPluginBase):
     @llm_tool(
         name="bili_my_videos",
         description=(
-            "查看当前 B站账号（BILI_COOKIE）的投稿稿件列表。何时用：用户说'看看我自己的稿件/我的投稿'时。"
-            "参数 page：页码；limit：条数（默认 10）。返回标题、状态（公开/审核中）、播放量、时长与 BV 号。"
-            "需要配置 BILI_COOKIE 环境变量。"
+            "查看 B站账号的投稿稿件列表。何时用：用户说'看看我的稿件/我的投稿'时。"
+            "参数 page：页码；limit：条数（默认 10）；account：yui=YUI 独立小号（默认）/ main=用户主账号。"
+            "账号规则：默认 YUI 独立小号；小号未配置自动回退主账号。"
+            "返回标题、状态（公开/审核中）、播放量、时长与 BV 号。需要对应账号已配置 Cookie。"
         ),
         parameters={
             "type": "object",
             "properties": {
                 "page": {"type": "integer", "description": "页码，默认 1"},
                 "limit": {"type": "integer", "description": "条数，默认 10"},
+                "account": {"type": "string", "description": "yui=YUI 独立小号（默认）/ main=用户主账号"},
             },
             "required": [],
         },
         timeout=25.0,
     )
-    async def bili_my_videos(self, *, page: int = 1, limit: int = 0, **_):
+    async def bili_my_videos(self, *, page: int = 1, limit: int = 0, account: str = "", **_):
         params = _.get("parameters") or {}
+        account = self._resolve_account(account or params.get("account") or "")
         try:
             page = int(page if page else params.get("page") or 1)
             n = int(limit if limit else params.get("limit") or 10)
@@ -957,18 +966,31 @@ class BiliViewerPlugin(NekoPluginBase):
         n = max(1, min(n, 30))
         page = max(1, page)
         try:
-            videos = bili.my_videos(page=page, limit=n)
+            videos = bili.my_videos(page=page, limit=n, account=account)
         except bili.BiliError as exc:
             return _wrap_err(exc)
-        return {"output": f"我的稿件（第 {page} 页）：\n" + bili.format_my_videos(videos), "is_error": False, "videos": videos}
+        return {"output": f"{'小号' if account == 'yui' else '主账号'}的稿件（第 {page} 页）：\n" + bili.format_my_videos(videos), "is_error": False, "videos": videos}
+
+    # ══════════ 账号解析（v0.7.9 复查优化） ══════════
+    # 未说明时默认操作 YUI 小号；小号未配置才回退主账号。
+    # 所有写操作入口（直播/视频弹幕、评论、改稿件）统一走本 helper，杜绝漏网入口。
+
+    def _resolve_account(self, account: str) -> str:
+        """账号归一：account 不在 main/yui 时默认小号（未配置回退主账号）。"""
+        account = (account or "").strip()
+        if account not in ("main", "yui"):
+            account = "yui" if bili._cookie("yui") else "main"
+        return account
 
     @llm_tool(
         name="bili_edit_video",
         description=(
-            "修改自己 B站稿件的信息（标题/简介/标签）。何时用：用户明确要求'改我的视频标题/简介/标签'时。"
-            "这是写操作：只能修改当前账号（BILI_COOKIE）自己的稿件，服务端校验所有权。"
-            "参数 bvid：要修改的 BV 号；title/desc/tag：要更新的内容（不传则保留原值）。"
-            "需要配置 BILI_COOKIE（含 bili_jct）环境变量，且仅在用户明确确认后调用。"
+            "修改 B站稿件的信息（标题/简介/标签）。何时用：用户明确要求'改视频标题/简介/标签'时。"
+            "这是写操作：只能修改指定账号自己的稿件，服务端校验所有权。"
+            "参数 bvid：要修改的 BV 号；title/desc/tag：要更新的内容（不传则保留原值）；"
+            "account：yui=YUI 独立小号（默认）/ main=用户主账号。"
+            "账号规则：默认 YUI 独立小号；小号未配置自动回退主账号；"
+            "需要对应账号已配置 Cookie（含 bili_jct），且仅在用户明确确认后调用。"
         ),
         parameters={
             "type": "object",
@@ -977,14 +999,16 @@ class BiliViewerPlugin(NekoPluginBase):
                 "title": {"type": "string", "description": "新标题（可选）"},
                 "desc": {"type": "string", "description": "新简介（可选）"},
                 "tag": {"type": "string", "description": "新标签，逗号分隔（可选）"},
+                "account": {"type": "string", "description": "yui=YUI 独立小号（默认）/ main=用户主账号"},
             },
             "required": ["bvid"],
         },
         timeout=30.0,
     )
-    async def bili_edit_video(self, *, bvid: str = "", title: str = "", desc: str = "", tag: str = "", **_):
+    async def bili_edit_video(self, *, bvid: str = "", title: str = "", desc: str = "", tag: str = "", account: str = "", **_):
         params = _.get("parameters") or {}
         bvid = (bvid or params.get("bvid") or "").strip()
+        account = self._resolve_account(account or params.get("account") or "")
         if not bvid:
             return {"output": "请提供要修改的稿件 BV 号。", "is_error": True, "error": "NO_BVID"}
         try:
@@ -993,6 +1017,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 title=(title or params.get("title") or None),
                 desc=(desc or params.get("desc") or None),
                 tag=(tag or params.get("tag") or None),
+                account=account,
             )
         except bili.BiliError as exc:
             return _wrap_err(exc)
@@ -1153,9 +1178,7 @@ class BiliViewerPlugin(NekoPluginBase):
         params = _.get("parameters") or {}
         room = (room or params.get("room") or "").strip()
         text = (text or params.get("text") or "").strip()
-        account = (account or params.get("account") or "").strip()
-        if account not in ("main", "yui"):
-            account = "yui" if bili._cookie("yui") else "main"  # 默认小号；未配置小号回退主账号
+        account = self._resolve_account(account or params.get("account") or "")
         tab = self._ext_tab()
         page_room = None
         if tab:
@@ -1232,9 +1255,7 @@ class BiliViewerPlugin(NekoPluginBase):
         params = _.get("parameters") or {}
         bvid = (bvid or params.get("bvid") or "").strip()
         text = (text or params.get("text") or "").strip()
-        account = (account or params.get("account") or "").strip()
-        if account not in ("main", "yui"):
-            account = "yui" if bili._cookie("yui") else "main"  # 默认小号；未配置小号回退主账号
+        account = self._resolve_account(account or params.get("account") or "")
         try:
             progress = int(progress if progress else params.get("progress") or 0)
         except (TypeError, ValueError):
@@ -1314,9 +1335,7 @@ class BiliViewerPlugin(NekoPluginBase):
         target = (target or params.get("target") or "").strip()
         text = (text or params.get("text") or "").strip()
         parent = (parent or params.get("parent") or "").strip()
-        account = (account or params.get("account") or "").strip()
-        if account not in ("main", "yui"):
-            account = "yui" if bili._cookie("yui") else "main"
+        account = self._resolve_account(account or params.get("account") or "")
         if not text:
             return {"output": "请提供评论内容。", "is_error": True, "error": "EMPTY_MSG"}
         # 解析评论目标：显式 target 优先，其次感知当前正在看的 B站内容

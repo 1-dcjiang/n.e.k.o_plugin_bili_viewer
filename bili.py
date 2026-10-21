@@ -1112,8 +1112,8 @@ def _http_post(url: str, form: dict, timeout: float = _TIMEOUT, account: str = "
     return data
 
 
-def my_info(account: str = "main") -> dict:
-    """当前账号信息：昵称/uid/等级/硬币/大会员。account=main 主账号 / yui 小号。"""
+def my_info(account: str = "yui") -> dict:
+    """指定账号信息：昵称/uid/等级/硬币/大会员。account=main 主账号 / yui 小号（默认）。"""
     _require_login(account)
     data = (_http_get(_API + "/x/web-interface/nav", account=account)).get("data") or {}
     if not data.get("mid"):
@@ -1140,13 +1140,13 @@ def format_my_info(info: dict) -> str:
     )
 
 
-def my_videos(page: int = 1, limit: int = 10) -> list[dict]:
-    """当前账号的投稿列表（nav 取 uid → arc/search，需 BILI_COOKIE）。
+def my_videos(page: int = 1, limit: int = 10, account: str = "yui") -> list[dict]:
+    """指定账号的投稿列表（nav 取 uid → arc/search）。account=main 主账号 / yui 小号（默认）。
 
     注：创作中心 /x/vu/web/video/list 接口已失效（404），改用空间投稿接口。
     """
-    _require_login()
-    mid = my_info()["mid"]
+    _require_login(account)
+    mid = my_info(account)["mid"]
     try:
         data = _wbi_get(
             _API + "/x/space/wbi/arc/search",
@@ -1154,7 +1154,7 @@ def my_videos(page: int = 1, limit: int = 10) -> list[dict]:
             timeout=15,
         ).get("data") or {}
     except BiliError as exc:
-        raise BiliError("稿件列表获取失败（当前网络可能被B站风控；请重新配置有效的 BILI_COOKIE）：" + exc.message, "MY_VIDEOS") from exc
+        raise BiliError("稿件列表获取失败（当前网络可能被B站风控；请重新配置对应账号的 Cookie）：" + exc.message, "MY_VIDEOS") from exc
     vlist = ((data.get("list") or {}).get("vlist")) or []
     if not vlist:
         raise BiliError("暂无投稿或列表为空", "NO_VIDEOS")
@@ -1184,12 +1184,12 @@ def format_my_videos(videos: list[dict]) -> str:
     return "\n".join(lines) if lines else "暂无投稿"
 
 
-def edit_video(bvid: str, title: str | None = None, desc: str | None = None, tag: str | None = None) -> dict:
-    """修改自己稿件的信息（标题/简介/标签）。需 BILI_COOKIE 登录态。
+def edit_video(bvid: str, title: str | None = None, desc: str | None = None, tag: str | None = None, account: str = "yui") -> dict:
+    """修改自己稿件的信息（标题/简介/标签）。account=main 主账号 / yui 小号（默认）。
 
-    只允许修改属于当前账号的稿件；服务端会校验所有权。
+    只允许修改属于指定账号的稿件；服务端会校验所有权。
     """
-    _require_login()
+    _require_login(account)
     bvid = _parse_bvid(bvid)
     info = video_info(bvid)
     aid = info.get("aid")
@@ -1198,7 +1198,7 @@ def edit_video(bvid: str, title: str | None = None, desc: str | None = None, tag
     form = {
         "aid": int(aid),
         "vfe": "1",
-        "csrf": _csrf(),
+        "csrf": _csrf(account),
         "title": (title if title is not None else info["title"]).strip(),
         "desc": (desc if desc is not None else info["desc"]).strip(),
         "tag": (tag if tag is not None else ",".join(info["tags"])).strip(),
@@ -1214,7 +1214,7 @@ def edit_video(bvid: str, title: str | None = None, desc: str | None = None, tag
     except BiliError:
         pass
     try:
-        _http_post(_API + "/x/vu/edit", form, query=query)
+        _http_post(_API + "/x/vu/edit", form, account=account, query=query)
     except BiliError as exc:
         raise BiliError("稿件修改失败：" + exc.message, "EDIT_FAILED") from exc
     return {"bvid": bvid, "title": form["title"], "desc": form["desc"], "tag": form["tag"], "ok": True}

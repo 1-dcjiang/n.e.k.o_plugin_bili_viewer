@@ -185,7 +185,7 @@ def test_edit_video_wbi_signed_query(monkeypatch) -> None:
     """v0.7.6 复查修复：/x/vu/edit 必须带 wbi 签名 query（wts+w_rid），否则 -352。"""
     from plugin.plugins.bili_viewer import bili
 
-    monkeypatch.setenv("BILI_COOKIE", "SESSDATA=m; bili_jct=mj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=m; bili_jct=mj")
     calls: list[tuple[str, dict, dict]] = []
 
     def fake_post(url, form, timeout=12.0, account="main", query=None):
@@ -202,6 +202,44 @@ def test_edit_video_wbi_signed_query(monkeypatch) -> None:
     assert "/x/vu/edit" in url
     assert form["title"] == "新标题"
     assert "wts" in query and "w_rid" in query
+
+
+def test_edit_video_default_account_uses_yui(monkeypatch) -> None:
+    """v0.7.9 复查优化：未指定账号时 edit_video 默认走 YUI 小号。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_COOKIE", "SESSDATA=m; bili_jct=mj")
+    calls: list[tuple[str, str]] = []
+
+    def fake_post(url, form, timeout=12.0, account="main", query=None):
+        calls.append((url, account))
+        return {"code": 0, "data": {}}
+
+    monkeypatch.setattr(bili, "_http_post", fake_post)
+    monkeypatch.setattr(bili, "video_info", lambda bvid: {"aid": 123, "title": "t", "desc": "", "tags": ["a"]})
+    monkeypatch.setattr(bili, "_get_mixin_key", lambda: "m" * 32)
+    r = bili.edit_video("BV1xx411c7mD", title="新标题")
+    assert r["ok"] is True
+    assert calls[0][1] == "yui"  # 默认小号
+
+
+def test_my_info_default_account_uses_yui(monkeypatch) -> None:
+    """v0.7.9 复查优化：未指定账号时账号信息查询默认走 YUI 小号。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_COOKIE", "SESSDATA=m; bili_jct=mj")
+    seen: list[str] = []
+
+    def fake_get(url, params=None, timeout=12.0, account="main"):
+        seen.append(account)
+        return {"code": 0, "data": {"mid": 9, "uname": "yui", "level_info": {"current_level": 5}, "vipStatus": 1, "money": 1}}
+
+    monkeypatch.setattr(bili, "_http_get", fake_get)
+    info = bili.my_info()
+    assert seen == ["yui"]  # 默认小号
+    assert info["mid"] == 9
 
 
 def test_live_send_requires_cookie(monkeypatch) -> None:
