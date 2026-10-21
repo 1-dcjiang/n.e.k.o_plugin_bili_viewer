@@ -330,6 +330,16 @@ function ensureAudioSession() {
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  // v0.2.17：content script 采集的直播弹幕 → 转发本机插件（弹幕实时可见 + @检测）
+  if (msg && msg.type === "danmaku-item") {
+    postJson("/api/extension-danmaku", {
+      room: String(msg.room || ""),
+      sender: String(msg.sender || ""),
+      text: String(msg.text || ""),
+      at: Number(msg.at || 0),
+    }).catch(() => {});
+    return false;
+  }
   // offscreen 上报采集状态（含 AudioContext 状态/错误诊断，v0.2.14）
   if (msg && msg.type === "audio-state") {
     if (msg.running) lastOffscreenBeat = Date.now();

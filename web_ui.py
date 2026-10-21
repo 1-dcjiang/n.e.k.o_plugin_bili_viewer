@@ -8,9 +8,11 @@
 
 from __future__ import annotations
 
+import collections
 import json
 import logging
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 _logger = logging.getLogger("N.E.K.O.Plugin_bili_viewer.plugin.bili_viewer")
@@ -26,6 +28,25 @@ _PANEL_URL = f"http://{_PANEL_HOST}:{_PANEL_PORT}/"
 _EXT_SHOT_MAX_BYTES = 16 * 1024 * 1024
 _EXT_AUDIO_MAX_BYTES = 8 * 1024 * 1024  # 扩展声音分段（wav base64）上限：8s/16k/16bit 约 256KB，放宽防丢段
 _EXT_DOM_MAX_BYTES = 2 * 1024 * 1024
+
+# v0.2.17：扩展采集的直播弹幕缓冲 + @小号通知（YUI 实时看到弹幕、被@时提醒）
+_DANMAKU_BUF: collections.deque = collections.deque(maxlen=120)  # (sender, text, at)
+_MENTION_NOTIFY: dict = {"at": 0.0, "text": "", "sender": ""}
+_YUI_NICKNAMES = ("yui小猫娘", "小猫娘", "yui")  # 弹幕 @ 匹配昵称（小号默认昵称）
+
+
+def get_recent_danmaku(limit: int = 40) -> list:
+    """最近弹幕（供 __init__.py 实时读取）：[(sender, text, at), ...]"""
+    return list(_DANMAKU_BUF)[-limit:]
+
+
+def get_mention_notify(clear: bool = True) -> dict:
+    """最近一条 @小号 的通知（供感知循环读取后消费）"""
+    info = dict(_MENTION_NOTIFY)
+    if clear:
+        _MENTION_NOTIFY["text"] = ""
+        _MENTION_NOTIFY["sender"] = ""
+    return info
 
 _PAGE = """<!DOCTYPE html>
 <html lang="zh-CN">
@@ -256,6 +277,28 @@ class _PanelHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 payload = {"ok": False, "detail": f"扩展声音推送处理异常：{exc}"}
                 _logger.info("ext audio: ERROR %s", exc)
+            self._json(200, payload)
+            return
+        if self.path.startswith("/api/extension-danmaku"):
+            body = self._read_json_body(64 * 1024)
+            try:
+                text = str(body.get("text", "") or "")[:200]
+                sender = str(body.get("sender", "") or "")[:40]
+                room = str(body.get("room", "") or "")[:20]
+                if text:
+                    _DANMAKU_BUF.append((sender, text, int(body.get("at") or 0) or time.time()))
+                    low = text.lower()
+                    if any(n in low for n in _YUI_NICKNAMES):
+                        _MENTION_NOTIFY["at"] = time.time()
+                        _MENTION_NOTIFY["text"] = text
+                        _MENTION_NOTIFY["sender"] = sender
+                        _logger.info("ext danmaku: MENTION sender=%s room=%s text=%s", sender, room, text)
+                    else:
+                        _logger.info("ext danmaku: room=%s sender=%s text=%s", room, sender, text)
+                payload = {"ok": True}
+            except Exception as exc:
+                payload = {"ok": False, "detail": f"扩展弹幕推送处理异常：{exc}"}
+                _logger.info("ext danmaku: ERROR %s", exc)
             self._json(200, payload)
             return
         self._json(404, {"error": "not found"})

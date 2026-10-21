@@ -304,6 +304,24 @@ class BiliViewerPlugin(NekoPluginBase):
                 self._yui_autonomy_tick(parsed)
             except Exception:
                 pass
+            # v0.2.17：直播弹幕 @小号 提醒——弹幕区有人@小号时静默注入感知，
+            # YUI 下次自然对话会回应对方（不主动弹气泡、不打断玩家）
+            try:
+                import web_ui as _web3
+                mention = _web3.get_mention_notify(clear=False)
+                if mention.get("text") and time.time() - mention.get("at", 0) < 30:
+                    self.ctx.push_message(
+                        visibility=[],
+                        ai_behavior="read",
+                        parts=[{"type": "text", "text": f"直播间弹幕里有人@了小号：『{mention['sender']}』说『{mention['text']}』。若合适可以礼貌回应对方。"}],
+                        source=self.plugin_id,
+                        coalesce_key="danmaku_mention",
+                        priority=0,
+                        metadata={"danmaku_mention": True},
+                    )
+                    _web3.get_mention_notify(clear=True)
+            except Exception:
+                pass
             fingerprint = _window_fingerprint(parsed)
             if fingerprint != candidate:
                 candidate, candidate_count = fingerprint, 0
@@ -846,9 +864,10 @@ class BiliViewerPlugin(NekoPluginBase):
     @llm_tool(
         name="bili_live_danmaku",
         description=(
-            "采集 B站直播间的实时弹幕。何时用：用户说'看看直播间弹幕/现在弹幕在刷什么'时。"
+            "采集 B站直播间的实时弹幕。何时用：用户说'看看直播间弹幕/现在弹幕在刷什么/有没有人@我'时。"
             "参数 room：房间号或链接；duration：采集秒数（默认 8，最大 30）。"
-            "连接弹幕服务器匿名采集数秒，返回弹幕文本与发送者。"
+            "优先返回浏览器扩展实时采集的弹幕（能看到@小号的提醒），扩展离线时回退连接弹幕服务器匿名采集数秒。"
+            "若返回结果标注'有人@了小号'，说明弹幕里有人提及 YUI 小号，应当主动回应对方。"
         ),
         parameters={
             "type": "object",
@@ -870,6 +889,24 @@ class BiliViewerPlugin(NekoPluginBase):
         duration = max(1, min(duration, 30))  # 与 bili.live_danmaku 内部上限一致
         if not room:
             return {"output": "请提供直播房间号或直播间链接。", "is_error": True, "error": "NO_ROOM"}
+        # v0.2.17：优先读浏览器扩展采集的实时弹幕（含@检测），扩展离线时回退匿名采集
+        ext_items = []
+        try:
+            import web_ui as _web
+            ext_items = _web.get_recent_danmaku(limit=40)
+        except Exception:
+            ext_items = []
+        if ext_items:
+            lines = [f"{i}. {s or '观众'}：{t}" for i, (s, t, _a) in enumerate(ext_items, 1)]
+            note = ""
+            try:
+                import web_ui as _web2
+                mention = _web2.get_mention_notify(clear=True)
+                if mention.get("text"):
+                    note = f"\n（有人@了小号：{mention['sender']}说『{mention['text']}』——应当主动回应对方）"
+            except Exception:
+                pass
+            return {"output": f"直播间实时弹幕（最近 {len(ext_items)} 条）：\n" + "\n".join(lines[-25:]) + note, "is_error": False, "danmakus": [{"user": s, "text": t} for s, t, _a in ext_items]}
         try:
             items = bili.live_danmaku(room, duration=duration)
         except bili.BiliError as exc:
