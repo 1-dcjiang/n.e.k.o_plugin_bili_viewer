@@ -89,7 +89,9 @@ function flushSegment() {
 async function startCapture(streamId) {
   stopCapture();
   collecting = true;
-  stream = await navigator.mediaDevices.getUserMedia({
+  let stream = null;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
     audio: {
       mandatory: {
         chromeMediaSource: "tab",
@@ -97,6 +99,11 @@ async function startCapture(streamId) {
       },
     },
   });
+  } catch (e) {
+    // v0.2.14 诊断：拿不到 tabCapture 流（streamId 无效/页面未允许）上报插件日志
+    chrome.runtime.sendMessage({ type: "audio-state", running: false, ctx_state: "no-stream", ctx_err: "getUserMedia:" + String((e && e.message) || e) }).catch(() => {});
+    throw e;
+  }
   // v0.2.12 回放修复：tabCapture 捕获会静音源标签页，必须把流再输出给用户，
   // 否则"本来的声音消失"。用 audio 元素直连回放（低延迟、不依赖 AudioContext 状态）。
   if (!audioEl) {
@@ -170,7 +177,11 @@ function stopCapture() {
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg && msg.type === "start-audio" && msg.streamId) {
-    startCapture(msg.streamId).catch(() => stopCapture());
+    startCapture(msg.streamId).catch((e) => {
+      // v0.2.14 诊断：捕获启动失败上报到插件日志（此前静默吞掉，音频 0 推送无从定位）
+      chrome.runtime.sendMessage({ type: "audio-state", running: false, ctx_state: (audioContext && audioContext.state) || "none", ctx_err: "startCapture:" + String((e && e.message) || e) }).catch(() => {});
+      stopCapture();
+    });
     return true;
   }
   if (msg && msg.type === "stop-audio") {

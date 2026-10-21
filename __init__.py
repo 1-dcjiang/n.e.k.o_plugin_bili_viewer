@@ -2300,8 +2300,13 @@ class BiliViewerPlugin(NekoPluginBase):
     def _receive_ext_audio_state(self, body: dict) -> dict:
         """扩展推送的声音捕获开关状态（诊断用）：记录 enabled 与时间，供面板/YUI 判断链路。"""
         enabled = bool(body.get("enabled"))
-        self._ext_audio_state = {"enabled": enabled, "at": float(body.get("at") or 0) or time.time()}
-        _logger.info("ext audio state: enabled=%s", enabled)
+        state = {"enabled": enabled, "at": float(body.get("at") or 0) or time.time()}
+        if body.get("ctx_state"):
+            state["ctx_state"] = str(body["ctx_state"])[:32]
+        if body.get("ctx_err"):
+            state["ctx_err"] = str(body["ctx_err"])[:300]
+        self._ext_audio_state = state
+        _logger.info("ext audio state: enabled=%s ctx_state=%s ctx_err=%s", enabled, state.get("ctx_state"), state.get("ctx_err", "")[:200])
         return {"ok": True, "detail": "已记录声音捕获状态"}
 
     def _find_asr_python(self) -> str | None:

@@ -284,7 +284,8 @@ async function startAudioCapture() {
     await chrome.storage.local.set({ [AUDIO_STATE_KEY]: true });
     pushAudioState();
   } catch (e) {
-    // B站 页未激活等场景：保持开关意图，等标签切换后再试
+    // v0.2.14 诊断：捕获启动链路任何一步失败都上报插件日志（此前静默吞掉）
+    try { pushAudioState({ ctx_err: "startAudioCapture:" + String((e && e.message) || e) }); } catch (_) {}
   } finally {
     audioStarting = false;
   }

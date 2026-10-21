@@ -238,7 +238,11 @@ class _PanelHandler(BaseHTTPRequestHandler):
             body = self._read_json_body(64 * 1024)
             try:
                 payload = dict(self.server.audio_state_fn(body) or {"ok": False})
-                _logger.info("ext audio-state: enabled=%s at=%s ok=%s", body.get("enabled"), body.get("at"), payload.get("ok"))
+                _logger.info(
+                    "ext audio-state: enabled=%s at=%s ok=%s ctx_state=%s ctx_err=%s",
+                    body.get("enabled"), body.get("at"), payload.get("ok"),
+                    body.get("ctx_state"), str(body.get("ctx_err") or "")[:200],
+                )
             except Exception as exc:
                 payload = {"ok": False, "detail": f"扩展声音状态推送处理异常：{exc}"}
                 _logger.info("ext audio-state: ERROR %s", exc)
