@@ -87,7 +87,7 @@ function flushSegment() {
   pushSegment(samples);
 }
 
-async function startCapture(streamId) {
+async function startCapture(streamId, muted) {
   stopCapture();
   collecting = true;
   let stream = null;
@@ -107,13 +107,20 @@ async function startCapture(streamId) {
   }
   // v0.2.12 回放修复：tabCapture 捕获会静音源标签页，必须把流再输出给用户，
   // 否则"本来的声音消失"。用 audio 元素直连回放（低延迟、不依赖 AudioContext 状态）。
-  if (!audioEl) {
-    audioEl = new Audio();
-    audioEl.autoplay = true;
-    audioEl.volume = 1.0;
+  // v0.2.19：仅当页面确实被静音（muted=true）时才回放；页面未静音时回放=双重声音/回声，
+  // 此时停用 audioEl，用户听到的页面原声不受影响，分析链路照常采集。
+  if (muted !== false) {
+    if (!audioEl) {
+      audioEl = new Audio();
+      audioEl.autoplay = true;
+      audioEl.volume = 1.0;
+    }
+    audioEl.srcObject = stream;
+    audioEl.play().catch(() => {});
+  } else if (audioEl) {
+    audioEl.pause();
+    audioEl.srcObject = null;
   }
-  audioEl.srcObject = stream;
-  audioEl.play().catch(() => {});
   audioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
   // Chrome 自动播放策略：非用户手势下新建的 AudioContext 默认 suspended，
   // 不 resume 则音频图永远不产出数据（0 音频推送）——必须显式启动。
@@ -184,7 +191,7 @@ function stopCapture() {
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg && msg.type === "start-audio" && msg.streamId) {
-    startCapture(msg.streamId).catch((e) => {
+    startCapture(msg.streamId, msg.muted).catch((e) => {
       // v0.2.14 诊断：捕获启动失败上报到插件日志（此前静默吞掉，音频 0 推送无从定位）
       chrome.runtime.sendMessage({ type: "audio-state", running: false, ctx_state: (audioContext && audioContext.state) || "none", ctx_err: "startCapture:" + String((e && e.message) || e) }).catch(() => {});
       stopCapture();

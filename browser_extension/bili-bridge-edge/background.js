@@ -14,7 +14,7 @@
 // 标签页切换/URL 变化（tabs 监听防抖）；alarms 30 秒兜底（MV3 SW 休眠时由 alarm 唤醒）；
 // 推送失败 4 秒快速重试（插件重启后 5 秒内即可恢复感知，不再等下一轮 alarm）。
 
-const EXT_SOURCE = "bili-bridge-chrome-extension";
+const EXT_SOURCE = "bili-bridge-edge-extension";
 const PANEL_URL = "http://127.0.0.1:8765";
 const AUDIO_STATE_KEY = "audio_capture_enabled";
 
@@ -287,7 +287,9 @@ async function startAudioCapture() {
       return;
     }
     const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
-    await chrome.runtime.sendMessage({ type: "start-audio", streamId: streamId });
+    // v0.2.19：回放只在页面被 tabCapture 静音时才启用（否则页面原声 + 回放 = 双音乐/回声）
+    const muted = !!(tab.mutedInfo && tab.mutedInfo.muted);
+    await chrome.runtime.sendMessage({ type: "start-audio", streamId: streamId, muted: muted });
     audioEnabled = true;
     await chrome.storage.local.set({ [AUDIO_STATE_KEY]: true });
     pushAudioState();

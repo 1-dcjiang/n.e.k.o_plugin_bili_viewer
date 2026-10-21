@@ -1318,7 +1318,23 @@ def _resolve_uid(target: str, account: str = "yui") -> int:
     result = ((data.get("data") or {}).get("result")) or []
     if not result:
         raise BiliError(f"未找到昵称「{target}」对应的用户", "USER_NOT_FOUND")
-    mid = result[0].get("mid")
+    # v0.7.34：昵称必须精确匹配——搜索结果的第一个可能是相似账号/仿号/同名者，
+    # 盲目取第一个会关注错人（用户已实测踩坑）。精确命中优先；其次忽略大小写与空格的
+    # 等价匹配；两者都没有时直接报错，严禁选取近似结果自行关注。
+    exact = [r for r in result if str(r.get("uname", "")).strip() == target]
+    if not exact:
+        norm = target.lower().replace(" ", "")
+        fuzzy = [r for r in result if str(r.get("uname", "")).strip().lower().replace(" ", "") == norm]
+    else:
+        fuzzy = []
+    pick = (exact or fuzzy or [])[0] if (exact or fuzzy) else None
+    if pick is None:
+        raise BiliError(
+            f"未找到昵称「{target}」完全匹配的用户（为避免关注错人请核对昵称后重试；"
+            f"相近结果：{[str(r.get('uname', '')) for r in result[:3]]}）",
+            "USER_AMBIGUOUS",
+        )
+    mid = pick.get("mid")
     if not mid:
         raise BiliError(f"昵称「{target}」解析失败（搜索结果缺少 uid）", "USER_NOT_FOUND")
     return int(mid)

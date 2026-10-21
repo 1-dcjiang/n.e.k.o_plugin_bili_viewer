@@ -1600,6 +1600,10 @@ class BiliViewerPlugin(NekoPluginBase):
             "回复中的账号名必须以实际 result.account 为准，禁止编造。"
             "节流：同一 uid 60 秒内仅执行一次（插件强制，超限返回 RATE_LIMITED）。"
             "纪律：不批量轰炸式关注，关注对象应真实且自然；未经本工具真实执行，严禁向用户宣称'已关注'——只有收到本工具真实成功返回才能确认执行。"
+            "关注流程（v0.7.34）：必须先获取目标 UID——直播场景优先调用 bili_now_watching/bili_see_live/bili_live_info 拿到当前主播 uid，"
+            "再以 uid 作为 target 关注（纯数字直接按 uid 处理，零歧义）；仅当无法获取 uid 时才允许传昵称。"
+            "目标解析（v0.7.34）：昵称必须精确匹配（忽略大小写/空格）；解析不到或存在歧义时本工具返回错误，"
+            "严禁自行选取相似昵称或搜索结果的第一个用户关注（会关注错人）。"
         ),
         parameters={
             "type": "object",

@@ -287,7 +287,9 @@ async function startAudioCapture() {
       return;
     }
     const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
-    await chrome.runtime.sendMessage({ type: "start-audio", streamId: streamId });
+    // v0.2.19：回放只在页面被 tabCapture 静音时才启用（否则页面原声 + 回放 = 双音乐/回声）
+    const muted = !!(tab.mutedInfo && tab.mutedInfo.muted);
+    await chrome.runtime.sendMessage({ type: "start-audio", streamId: streamId, muted: muted });
     audioEnabled = true;
     await chrome.storage.local.set({ [AUDIO_STATE_KEY]: true });
     pushAudioState();
