@@ -147,13 +147,54 @@ def cookie_uid(cookie: str) -> int | None:
         return None
 
 
+_ROLE_FILE = "role.json"  # 角色映射：{"uid": "yui"|"main"}——用户明确声明"某 uid 是小号/大号"时生效（v0.7.30）
+
+
+def _load_roles() -> dict:
+    try:
+        with open(os.path.join(_YUI_COOKIE_DIR, _ROLE_FILE), "r", encoding="utf-8") as fh:
+            data = json.load(fh) or {}
+        return {str(k): str(v) for k, v in data.items() if v in ("yui", "main")}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_roles(roles: dict) -> None:
+    with open(os.path.join(_YUI_COOKIE_DIR, _ROLE_FILE), "w", encoding="utf-8") as fh:
+        json.dump(roles, fh, ensure_ascii=False, indent=2)
+
+
+def _cookie_for_uid(uid: int) -> str:
+    """按 uid 在现有 cookie 文件中匹配登录态（DedeUserID=uid），取修改时间最新的一份。"""
+    best, best_mtime = "", 0.0
+    for fn in (_MAIN_COOKIE_FILE, _YUI_COOKIE_FILE):
+        p = os.path.join(_YUI_COOKIE_DIR, fn)
+        try:
+            with open(p, "r", encoding="utf-8", errors="replace") as fh:
+                content = fh.read()
+            if f"DedeUserID={uid}" in content and os.path.getmtime(p) >= best_mtime:
+                best, best_mtime = content, os.path.getmtime(p)
+        except OSError:
+            continue
+    return best
+
+
 def _cookie(account: str = "main") -> str:
     """账号 Cookie：main=主账号（env BILI_COOKIE > 插件目录 main_cookie.txt）；
     yui=YUI 独立小号（env BILI_YUI_COOKIE > 插件目录 yui_cookie.txt）。
 
     v0.7.10：绑定流程按登录顺序归位——第一个登录的账号持久化为 main_cookie.txt（大号），
     第二个登录的账号自动归为 yui_cookie.txt（小号，默认操作账号）。
+    v0.7.30：role.json 角色映射优先——用户声明"某 uid 是小号/大号"后，该角色的
+    Cookie 直接从现有 cookie 文件按 uid 匹配，无需重新登录、不覆盖任何文件。
     """
+    roles = _load_roles()
+    for uid_s, role in roles.items():
+        if role == account:
+            matched = _cookie_for_uid(int(uid_s))
+            if matched:
+                return matched
+            break
     if account == "yui":
         return os.environ.get("BILI_YUI_COOKIE", "").strip() or _yui_cookie_from_file()
     return os.environ.get("BILI_COOKIE", "").strip() or _main_cookie_from_file()
@@ -1315,44 +1356,46 @@ def _account_label(account: str = "yui") -> str:
 
 
 def set_account_role(role: str = "yui", uid: int | None = None, force: bool = False) -> dict:
-    """声明账号角色：把当前绑定的登录账号标记为小号（yui）或主账号（main）。
+    """声明账号角色：把指定 uid 标记为小号（yui）或主账号（main）。
 
-    典型场景（v0.7.30）：用户明确说"这个账号是小号"时调用——把已绑定的主账号登录态
-    复制为小号 Cookie，此后默认操作账号（小号）真正作用在该账号上，无需重新登录。
-    role：yui（标记为小号，默认）/ main（标记为主账号）。uid：可选，校验当前 Cookie 账号。
-    force：目标角色 Cookie 已存在时是否覆盖（默认 False 防误覆盖）。
+    典型场景（v0.7.30）：用户明确说"这个账号是小号"时调用——把该 uid 写入 role.json
+    角色映射，此后默认操作账号（小号）真正作用在该账号上。不覆盖、不删除任何 cookie 文件；
+    同 uid 换角色（force=true）或已有同角色映射（force=false）时给出明确提示。
+    role：yui（标记为小号，默认）/ main（标记为主账号）。uid：可选；不传时取当前
+    main_cookie 的 DedeUserID。force：同 uid 已有角色需变更时是否允许覆盖。
     """
     if role not in ("main", "yui"):
         raise BiliError(f"不支持的角色：{role}（仅支持 yui 小号 / main 主账号）", "BAD_ROLE")
-    src_account = "main" if role == "yui" else "yui"
-    src = _cookie(src_account)
-    if not src:
+    if uid is None:
+        raw = _main_cookie_from_file()
+        m = re.search(r"DedeUserID=(\d+)", raw) if raw else None
+        if not m:
+            raise BiliError("无法读取当前登录账号 uid（main cookie 为空或格式异常）", "NO_UID")
+        uid = int(m.group(1))
+    uid = int(uid)
+    if not _cookie_for_uid(uid):
+        raise BiliError(f"本机没有 uid {uid} 的登录态（Cookie），无法声明角色；请先在浏览器登录该账号", "NO_COOKIE")
+    roles = _load_roles()
+    cur = roles.get(str(uid))
+    if cur and cur == role:
+        raise BiliError(f"uid {uid} 已经标记为{'小号' if role == 'yui' else '主账号'}，无需重复声明", "ALREADY_SET")
+    if cur and not force:
         raise BiliError(
-            f"当前未绑定{'主账号' if src_account == 'main' else '小号'}登录态（Cookie 为空），无法标记为{'小号' if role == 'yui' else '主账号'}",
-            "NO_COOKIE",
+            f"uid {uid} 当前标记为{'小号' if cur == 'yui' else '主账号'}，改为{'小号' if role == 'yui' else '主账号'}会改变默认操作账号；确认无误请重传 force=true",
+            "ROLE_CONFLICT",
         )
-    if uid is not None:
-        info = my_info(src_account)
-        if info.get("mid") != int(uid):
-            raise BiliError(f"uid 不匹配：当前登录账号是 {info.get('mid')}，不是 {uid}，请先切换到目标账号再声明", "UID_MISMATCH")
-    dst = _cookie("yui" if role == "yui" else "main")
-    if dst and not force:
-        raise BiliError(
-            f"{'小号' if role == 'yui' else '主账号'} Cookie 已存在，覆盖可能弄错账号身份；确认无误请重传 force=true",
-            "DST_EXISTS",
-        )
-    src_path = os.path.join(_YUI_COOKIE_DIR, _MAIN_COOKIE_FILE if src_account == "main" else _YUI_COOKIE_FILE)
-    dst_path = os.path.join(_YUI_COOKIE_DIR, _YUI_COOKIE_FILE if role == "yui" else _MAIN_COOKIE_FILE)
-    with open(src_path, "r", encoding="utf-8", errors="replace") as fh:
-        content = fh.read()
-    with open(dst_path, "w", encoding="utf-8") as fh:
-        fh.write(content)
-    info = my_info(role)
+    roles[str(uid)] = role
+    _save_roles(roles)
+    info = {}
+    try:
+        info = my_info(role)
+    except BiliError:
+        pass
     return {
         "role": role,
-        "mid": info.get("mid"),
+        "mid": uid,
         "uname": info.get("uname", ""),
-        "detail": f"已将 uid {info.get('mid')}（{info.get('uname', '')}）标记为{'小号' if role == 'yui' else '主账号'}。此后默认操作账号（小号）真正作用在该账号上。",
+        "detail": f"已将 uid {uid}（{info.get('uname', '')}）标记为{'小号' if role == 'yui' else '主账号'}。此后默认操作账号（小号）真正作用在该账号上。",
     }
 
 
