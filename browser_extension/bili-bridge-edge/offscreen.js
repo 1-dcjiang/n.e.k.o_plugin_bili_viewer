@@ -10,6 +10,7 @@ const SAMPLE_RATE = 16000;      // 统一重采样到 16k，wav 与本地 ASR �
 const MIN_BYTES = 1600;         // 小于该字节数视为无声段，跳过推送
 
 let audioContext = null;
+let audioEl = null;
 let sourceNode = null;
 let processorNode = null;
 let stream = null;
@@ -103,9 +104,19 @@ async function startCapture(streamId) {
       },
     },
   });
+  // v0.2.12 回放修复：tabCapture 捕获会静音源标签页，必须把流再输出给用户，
+  // 否则"本来的声音消失"。用 audio 元素直连回放（低延迟、不依赖 AudioContext 状态）。
+  if (!audioEl) {
+    audioEl = new Audio();
+    audioEl.autoplay = true;
+    audioEl.volume = 1.0;
+  }
+  audioEl.srcObject = stream;
+  audioEl.play().catch(() => {});
   audioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
   // Chrome 自动播放策略：非用户手势下新建的 AudioContext 默认 suspended，
-  // 不 resume 则 ScriptProcessor 永远不产出数据（0 音频推送）——必须显式启动
+  // 不 resume 则 ScriptProcessor 永远不产出数据（0 音频推送）——必须显式启动。
+  // offscreen 声明 AUDIO_PLAYBACK reason 后此处 resume 可成功。
   if (audioContext.state !== "running") {
     audioContext.resume().catch(() => {});
   }
@@ -121,7 +132,7 @@ async function startCapture(streamId) {
   sourceNode = audioContext.createMediaStreamSource(stream);
   processorNode = audioContext.createScriptProcessor(4096, 1, 1);
   sourceNode.connect(processorNode);
-  processorNode.connect(audioContext.destination);
+  // 分析链路不连 destination（回放由 audioEl 负责，避免双重声音）
   processorNode.onaudioprocess = onAudioProcess;
   segmentTimer = setInterval(flushSegment, SEGMENT_SECONDS * 1000);
   // 通知 background 已就绪（供状态回显）
@@ -136,6 +147,7 @@ function stopCapture() {
   if (sourceNode) { try { sourceNode.disconnect(); } catch (e) {} sourceNode = null; }
   if (audioContext) { try { audioContext.close(); } catch (e) {} audioContext = null; }
   if (stream) { try { stream.getTracks().forEach((t) => t.stop()); } catch (e) {} stream = null; }
+  if (audioEl) { try { audioEl.pause(); audioEl.srcObject = null; } catch (e) {} }
   chrome.runtime.sendMessage({ type: "audio-state", running: false }).catch(() => {});
 }
 

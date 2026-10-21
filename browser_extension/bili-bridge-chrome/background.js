@@ -255,8 +255,8 @@ async function ensureOffscreenDoc() {
   if (existing && existing.length > 0) return;
   await chrome.offscreen.createDocument({
     url: "offscreen.html",
-    reasons: ["USER_MEDIA"],
-    justification: "捕获 B站 直播/视频标签页声音，推送本机插件让 YUI 听到（仅 127.0.0.1 回环）",
+    reasons: ["USER_MEDIA", "AUDIO_PLAYBACK"],
+    justification: "捕获 B站 直播/视频标签页声音并回放给用户，同时推送本机插件让 YUI 听到（仅 127.0.0.1 回环）",
   });
 }
 

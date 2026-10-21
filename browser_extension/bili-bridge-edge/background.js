@@ -1,4 +1,4 @@
-// B站接入桥 (Edge) v0.2.9 —— Microsoft Edge 专用版
+// B站接入桥 (Chrome) v0.2.9 —— Google Chrome 专用版
 // 1) 把 B站登录态直连推送给本机 bili_viewer 插件（POST 127.0.0.1:8765，不上外网）；
 // 2) 把当前活动标签页（URL+标题）实时推送给插件，让 YUI 精确感知你在看什么；
 // 3) 在 B站 直播/视频页注入脚本读取页面实况（直播弹幕列表/在线人数/视频进度），
@@ -8,13 +8,13 @@
 // 5) v0.2.5 声音捕获：popup 一次性开启后，tabCapture 捕获 B站 标签页音频，
 //    offscreen document 采集成 wav 分段推送插件（本地 ASR 转文字让 YUI 听到）；
 //    开关状态记忆在 storage，浏览器/扩展重启后自动恢复（后台静默，不抢界面）。
-// 本版与 Chrome/360 版本相互独立：推送 source 标记为 bili-bridge-edge-extension，
+// 本版与 Edge/360 版本相互独立：推送 source 标记为 bili-bridge-chrome-extension，
 // 插件日志可区分来源，多浏览器共存互不干扰。
 // 触发时机：安装/浏览器启动立即推送；cookie 变化（onChanged 防抖）；
 // 标签页切换/URL 变化（tabs 监听防抖）；alarms 30 秒兜底（MV3 SW 休眠时由 alarm 唤醒）；
 // 推送失败 4 秒快速重试（插件重启后 5 秒内即可恢复感知，不再等下一轮 alarm）。
 
-const EXT_SOURCE = "bili-bridge-edge-extension";
+const EXT_SOURCE = "bili-bridge-chrome-extension";
 const PANEL_URL = "http://127.0.0.1:8765";
 const AUDIO_STATE_KEY = "audio_capture_enabled";
 
@@ -255,8 +255,8 @@ async function ensureOffscreenDoc() {
   if (existing && existing.length > 0) return;
   await chrome.offscreen.createDocument({
     url: "offscreen.html",
-    reasons: ["USER_MEDIA"],
-    justification: "捕获 B站 直播/视频标签页声音，推送本机插件让 YUI 听到（仅 127.0.0.1 回环）",
+    reasons: ["USER_MEDIA", "AUDIO_PLAYBACK"],
+    justification: "捕获 B站 直播/视频标签页声音并回放给用户，同时推送本机插件让 YUI 听到（仅 127.0.0.1 回环）",
   });
 }
 
