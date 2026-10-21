@@ -134,6 +134,69 @@ def test_yui_comment_rate_limit(monkeypatch) -> None:
     assert r3.get("is_error") is False
 
 
+def test_yui_rate_reserve_atomic_blocks_concurrent(monkeypatch) -> None:
+    """v0.7.8 复查优化：reserve 原子占用——并发第二个请求在同窗口内被拒绝，
+    且发送失败后 rollback 释放窗口允许重试。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setattr(bili, "live_send_danmaku", lambda room, text, account="main": {"ok": True})
+    inst = _make_inst(monkeypatch)
+    # 第一次发送：成功（占用窗口）
+    r1 = asyncio.run(inst.bili_live_send_danmaku(room="12345", text="第一条", account="yui"))
+    assert r1.get("is_error") is False
+    # 第二次同目标：即使不加 dedup（换内容），窗口内仍被拒
+    r2 = asyncio.run(inst.bili_live_send_danmaku(room="12345", text="第二条不同内容", account="yui"))
+    assert r2.get("error") == "RATE_LIMITED"
+
+
+def test_yui_rate_rollback_after_failure(monkeypatch) -> None:
+    """v0.7.8 复查优化：发送失败回退占用，稍后可重试（不被误限流）。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    state = {"fail": True}
+
+    def fake_send(room, text, account="main"):
+        if state["fail"]:
+            raise bili.BiliError("接口失败", "SEND_FAILED")
+        return {"ok": True}
+
+    monkeypatch.setattr(bili, "live_send_danmaku", fake_send)
+    inst = _make_inst(monkeypatch)
+    r1 = asyncio.run(inst.bili_live_send_danmaku(room="12345", text="失败", account="yui"))
+    assert r1.get("is_error") is True
+    # 失败已回退，立即重试成功（不在窗口内）
+    state["fail"] = False
+    r2 = asyncio.run(inst.bili_live_send_danmaku(room="12345", text="成功", account="yui"))
+    assert r2.get("is_error") is False
+
+
+def test_yui_upload_mutex_blocks_second(monkeypatch) -> None:
+    """v0.7.8 复查优化：投稿互斥——第二个并发投稿返回 BUSY，不跑双流程。"""
+    import os as _os
+
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setattr(_os.path, "isfile", lambda p: True)  # 绕过真实文件检查
+    calls: list[str] = []
+
+    def fake_submit(file_path, title, desc="", tags="", tid=171, account="yui"):
+        calls.append(title)
+        return {"ok": True}
+
+    monkeypatch.setattr(bili, "submit_video", fake_submit)
+    inst = _make_inst(monkeypatch)
+    # 手动占住上传互斥（模拟自主引擎正在上传）
+    with inst._yui_upload_lock:
+        inst._yui_uploading = True
+    r = asyncio.run(inst.bili_yui_upload(file="v.mp4", title="第二个"))
+    inst._yui_uploading = False
+    assert r.get("error") == "BUSY"
+    assert calls == []  # 第二个流程没有启动
+
+
 # ══════════ 评论目标解析 ══════════
 
 
@@ -181,6 +244,27 @@ def test_yui_dynamic_daily_cap(monkeypatch) -> None:
         else:
             assert out.get("error") == "RATE_LIMITED"
     assert ok_count == 6  # 每日上限 6 条
+
+
+def test_yui_dynamic_failure_releases_daily_quota(monkeypatch) -> None:
+    """v0.7.8 复查优化：动态发布失败回退天级占用，稍后可重试。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    state = {"fail": True}
+
+    def fake_dyn(text, account="yui"):
+        if state["fail"]:
+            raise bili.BiliError("接口失败", "DYN_FAILED")
+        return {"ok": True}
+
+    monkeypatch.setattr(bili, "post_dynamic", fake_dyn)
+    inst = _make_inst(monkeypatch)
+    r1 = asyncio.run(inst.bili_yui_dynamic(text="失败的动态"))
+    assert r1.get("is_error") is True
+    state["fail"] = False
+    r2 = asyncio.run(inst.bili_yui_dynamic(text="重试的动态"))
+    assert r2.get("is_error") is False
 
 
 # ══════════ 投稿安全：仅接受 yui_uploads 目录内文件 ══════════

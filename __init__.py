@@ -188,6 +188,10 @@ class BiliViewerPlugin(NekoPluginBase):
         self._yui_daily: dict[str, int] = {}
         self._yui_cool: dict[str, float] = {}
         self._yui_rate_lock = threading.Lock()
+        # 投稿互斥（复查优化 v0.7.8）：同一时刻只允许一个上传流程，
+        # 防止自主引擎与手动调用并发触发两个投稿流程（分钟级长任务）
+        self._yui_upload_lock = threading.Lock()
+        self._yui_uploading = False
         # 启动后台实时感知线程（守护线程，不阻塞插件生命周期）
         self._start_sync_watcher()
 
@@ -295,9 +299,25 @@ class BiliViewerPlugin(NekoPluginBase):
             last = self._yui_rate.get(f"{op}:{key}", 0.0)
             return (time.time() - last) >= window
 
-    def _yui_rate_mark(self, op: str, key: str) -> None:
+    def _yui_rate_reserve(self, op: str, key: str, window: float) -> bool:
+        """原子占用（复查优化 v0.7.8）：锁内检查+标记，杜绝并发双发竞态。
+
+        大号/小号同时行动时，自主线程与手动调用可能并发触发同一目标的写操作；
+        旧实现 check 与 mark 分离（中间隔一次网络请求），两个线程可同时通过检查
+        → 同一目标发两条。reserve 在锁内一次性完成检查+占用：第二个线程会看到
+        窗口未过被拒绝。发送失败时调用方必须 _yui_rate_rollback 释放窗口。
+        """
         with self._yui_rate_lock:
+            last = self._yui_rate.get(f"{op}:{key}", 0.0)
+            if (time.time() - last) < window:
+                return False
             self._yui_rate[f"{op}:{key}"] = time.time()
+            return True
+
+    def _yui_rate_rollback(self, op: str, key: str) -> None:
+        """释放占用：发送失败/去重命中后回退时间戳，允许稍后重试。"""
+        with self._yui_rate_lock:
+            self._yui_rate.pop(f"{op}:{key}", None)
 
     def _yui_daily_allow(self, op: str) -> bool:
         """天级上限：dynamic≤6、upload≤2；True=允许。"""
@@ -305,6 +325,30 @@ class BiliViewerPlugin(NekoPluginBase):
         cap = {"dynamic": _YUI_DYNAMIC_DAILY_MAX, "upload": _YUI_UPLOAD_DAILY_MAX}.get(op, 99)
         with self._yui_rate_lock:
             return self._yui_daily.get(f"{op}:{day}", 0) < cap
+
+    def _yui_daily_reserve(self, op: str) -> bool:
+        """原子占用（复查优化 v0.7.8）：锁内检查+预占天级配额。
+
+        旧实现 allow 检查与 bump 计数之间隔一次网络请求，大号/小号同时行动时
+        两个线程可同时通过检查 → 一天动态条数被并发突破（>6）。
+        reserve 在锁内一次性完成检查+占用；发送失败时调用方 _yui_daily_release。
+        """
+        day = time.strftime("%Y%m%d")
+        cap = {"dynamic": _YUI_DYNAMIC_DAILY_MAX, "upload": _YUI_UPLOAD_DAILY_MAX}.get(op, 99)
+        with self._yui_rate_lock:
+            used = self._yui_daily.get(f"{op}:{day}", 0)
+            if used >= cap:
+                return False
+            self._yui_daily[f"{op}:{day}"] = used + 1
+            return True
+
+    def _yui_daily_release(self, op: str) -> None:
+        """释放预占：发布失败后回退天级计数，允许稍后重试。"""
+        day = time.strftime("%Y%m%d")
+        with self._yui_rate_lock:
+            used = self._yui_daily.get(f"{op}:{day}", 0)
+            if used > 0:
+                self._yui_daily[f"{op}:{day}"] = used - 1
 
     def _yui_daily_bump(self, op: str) -> None:
         day = time.strftime("%Y%m%d")
@@ -1132,20 +1176,24 @@ class BiliViewerPlugin(NekoPluginBase):
         if not text:
             self._record_send_result("live", False, "EMPTY_MSG", "弹幕内容为空", room)
             return {"output": "请提供要发送的弹幕内容。", "is_error": True, "error": "EMPTY_MSG"}
-        if account == "yui" and not self._yui_rate_check("danmaku", f"live:{room}", _YUI_DANMAKU_WINDOW):
-            return {"output": "已发过弹幕（同一目标 60 秒内限 1 条），请稍后再试。", "is_error": True, "error": "RATE_LIMITED"}
+        if account == "yui":
+            # 原子占用（v0.7.8）：并发双发防护；后续失败/去重命中必须回退
+            if not self._yui_rate_reserve("danmaku", f"live:{room}", _YUI_DANMAKU_WINDOW):
+                return {"output": "已发过弹幕（同一目标 60 秒内限 1 条），请稍后再试。", "is_error": True, "error": "RATE_LIMITED"}
         if self._danmaku_recently_sent("live", room, text, 0):
             # 同房间同内容 60 秒内已发送过（可能是重复触发/兜底入口二次调用）→ 不重复发送
             _logger.info("live danmaku dedup hit room=%s text=%r", room, text[:20])
+            if account == "yui":
+                self._yui_rate_rollback("danmaku", f"live:{room}")
             return {"output": "弹幕已发送。", "is_error": False, "result": {"dedup": True, "room": room}}
         try:
             result = bili.live_send_danmaku(room, text, account=account)
         except bili.BiliError as exc:
+            if account == "yui":
+                self._yui_rate_rollback("danmaku", f"live:{room}")
             self._record_send_result("live", False, exc.code, exc.message, room)
             return _wrap_err(exc)
         self._mark_danmaku_sent("live", room, text, 0)
-        if account == "yui":
-            self._yui_rate_mark("danmaku", f"live:{room}")
         self._record_send_result("live", True, "", result.get("server") or "", room, dmid=result.get("dmid") or "")
         return {"output": "弹幕已发送。", "is_error": False, "result": result}
 
@@ -1205,11 +1253,15 @@ class BiliViewerPlugin(NekoPluginBase):
         if not text:
             self._record_send_result("video", False, "EMPTY_MSG", "弹幕内容为空", bvid)
             return {"output": "请提供要发送的弹幕内容。", "is_error": True, "error": "EMPTY_MSG"}
-        if account == "yui" and not self._yui_rate_check("danmaku", f"video:{bvid}", _YUI_DANMAKU_WINDOW):
-            return {"output": "已发过弹幕（同一目标 60 秒内限 1 条），请稍后再试。", "is_error": True, "error": "RATE_LIMITED"}
+        if account == "yui":
+            # 原子占用（v0.7.8）：并发双发防护；后续失败/去重命中必须回退
+            if not self._yui_rate_reserve("danmaku", f"video:{bvid}", _YUI_DANMAKU_WINDOW):
+                return {"output": "已发过弹幕（同一目标 60 秒内限 1 条），请稍后再试。", "is_error": True, "error": "RATE_LIMITED"}
         if self._danmaku_recently_sent("video", bvid, text, progress):
             # 同视频同进度同内容 60 秒内已发送过（重复触发/兜底入口二次调用）→ 不重复发送
             _logger.info("video danmaku dedup hit bvid=%s progress=%s text=%r", bvid, progress, text[:20])
+            if account == "yui":
+                self._yui_rate_rollback("danmaku", f"video:{bvid}")
             return {
                 "output": "弹幕已发送。",
                 "is_error": False,
@@ -1218,11 +1270,11 @@ class BiliViewerPlugin(NekoPluginBase):
         try:
             result = bili.send_video_danmaku(bvid, text, progress_ms=progress * 1000, account=account)
         except bili.BiliError as exc:
+            if account == "yui":
+                self._yui_rate_rollback("danmaku", f"video:{bvid}")
             self._record_send_result("video", False, exc.code, exc.message, bvid)
             return _wrap_err(exc)
         self._mark_danmaku_sent("video", bvid, text, progress)
-        if account == "yui":
-            self._yui_rate_mark("danmaku", f"video:{bvid}")
         self._record_send_result("video", True, "", result.get("server") or "", bvid)
         return {
             "output": "弹幕已发送。",
@@ -1303,14 +1355,16 @@ class BiliViewerPlugin(NekoPluginBase):
         if oid is None or type_id is None:
             return {"output": "无法确定评论目标：请提供视频BV号或直播间房间号（或先在 B站看这个内容）。", "is_error": True, "error": "NO_TARGET"}
         key = f"{type_id}:{oid}"
-        if account == "yui" and not self._yui_rate_check("comment", key, _YUI_COMMENT_WINDOW):
-            return {"output": "刚发过评论（同一目标 120 秒内限 1 条），请稍后再试。", "is_error": True, "error": "RATE_LIMITED"}
+        if account == "yui":
+            # 原子占用（v0.7.8）：并发双发防护；发送失败必须回退
+            if not self._yui_rate_reserve("comment", key, _YUI_COMMENT_WINDOW):
+                return {"output": "刚发过评论（同一目标 120 秒内限 1 条），请稍后再试。", "is_error": True, "error": "RATE_LIMITED"}
         try:
             bili.add_reply(oid, type_id, text, account=account)
         except bili.BiliError as exc:
+            if account == "yui":
+                self._yui_rate_rollback("comment", key)
             return _wrap_err(exc)
-        if account == "yui":
-            self._yui_rate_mark("comment", key)
         return {"output": "评论已发送。", "is_error": False, "result": {"ok": True, "oid": oid, "type": type_id}}
 
     @llm_tool(
@@ -1333,13 +1387,13 @@ class BiliViewerPlugin(NekoPluginBase):
         text = (text or params.get("text") or "").strip()
         if not text:
             return {"output": "请提供动态内容。", "is_error": True, "error": "EMPTY_MSG"}
-        if not self._yui_daily_allow("dynamic"):
+        if not self._yui_daily_reserve("dynamic"):
             return {"output": "今天动态已发满 6 条，明天再继续。", "is_error": True, "error": "RATE_LIMITED"}
         try:
             bili.post_dynamic(text, account="yui")
         except bili.BiliError as exc:
+            self._yui_daily_release("dynamic")
             return _wrap_err(exc)
-        self._yui_daily_bump("dynamic")
         return {"output": "动态已发布。", "is_error": False, "result": {"ok": True}}
 
     @llm_tool(
@@ -1378,21 +1432,34 @@ class BiliViewerPlugin(NekoPluginBase):
             return {"output": "请提供 yui_uploads 目录下的视频文件名。", "is_error": True, "error": "NO_FILE"}
         if not title:
             return {"output": "请提供稿件标题。", "is_error": True, "error": "NO_TITLE"}
-        if not self._yui_daily_allow("upload"):
+        if not self._yui_daily_reserve("upload"):
             return {"output": "今天已投稿 2 个，明天再继续。", "is_error": True, "error": "RATE_LIMITED"}
         # 安全：仅允许插件目录 yui_uploads 内的文件（拒绝路径穿越/任意文件上传）
         upload_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), _YUI_UPLOAD_DIR)
         base = os.path.basename(file)
         if base in ("", ".", "..") or "/" in file or "\\" in file or ":" in file:
+            self._yui_daily_release("upload")
             return {"output": "只接受 yui_uploads 目录内的文件名（禁止路径分隔符）。", "is_error": True, "error": "BAD_PATH"}
         file_path = os.path.join(upload_dir, base)
         if not os.path.isfile(file_path):
+            self._yui_daily_release("upload")
             return {"output": f"yui_uploads 目录下没有这个文件：{base}（请先把视频文件放到插件目录的 yui_uploads 文件夹）", "is_error": True, "error": "NO_FILE"}
+        # 投稿互斥（复查优化 v0.7.8）：同一时刻只允许一个上传流程（分钟级长任务）。
+        # 大号/小号同时行动时，自主引擎与手动调用可能并发触发投稿：
+        # 互斥锁保证后到者返回 BUSY，且投稿串行执行使天级计数天然不被并发突破。
+        with self._yui_upload_lock:
+            if self._yui_uploading:
+                self._yui_daily_release("upload")
+                return {"output": "已有投稿正在进行中，请稍后再试。", "is_error": True, "error": "BUSY"}
+            self._yui_uploading = True
         try:
             bili.submit_video(file_path, title, desc=desc, tags=tags, tid=tid, account="yui")
         except bili.BiliError as exc:
+            self._yui_daily_release("upload")
             return _wrap_err(exc)
-        self._yui_daily_bump("upload")
+        finally:
+            with self._yui_upload_lock:
+                self._yui_uploading = False
         return {"output": "稿件已提交审核。", "is_error": False, "result": {"ok": True, "file": base, "title": title}}
 
     @llm_tool(
