@@ -1,12 +1,14 @@
 """desktop_deliver：桌面扩展包投放逻辑测试。
 
 覆盖：三浏览器目录创建（Chrome/Edge/360）、扩展本体复制、bat 编码（GBK+CRLF）、
-txt 编码（UTF-8 BOM+CRLF）、幂等跳过、版本变更重新投放、缺失扩展返回 None。
+txt 编码（UTF-8 BOM+CRLF）、三扩展 zip 压缩包（独立文件夹+名字）、幂等跳过、
+版本变更重新投放、缺失扩展返回 None。
 """
 
 from __future__ import annotations
 
 import os
+import zipfile
 
 # SDK 顶层导入链依赖 utils.plugin_card_fields，测试必须在函数内导入插件模块
 # （desktop_deliver 本身是纯 stdlib，无此问题，但包 __init__ 有）
@@ -145,6 +147,54 @@ def test_missing_extension_returns_none(tmp_path):
         desktop_deliver.ensure_desktop_package(empty, desktop=os.path.join(str(tmp_path), "Desktop"))
         is None
     )
+
+
+def test_zip_contains_three_isolated_extension_folders(tmp_path):
+    """v0.7.5：桌面生成含三扩展的 zip，各扩展独立文件夹+名字，含三安装脚本与说明。"""
+    from plugin.plugins.bili_viewer import desktop_deliver
+
+    plugin_dir = _make_plugin_dir(tmp_path)
+    desktop = os.path.join(str(tmp_path), "Desktop")
+    desktop_deliver.ensure_desktop_package(plugin_dir, version="0.7.5", desktop=desktop)
+    zip_path = os.path.join(desktop, "B站接入桥扩展_v0.7.5.zip")
+    assert os.path.isfile(zip_path)
+    with zipfile.ZipFile(zip_path) as zf:
+        names = set(zf.namelist())
+        for ext in _EXT_DIRS:
+            for f in _EXT_FILES:
+                assert f"{ext}/{f}" in names
+        for name in ("Chrome", "Edge", "360"):
+            assert f"一键安装B站接入桥({name}).bat" in names
+        assert "使用说明.txt" in names
+        assert zf.read(".delivered_version").decode("utf-8").strip() == "0.7.5"
+
+
+def test_zip_idempotent_same_version(tmp_path):
+    """v0.7.5：同一版本二次投放不重打 zip（mtime 不变）。"""
+    from plugin.plugins.bili_viewer import desktop_deliver
+
+    plugin_dir = _make_plugin_dir(tmp_path)
+    desktop = os.path.join(str(tmp_path), "Desktop")
+    desktop_deliver.ensure_desktop_package(plugin_dir, version="0.7.5", desktop=desktop)
+    zip_path = os.path.join(desktop, "B站接入桥扩展_v0.7.5.zip")
+    mtime = os.path.getmtime(zip_path)
+    desktop_deliver.ensure_desktop_package(plugin_dir, version="0.7.5", desktop=desktop)
+    assert os.path.getmtime(zip_path) == mtime
+
+
+def test_zip_version_change_re_packs(tmp_path):
+    """v0.7.5：版本变化后重打新版本 zip，旧版本 zip 保留不删。"""
+    from plugin.plugins.bili_viewer import desktop_deliver
+
+    plugin_dir = _make_plugin_dir(tmp_path)
+    desktop = os.path.join(str(tmp_path), "Desktop")
+    desktop_deliver.ensure_desktop_package(plugin_dir, version="0.7.5", desktop=desktop)
+    desktop_deliver.ensure_desktop_package(plugin_dir, version="0.7.6", desktop=desktop)
+    assert os.path.isfile(os.path.join(desktop, "B站接入桥扩展_v0.7.5.zip"))
+    zip6 = os.path.join(desktop, "B站接入桥扩展_v0.7.6.zip")
+    assert os.path.isfile(zip6)
+    with zipfile.ZipFile(zip6) as zf:
+        assert zf.read(".delivered_version").decode("utf-8").strip() == "0.7.6"
 
 
 def test_desktop_dir_probe_returns_existing(tmp_path, monkeypatch):

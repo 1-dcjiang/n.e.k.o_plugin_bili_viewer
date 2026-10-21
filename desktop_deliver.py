@@ -5,6 +5,8 @@
 - 代码内嵌生成各浏览器「一键安装B站接入桥(browser).bat」
   （CRLF + GBK，cmd 可正常解析；各自打开对应浏览器的扩展管理页）；
 - 代码内嵌生成「使用说明.txt」（UTF-8 BOM + CRLF，记事本可正常打开）；
+- 再把整个扩展包压成单个 zip（含三扩展各自独立文件夹+名字），
+  方便下载/分享/保留，版本更新后自动重打；
 - 幂等：投放目录写 .delivered_version 标记，插件版本一致且三扩展齐全则跳过。
 
 投放是纯本地文件操作（毫秒级），任何失败都静默忽略，绝不影响插件启动。
@@ -15,6 +17,7 @@ from __future__ import annotations
 import os
 import shutil
 import threading
+import zipfile
 
 _DELIVERY_DIRNAME = "B站接入桥扩展"
 _VERSION_MARK = ".delivered_version"
@@ -276,6 +279,50 @@ def _mark_ok(delivery_dir: str, version: str) -> bool:
     )
 
 
+def _zip_delivered(zip_path: str, version: str) -> bool:
+    """zip 是否已包含指定版本（zip 内 .delivered_version == version）。"""
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            return zf.read(".delivered_version").decode("utf-8").strip() == version
+    except Exception:
+        return False
+
+
+def _write_delivery_zip(delivery: str, target_root: str, version: str) -> str | None:
+    """把投放目录整体压成单个 zip（含三扩展各自独立文件夹+名字），返回 zip 路径。
+
+    同一版本已打过 zip 则跳过；打包在投放目录内容落盘之后进行。
+    """
+    try:
+        zip_path = os.path.join(target_root, f"B站接入桥扩展_v{version}.zip")
+        if _zip_delivered(zip_path, version):
+            return zip_path
+        tmp: str | None = zip_path + ".tmp"
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.write(os.path.join(delivery, _VERSION_MARK), ".delivered_version")
+            for pkg in _EXT_PACKAGES:
+                for f in _REQUIRED_EXT_FILES:
+                    zf.write(
+                        os.path.join(delivery, pkg["ext_dir"], f),
+                        f"{pkg['ext_dir']}/{f}",
+                    )
+            for pkg in _EXT_PACKAGES:
+                zf.write(
+                    os.path.join(delivery, f"一键安装B站接入桥({pkg['name']}).bat"),
+                    f"一键安装B站接入桥({pkg['name']}).bat",
+                )
+            zf.write(os.path.join(delivery, "使用说明.txt"), "使用说明.txt")
+        os.replace(tmp, zip_path)
+        return zip_path
+    except Exception:
+        try:
+            if tmp:
+                os.remove(tmp)
+        except Exception:
+            pass
+        return None
+
+
 def ensure_desktop_package(plugin_dir: str, version: str | None = None, desktop: str | None = None) -> str | None:
     """把 B站接入桥 扩展包（Chrome/Edge/360）投放/更新到桌面。幂等，失败静默返回 None。
 
@@ -290,6 +337,7 @@ def ensure_desktop_package(plugin_dir: str, version: str | None = None, desktop:
         target_root = desktop or _desktop_dir()
         delivery = os.path.join(target_root, _DELIVERY_DIRNAME)
         if _mark_ok(delivery, ver):
+            _write_delivery_zip(delivery, target_root, ver)
             return delivery
 
         os.makedirs(delivery, exist_ok=True)
@@ -311,6 +359,8 @@ def ensure_desktop_package(plugin_dir: str, version: str | None = None, desktop:
         # 4) 版本标记
         with open(os.path.join(delivery, _VERSION_MARK), "w", encoding="utf-8") as fh:
             fh.write(ver)
+        # 5) 三扩展压缩包（下载/分享用，独立文件夹+名字，版本更新自动重打）
+        _write_delivery_zip(delivery, target_root, ver)
         return delivery
     except Exception:
         return None
