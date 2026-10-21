@@ -1474,6 +1474,71 @@ def modify_relation(target: str, action: str = "follow", account: str = "yui") -
     }
 
 
+def unfollow_all(account: str = "yui", dry_run: bool = False) -> dict:
+    """把指定账号关注的所有 UP 主全部取消关注（真实执行，逐条调用并复查）。
+
+    逐条调用 /x/relation/modify（B站 无批量取关接口），每条后由 modify_relation
+    复查关注状态；风控/网络抖动自动重试（间隔递增）；仍未成功的条目记入 failed
+    明细，绝不谎报为成功。返回真实结果：成功 N 个 / 失败 M 个及原因。
+    """
+    _require_login(account)
+    mid = my_info(account)["mid"]
+    followings = []
+    pn = 1
+    while True:
+        try:
+            data = (
+                _http_get(
+                    _API + "/x/relation/followings",
+                    {"vmid": int(mid), "pn": pn, "ps": 50, "order": "desc", "order_type": 0},
+                    account=account,
+                )
+            ).get("data") or {}
+        except BiliError as exc:
+            raise BiliError("关注列表获取失败：" + exc.message, "FOLLOW_LIST") from exc
+        page = data.get("list") or []
+        if not page:
+            break
+        followings.extend(page)
+        if len(page) < 50:
+            break
+        pn += 1
+    if dry_run:
+        return {
+            "dry_run": True,
+            "account": _account_label(account),
+            "total": len(followings),
+            "list": [{"fid": f.get("mid") or f.get("fid"), "uname": f.get("uname", "")} for f in followings],
+        }
+    ok, failed = 0, []
+    for f in followings:
+        fid = f.get("mid") or f.get("fid")
+        uname = f.get("uname", "") or str(fid)
+        last = None
+        for attempt in range(3):
+            try:
+                modify_relation(str(fid), "unfollow", account=account)
+                ok += 1
+                last = None
+                break
+            except BiliError as exc:
+                last = exc
+                # 风控/验证码类失败：加长间隔重试；其余（账号状态等）直接放弃该条
+                if ("风控" in exc.message or "验证" in exc.message or exc.code in ("REL_2_REL_NOT_EFFECTED", "REL_2_-412", "REL_2_BIZ_-412")):
+                    time.sleep(2.0 * (attempt + 1))
+                else:
+                    break
+        if last:
+            failed.append({"fid": fid, "uname": uname, "reason": last.message})
+        time.sleep(0.5)  # 取关间隔，避免连发触发风控
+    return {
+        "account": _account_label(account),
+        "total": len(followings),
+        "ok": ok,
+        "failed": failed,
+    }
+
+
 def my_videos(page: int = 1, limit: int = 10, account: str = "yui") -> list[dict]:
     """指定账号的投稿列表（nav 取 uid → arc/search）。account=main 主账号 / yui 小号（默认）。
 

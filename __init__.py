@@ -1081,6 +1081,45 @@ class BiliViewerPlugin(NekoPluginBase):
         }
 
     @llm_tool(
+        name="bili_unfollow_all",
+        description=(
+            "【批量取关】把指定账号关注的所有 UP 主全部取消关注，真实执行并逐条复查。"
+            "何时用：用户要求'取消关注所有/全部UP主'、'清空关注列表'、'取关全部'时调用。"
+            "逐个调用B站取关接口（无批量接口），每条复查关注状态，失败自动重试，风控条目记入明细不谎报。"
+            "返回真实结果（成功N个/失败M个及原因）；执行完成后按返回结果如实向用户汇报，"
+            "未经本工具真实执行一律不得宣称'已取消关注/已清空'。dry_run=true 仅列出名单不执行。"
+            "注意：B站对短时间大量取关有风控，中途失败属平台机制，按明细如实说明即可。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "account": {"type": "string", "description": "默认 yui（小号）；main=主账号"},
+                "dry_run": {"type": "boolean", "description": "true 时仅列出关注名单不执行（默认 false）"},
+            },
+            "required": [],
+        },
+        timeout=300.0,
+    )
+    async def bili_unfollow_all(self, *, account: str = "", dry_run: bool = False, **_):
+        params = _.get("parameters") or {}
+        account = self._resolve_account(account or params.get("account") or "")
+        try:
+            result = bili.unfollow_all(account, dry_run=bool(dry_run or params.get("dry_run", False)))
+        except bili.BiliError as exc:
+            return _wrap_err(exc)
+        if result.get("dry_run"):
+            rows = "\n".join(f"  {it['uname']}（uid {it['fid']}）" for it in result["list"][:50])
+            detail = f"{result['account']} 当前共关注 {result['total']} 个UP主：\n{rows}"
+            return {"output": detail, "is_error": False, **result}
+        ok, failed, total = result.get("ok", 0), result.get("failed", []), result.get("total", 0)
+        detail = f"{result['account']} 取关完成：成功 {ok}/{total}"
+        if failed:
+            detail += f"，失败 {len(failed)} 个：" + "；".join(f"{it['uname']}（{it['reason']}）" for it in failed[:20])
+        else:
+            detail += "，全部成功。"
+        return {"output": detail, "is_error": False, "meta": {"agent": {"delivery": "silent"}}, **result}
+
+    @llm_tool(
         name="bili_my_videos",
         description=(
             "查看 B站账号的投稿稿件列表。何时用：用户说'看看我的稿件/我的投稿'时。"
@@ -1560,7 +1599,7 @@ class BiliViewerPlugin(NekoPluginBase):
             "账号规则：默认 YUI 独立小号；小号未配置自动回退主账号；自主运营必须 account=yui；"
             "回复中的账号名必须以实际 result.account 为准，禁止编造。"
             "节流：同一 uid 60 秒内仅执行一次（插件强制，超限返回 RATE_LIMITED）。"
-            "纪律：不批量轰炸式关注，关注对象应真实且自然。"
+            "纪律：不批量轰炸式关注，关注对象应真实且自然；未经本工具真实执行，严禁向用户宣称'已关注'——只有收到本工具真实成功返回才能确认执行。"
         ),
         parameters={
             "type": "object",
@@ -1610,7 +1649,7 @@ class BiliViewerPlugin(NekoPluginBase):
             "账号规则：默认 YUI 独立小号；小号未配置自动回退主账号；自主运营必须 account=yui；"
             "回复中的账号名必须以实际 result.account 为准，禁止编造。"
             "节流：同一 uid 60 秒内仅执行一次（插件强制，超限返回 RATE_LIMITED）。"
-            "纪律：仅在确实不再需要关注时取关，动作自然。"
+            "纪律：仅在确实不再需要关注时取关，动作自然；未经本工具真实执行，严禁向用户宣称'已取消关注'——只有收到本工具真实成功返回才能确认执行。"
         ),
         parameters={
             "type": "object",
