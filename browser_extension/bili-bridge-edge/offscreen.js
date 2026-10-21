@@ -16,6 +16,7 @@ let processorNode = null;
 let stream = null;
 let pcmBuffer = [];             // 累积的 Float32 采样
 let segmentTimer = null;
+let beatTimer = null;           // 存活心跳（v0.2.14：background 靠它识别僵尸 offscreen）
 let collecting = false;
 let seq = 0;
 let currentRate = SAMPLE_RATE;  // 实际生效的采样率（AudioContext 可能回退到 48k）
@@ -154,6 +155,11 @@ async function startCapture(streamId) {
     for (let i = 0; i < samples.length; i++) pcmBuffer.push(samples[i]);
   };
   segmentTimer = setInterval(flushSegment, SEGMENT_SECONDS * 1000);
+  // v0.2.14：存活心跳——background 的 ensureAudioSession 靠它区分正常捕获与僵尸 offscreen
+  if (beatTimer) clearInterval(beatTimer);
+  beatTimer = setInterval(() => {
+    chrome.runtime.sendMessage({ type: "audio-state", running: true, ctx_state: (audioContext && audioContext.state) || "running" }).catch(() => {});
+  }, 10000);
   // 通知 background 已就绪（供状态回显）
   chrome.runtime.sendMessage({ type: "audio-state", running: true, ctx_state: audioContext.state }).catch(() => {});
 }
@@ -161,6 +167,7 @@ async function startCapture(streamId) {
 function stopCapture() {
   collecting = false;
   if (segmentTimer) { clearInterval(segmentTimer); segmentTimer = null; }
+  if (beatTimer) { clearInterval(beatTimer); beatTimer = null; }
   pcmBuffer = [];
   if (processorNode) {
     try { processorNode.port.postMessage("pause"); } catch (e) {}

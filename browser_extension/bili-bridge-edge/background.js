@@ -245,6 +245,13 @@ chrome.runtime.onInstalled.addListener(() => {
 
 let audioEnabled = false;
 let audioStarting = false;
+let lastOffscreenBeat = 0;
+
+// SW 每次唤醒后从 storage 恢复声音开关记忆（v0.2.14：休眠重启后开关状态不丢）
+chrome.storage.local.get({ [AUDIO_STATE_KEY]: false }, (r) => {
+  audioEnabled = Boolean(r[AUDIO_STATE_KEY]);
+  if (audioEnabled) ensureAudioSession();
+});
 
 async function ensureOffscreenDoc() {
   // 内核过旧（Chromium < 109）无 offscreen API 时声音能力不可用，静默跳过不报错
@@ -267,8 +274,9 @@ async function startAudioCapture() {
   audioStarting = true;
   try {
     await ensureOffscreenDoc();
-    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    const tab = tabs && tabs[0];
+    // 用 active:true（所有窗口）而非 lastFocusedWindow：DevTools/多窗口时仍能定位到用户看的 B站 标签
+    const tabs = await chrome.tabs.query({ active: true });
+    const tab = (tabs && tabs.find((t) => t.url && t.url.indexOf("bilibili.com") >= 0)) || (tabs && tabs[0]);
     if (!tab || !tab.id || !tab.url || tab.url.indexOf("bilibili.com") < 0) {
       // 当前不在 B站 页：先记住开关意图（v0.2.8 修复"一直关闭"——
       // 旧版这里 throw 导致开关永远开不起来），等切到 B站 标签后由
@@ -307,9 +315,16 @@ async function stopAudioCapture() {
 function ensureAudioSession() {
   if (!audioEnabled || audioStarting) return;
   // SW 被唤醒（alarm/消息）时若 offscreen 已随 SW 关闭则重开；捕获持续到标签页切换。
+  // v0.2.14 增补：offscreen 心跳过期（30s 无上报）视为死文档，先关再重建——
+  // 避免 DevTools 检查视图等场景留下僵尸 offscreen 吞掉 start-audio 消息导致 0 推送。
   chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] })
     .then((existing) => {
-      if (!existing || existing.length === 0) startAudioCapture();
+      const alive = existing && existing.length > 0;
+      const beatStale = Date.now() - lastOffscreenBeat > 30000;
+      if (!alive || beatStale) {
+        if (alive) chrome.offscreen.closeDocument().catch(() => {});
+        startAudioCapture();
+      }
     })
     .catch(() => startAudioCapture());
 }
@@ -317,6 +332,7 @@ function ensureAudioSession() {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   // offscreen 上报采集状态（含 AudioContext 状态/错误诊断，v0.2.14）
   if (msg && msg.type === "audio-state") {
+    if (msg.running) lastOffscreenBeat = Date.now();
     pushAudioState(msg);
     return false;
   }
