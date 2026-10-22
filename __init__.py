@@ -1450,6 +1450,8 @@ class BiliViewerPlugin(NekoPluginBase):
     @llm_tool(
         name="bili_live_send_danmaku",
         description=(
+            "【弹幕≠评论铁律】弹幕=直播画面飘字（本工具）；直播评论区评论走 bili_reply_comment（type=11）。"
+            "用户说'发弹幕/弹幕说XX'时只能调用本工具，严禁调 bili_reply_comment；用户说'评论/写评论'时改用 bili_reply_comment。二者严禁混用。"
             "【真实发送铁律·最高优先】'弹幕已发送。'只能出现在你实际调用本工具且收到成功结果（is_error=False）之后；"
             "绝不允许在未调用工具、调用失败或没有房间号时声称已发送或编造发送成功——"
             "不知道直播间房间号时先调用 bili_live_info/bili_now_watching 感知获取，"
@@ -1529,6 +1531,8 @@ class BiliViewerPlugin(NekoPluginBase):
     @llm_tool(
         name="bili_video_send_danmaku",
         description=(
+            "【弹幕≠评论铁律】弹幕=视频播放时画面中飘过的文字（本工具投到视频时间轴）；评论=视频下方评论区（走 bili_reply_comment）。"
+            "用户说'发弹幕/弹幕说XX/发条弹幕/弹幕XX'时只能调用本工具，严禁调 bili_reply_comment；用户说'评论/写评论/评论区说'时改用 bili_reply_comment。二者严禁混用。"
             "【真实发送铁律·最高优先】'弹幕已发送。'只能出现在你实际调用本工具且收到成功结果（is_error=False）之后；"
             "绝不允许在未调用工具、调用失败或没有目标编号时声称已发送或编造发送成功——"
             "用户要求给视频发弹幕而你不知道当前视频 BV 号时，先调用 bili_see_video 感知获取 BV 号，"
@@ -1619,7 +1623,10 @@ class BiliViewerPlugin(NekoPluginBase):
     @llm_tool(
         name="bili_reply_comment",
         description=(
-            "【真实发送铁律·最高优先】'评论已发送。'只能出现在你实际调用本工具且收到成功结果（is_error=False）之后；"
+            "【弹幕≠评论铁律·最高优先】本工具只发'评论'（视频下方评论区/直播间评论区）；"
+            "'弹幕'是播放画面飘字，必须走 bili_video_send_danmaku / bili_live_send_danmaku / bili_danmaku 入口，严禁用本工具发弹幕。"
+            "用户说'发弹幕/弹幕说XX/弹幕XX'时严禁调用本工具；只有用户说'评论/写评论/评论区说/评价一下'时才调用本工具。"
+            "【真实发送铁律】'评论已发送。'只能出现在你实际调用本工具且收到成功结果（is_error=False）之后；"
             "绝不允许在未调用工具、调用失败或没有目标编号时声称已发送或编造发送成功——"
             "不知道评论对象（BV号/房间号）时先感知当前内容获取，仍拿不到就如实说'未获取到目标编号'，禁止假装已发送。"
             "【发送纪律·次优先】发送成功后，你的对外回复必须逐字原样只有一句话：'评论已发送。'"
@@ -2178,6 +2185,8 @@ class BiliViewerPlugin(NekoPluginBase):
             "用户请求'发弹幕''写评论''发动态''投稿''看视频详情''搜B站''看直播''查UP主'等B站相关操作时使用本插件。"
             "账号规则：写操作（弹幕/评论/动态/投稿）默认使用 YUI 独立小号（account=yui，未配置时回退主账号）；"
             "用户明确要求用自己的账号时传 account=main。自主运营任务中必须 account=yui，严禁用主账号。"
+            "【弹幕≠评论铁律】弹幕=播放画面飘字（发弹幕用 send_video_danmaku/send_live_danmaku 或 bili_danmaku 入口）；"
+            "评论=评论区（action=reply，走 bili_reply_comment）。用户说'发弹幕'严禁路由到评论；说'评论'严禁路由到弹幕。"
             "真实发送铁律：'弹幕已发送。'/'评论已发送。'只能出现在实际调用发送工具且收到成功结果之后；"
             "绝不允许未调用工具或没有目标编号时声称已发送、编造发送成功——"
             "用户要求发弹幕/评论而你不知道 BV 号或房间号时，先调用感知工具获取，拿不到就如实说'未获取到目标编号'。"
@@ -2272,6 +2281,7 @@ class BiliViewerPlugin(NekoPluginBase):
         name="发送B站弹幕",
         description=(
             "向B站直播间或视频发送弹幕。用户明确说'发弹幕''发一条弹幕''帮我发弹幕'时使用；"
+            "【弹幕≠评论】本入口只发弹幕（播放画面飘字），不是评论区评论——用户要评论走 bili_reply_comment。"
             "严禁主动询问'要不要发弹幕/要不要回复弹幕'——用户没要求就绝不调用。"
             "直播弹幕需房间号（room），视频弹幕需BV号（bvid），内容为 text；"
             "account 可选：yui=YUI 独立小号（默认）/ main=用户主账号。"
@@ -2310,6 +2320,15 @@ class BiliViewerPlugin(NekoPluginBase):
             return await self.bili_video_send_danmaku(bvid=bvid, text=text, progress=progress, account=account)
         if room:
             return await self.bili_live_send_danmaku(room=room, text=text, account=account)
+        # 感知兜底（v0.7.49）：未给编号但有内容时，自动感知当前正在看的视频/直播
+        if text:
+            tab = self._ext_tab()
+            if tab:
+                parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
+                if isinstance(parsed, dict) and parsed.get("kind") == "video" and parsed.get("bvid"):
+                    return await self.bili_video_send_danmaku(bvid=parsed["bvid"], text=text, progress=progress, account=account)
+                if isinstance(parsed, dict) and parsed.get("kind") == "live" and parsed.get("room_id"):
+                    return await self.bili_live_send_danmaku(room=parsed["room_id"], text=text, account=account)
         return {"output": "请提供直播间房间号（room）或视频BV号（bvid）与弹幕内容（text）。", "is_error": True, "error": "NO_TARGET"}
 
     # ══════════ 账号绑定（CDP 运行时接入 + 监控） ══════════
