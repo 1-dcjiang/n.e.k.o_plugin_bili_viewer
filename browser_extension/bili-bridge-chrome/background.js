@@ -424,3 +424,21 @@ try {
     if (win) windowFocused = win.focused !== false;
   });
 } catch (e) { /* 内核过旧无此 API：保持默认 true */ }
+
+// v0.2.22：标签切换/地址变化时重建声音捕获——tabCapture 流会随标签失活断开，
+// 旧版只靠 30s alarm 且 offscreen 未死时不重捕，切回直播标签后一直"听不到声音"。
+chrome.tabs.onActivated.addListener(async () => {
+  if (!audioEnabled) return;
+  const tabs = await chrome.tabs.query({ active: true }).catch(() => []);
+  const tab = (tabs.find((t) => t.url && t.url.indexOf("bilibili.com") >= 0)) || (tabs.length ? tabs[0] : null);
+  if (!tab || !tab.url || tab.url.indexOf("bilibili.com") < 0) return;
+  lastOffscreenBeat = 0;
+  ensureAudioSession();
+});
+chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
+  if (!audioEnabled) return;
+  if (changeInfo.url && changeInfo.url.indexOf("bilibili.com") >= 0) {
+    lastOffscreenBeat = 0;
+    ensureAudioSession();
+  }
+});
