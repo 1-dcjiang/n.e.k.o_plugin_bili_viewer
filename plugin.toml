@@ -5,8 +5,6 @@ description = "让 YUI 浏览、感知并管理哔哩哔哩：搜索视频/直�
 short_description = "让 YUI 浏览/感知/管理 B站：搜索、详情、弹幕、字幕、AI概要、评论、直播、UP主、稿件、发弹幕/评论/动态/投稿、大小号运营、系统音频桥听声音（全自动无需浏览器授权）"
 keywords = ["bilibili", "哔哩哔哩", "B站", "视频", "弹幕", "评论", "直播", "字幕", "AI概要", "UP主", "搜索", "bili", "danmaku", "live", "感知", "now_watching", "稿件", "发弹幕", "写评论", "动态", "投稿", "独立小号", "YUI运营", "自主行动", "后台静默", "不抢界面", "同步行动", "当前观看", "CDP", "自动绑定", "cookie", "浏览器扩展", "bili-bridge", "bili-bridge-chrome", "接入桥", "直连", "实时监控", "标签页感知", "Edge扩展", "360浏览器", "360极速", "360安全", "chrome扩展", "桌面投放", "zip压缩包", "三扩展", "wbi签名", "并发", "原子占用", "防重复", "大号小号", "默认小号", "默认账号", "account", "双账号", "绑定顺序", "分清大小号", "交换角色", "bili_accounts", "bili_set_roles", "accounts.json", "main_cookie"]
 version = "0.7.47"
-keywords = ["bilibili", "哔哩哔哩", "B站", "视频", "弹幕", "评论", "直播", "字幕", "AI概要", "UP主", "搜索", "bili", "danmaku", "live", "感知", "now_watching", "稿件", "发弹幕", "写评论", "动态", "投稿", "独立小号", "YUI运营", "自主行动", "后台静默", "不抢界面", "同步行动", "当前观看", "CDP", "自动绑定", "cookie", "浏览器扩展", "bili-bridge", "bili-bridge-chrome", "接入桥", "直连", "实时监控", "标签页感知", "Edge扩展", "360浏览器", "360极速", "360安全", "chrome扩展", "桌面投放", "zip压缩包", "三扩展", "wbi签名", "并发", "原子占用", "防重复", "大号小号", "默认小号", "默认账号", "account", "双账号", "绑定顺序", "分清大小号", "交换角色", "bili_accounts", "bili_set_roles", "accounts.json", "main_cookie"]
-version = "0.7.46"
 type = "plugin"
 entry = "plugin.plugins.bili_viewer:BiliViewerPlugin"
 
