@@ -304,22 +304,33 @@ async function startAudioCapture() {
   audioStarting = true;
   try {
     await ensureOffscreenDoc();
-    // 用 active:true（所有窗口）而非 lastFocusedWindow：DevTools/多窗口时仍能定位到用户看的 B站 标签
-    const tabs = await chrome.tabs.query({ active: true }).catch(() => []);
-    const tab = (tabs && tabs.find((t) => t.url && t.url.indexOf("bilibili.com") >= 0)) || (tabs && tabs[0]);
-    if (!tab || !tab.id || !tab.url || tab.url.indexOf("bilibili.com") < 0) {
-      // 当前不在 B站 页：先记住开关意图（v0.2.8 修复"一直关闭"——
-      // 旧版这里 throw 导致开关永远开不起来），等切到 B站 标签后由
-      // 标签监听/下一轮 alarm 自动启动捕获。
-      audioEnabled = true;
-      await chrome.storage.local.set({ [AUDIO_STATE_KEY]: true });
-      pushAudioState();
-      return;
+    // v0.2.25：发送带重试——offscreen 文档正在重建/销毁时 sendMessage 会报
+    // "message channel closed"（15:09:53 实测），短暂等待后重新取 streamId 再发
+    let started = false;
+    for (let attempt = 0; attempt < 3 && !started; attempt++) {
+      try {
+        // 用 active:true（所有窗口）而非 lastFocusedWindow：DevTools/多窗口时仍能定位到用户看的 B站 标签
+        const tabs = await chrome.tabs.query({ active: true }).catch(() => []);
+        const tab = (tabs && tabs.find((t) => t.url && t.url.indexOf("bilibili.com") >= 0)) || (tabs && tabs[0]);
+        if (!tab || !tab.id || !tab.url || tab.url.indexOf("bilibili.com") < 0) {
+          // 当前不在 B站 页：先记住开关意图（v0.2.8 修复"一直关闭"——
+          // 旧版这里 throw 导致开关永远开不起来），等切到 B站 标签后由
+          // 标签监听/下一轮 alarm 自动启动捕获。
+          audioEnabled = true;
+          await chrome.storage.local.set({ [AUDIO_STATE_KEY]: true });
+          pushAudioState();
+          return;
+        }
+        const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
+        // v0.2.19：回放只在页面被 tabCapture 静音时才启用（否则页面原声 + 回放 = 双音乐/回声）
+        const muted = !!(tab.mutedInfo && tab.mutedInfo.muted);
+        await chrome.runtime.sendMessage({ type: "start-audio", streamId: streamId, muted: muted });
+        started = true;
+      } catch (e) {
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 1000));
+        else throw e;
+      }
     }
-    const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
-    // v0.2.19：回放只在页面被 tabCapture 静音时才启用（否则页面原声 + 回放 = 双音乐/回声）
-    const muted = !!(tab.mutedInfo && tab.mutedInfo.muted);
-    await chrome.runtime.sendMessage({ type: "start-audio", streamId: streamId, muted: muted });
     audioEnabled = true;
     await chrome.storage.local.set({ [AUDIO_STATE_KEY]: true });
     pushAudioState();
@@ -344,21 +355,27 @@ async function stopAudioCapture() {
   pushAudioState();
 }
 
-function ensureAudioSession() {
+async function ensureAudioSession() {
   if (!audioEnabled || audioStarting) return;
   // SW 被唤醒（alarm/消息）时若 offscreen 已随 SW 关闭则重开；捕获持续到标签页切换。
   // v0.2.14 增补：offscreen 心跳过期（30s 无上报）视为死文档，先关再重建——
   // 避免 DevTools 检查视图等场景留下僵尸 offscreen 吞掉 start-audio 消息导致 0 推送。
-  chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] })
-    .then((existing) => {
-      const alive = existing && existing.length > 0;
-      const beatStale = Date.now() - lastOffscreenBeat > 30000;
-      if (!alive || beatStale) {
-        if (alive) chrome.offscreen.closeDocument().catch(() => {});
-        startAudioCapture();
+  // v0.2.25：closeDocument 后等待旧文档真正销毁（800ms），否则 start-audio 会发到
+  // 正在关闭的通道报 "message channel closed"，采集起不来。
+  try {
+    const existing = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] }).catch(() => []);
+    const alive = existing && existing.length > 0;
+    const beatStale = Date.now() - lastOffscreenBeat > 30000;
+    if (!alive || beatStale) {
+      if (alive) {
+        chrome.offscreen.closeDocument().catch(() => {});
+        await new Promise((r) => setTimeout(r, 800));
       }
-    })
-    .catch(() => startAudioCapture());
+      startAudioCapture();
+    }
+  } catch (e) {
+    startAudioCapture();
+  }
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -436,13 +453,14 @@ chrome.tabs.onActivated.addListener(async () => {
   const tabs = await chrome.tabs.query({ active: true }).catch(() => []);
   const tab = (tabs.find((t) => t.url && t.url.indexOf("bilibili.com") >= 0)) || (tabs.length ? tabs[0] : null);
   if (!tab || !tab.url || tab.url.indexOf("bilibili.com") < 0) return;
-  lastOffscreenBeat = 0;
-  ensureAudioSession();
+  // v0.2.25：标签切换直接重捕（startCapture 内部会干净地停旧流再捕新标签），
+  // 不再置零 lastOffscreenBeat/强关文档——旧逻辑会误判正常采集为僵尸，
+  // 触发 offscreen 重建竞态导致 "message channel closed" 采集中断。
+  if (!audioStarting) startAudioCapture();
 });
 chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
   if (!audioEnabled) return;
   if (changeInfo.url && changeInfo.url.indexOf("bilibili.com") >= 0) {
-    lastOffscreenBeat = 0;
-    ensureAudioSession();
+    if (!audioStarting) startAudioCapture();
   }
 });
