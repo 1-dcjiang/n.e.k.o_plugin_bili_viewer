@@ -49,6 +49,17 @@ def _pick_loopback():
     mics = sc.all_microphones(include_loopback=True)
     if not mics:
         raise RuntimeError("no microphone/loopback device")
+    # 优先：默认输出设备对应的 loopback（蓝牙耳机/扬声器切换后自动跟随）
+    try:
+        default = sc.default_speaker()
+        dname = (default.name or "").strip()
+        if dname:
+            for m in mics:
+                if m.name == dname or m.name.startswith(dname.split("(")[0].strip()):
+                    return m
+    except Exception:
+        pass
+    # 兜底：名字含扬声器/speaker
     for m in mics:
         if "扬声器" in m.name or "speaker" in m.name.lower():
             return m
