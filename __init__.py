@@ -2091,6 +2091,17 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=20.0,
     )
     async def bili_listen_audio(self, **_):
+        # 系统音频桥优先（WASAPI loopback 全自动采集系统输出，无需浏览器授权），
+        # 扩展 tabCapture 链路保留为备选（系统桥不可用时兜底）。
+        self._ensure_sys_audio_bridge()
+        sys_asr = self._sys_audio_text()
+        if sys_asr:
+            return {
+                "output": sys_asr["text"],
+                "is_error": False,
+                "meta": {"agent": {"delivery": "silent"}},
+                "result": {"text": sys_asr["text"], "at": sys_asr.get("at", 0), "source": "sys_loopback"},
+            }
         asr = self._ext_asr_text()
         if not asr:
             # 如实说明没听到；诊断细节放 result（YUI 可据此如实转述，禁止猜测原因）
@@ -2103,6 +2114,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 reason = "no_audio_received"
             else:
                 reason = "silence_or_stale"
+            sys_proc = getattr(self, "_sys_audio_proc", None)
             return {
                 "output": "暂时没有听到声音。",
                 "is_error": True,
@@ -2113,13 +2125,14 @@ class BiliViewerPlugin(NekoPluginBase):
                     "audio_enabled": bool(state.get("enabled")),
                     "audio_enabled_at": state.get("at"),
                     "last_audio_at": last_audio.get("at") if last_audio else None,
+                    "sys_audio_bridge": bool(sys_proc is not None and sys_proc.poll() is None),
                 },
             }
         return {
             "output": asr["text"],
             "is_error": False,
             "meta": {"agent": {"delivery": "silent"}},
-            "result": {"text": asr["text"], "at": asr.get("at", 0)},
+            "result": {"text": asr["text"], "at": asr.get("at", 0), "source": "extension"},
         }
 
     # ══════════ 自动路由入口（plugin_entry：TaskExecutor 评估可见） ══════════
@@ -2604,6 +2617,79 @@ class BiliViewerPlugin(NekoPluginBase):
         self._asr_bridge_proc = proc
         self._asr_bridge_at = time.time()
         return proc
+
+    def _ensure_sys_audio_bridge(self):
+        """确保系统音频桥常驻子进程存活（幂等）。不可用返回 None。
+
+        系统音频桥（audio_bridge.py）用 soundcard 的 WASAPI loopback 采集
+        系统输出音频，全自动、无需浏览器授权；子进程自带 faster-whisper
+        转写，stdout 事件 {"op":"heard","text":...,"at":...} 由后台线程写入
+        self._sys_heard。依赖 soundcard（N.E.K.O venv 已装）。
+        """
+        proc = getattr(self, "_sys_audio_proc", None)
+        if proc is not None and proc.poll() is None:
+            return proc
+        # 冷却：启动失败/崩溃后 60s 内不反复拉起，避免日志风暴
+        if time.time() - getattr(self, "_sys_audio_at", 0.0) < 60.0:
+            return None
+        py = self._find_asr_python()
+        if not py:
+            return None
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "audio_bridge.py")
+        try:
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            proc = subprocess.Popen(
+                [py, script],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                bufsize=1,
+                creationflags=flags,
+            )
+            threading.Thread(
+                target=self._sys_audio_reader, args=(proc,), daemon=True, name="bili-sys-audio"
+            ).start()
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("系统音频桥启动失败：%s", exc)
+            proc = None
+        self._sys_audio_proc = proc
+        self._sys_audio_at = time.time()
+        return proc
+
+    def _sys_audio_reader(self, proc: subprocess.Popen):
+        """读系统音频桥 stdout：heard 事件写入 self._sys_heard（线程安全）。"""
+        try:
+            for line in proc.stdout:
+                line = (line or "").strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except Exception:
+                    continue
+                if data.get("op") == "heard" and data.get("text"):
+                    self._sys_heard = {
+                        "text": data["text"][:500],
+                        "at": float(data.get("at") or time.time()),
+                    }
+                    _logger.info("sys audio heard: chars=%d", len(data["text"]))
+                elif data.get("op") == "ready":
+                    _logger.info("sys audio bridge ready: %s", str(data.get("device", ""))[:60])
+                elif data.get("op") == "error":
+                    _logger.warning("sys audio bridge error: %s", str(data.get("error", ""))[:200])
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _sys_audio_text(self) -> dict | None:
+        """返回新鲜（30s 内）的系统音频转写；无或过期返回 None。"""
+        heard = getattr(self, "_sys_heard", None)
+        if not heard or not heard.get("text"):
+            return None
+        if time.time() - float(heard.get("at") or 0) > _ASR_RESULT_WINDOW:
+            return None
+        return heard
 
     def _asr_transcribe_via_bridge(self, path: str, lang: str = "zh") -> str | None:
         """经外部 ASR 桥转写 wav：返回文本（可能为空字符串）；失败返回 None。"""
