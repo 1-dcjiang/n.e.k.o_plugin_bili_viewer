@@ -622,6 +622,13 @@ class BiliViewerPlugin(NekoPluginBase):
             os.environ["BILI_COOKIE"] = cookie
         self._cookie_source = source
         self._start_sync_watcher()
+        # 2.5) 系统音频桥常驻：启动即拉起 WASAPI loopback 采集（全自动、无需浏览器授权），
+        #      让 YUI 随时能听到，而不是等 bili_listen_audio 被调用才冷启动。
+        try:
+            self._ensure_sys_audio_bridge()
+            logger.info("sys audio bridge ensured at startup")
+        except Exception as e:
+            logger.warning(f"sys audio bridge startup ensure failed: {e}")
         return {"status": "ready", "plugin": "bili_viewer"}
 
     @lifecycle(id="shutdown")
