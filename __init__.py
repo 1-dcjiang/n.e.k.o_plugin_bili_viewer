@@ -894,10 +894,18 @@ class BiliViewerPlugin(NekoPluginBase):
         browser = (browser or params.get("browser") or "").strip().lower()
         if not room:
             import re as _re
-            _url = str(getattr(self, "_ext_dom_data", {}).get("url") or "")
-            _m = _re.search(r"live\.bilibili\.com/(\d+)", _url)
-            if _m:
-                room = _m.group(1)
+            _candidates = [str(getattr(self, "_ext_dom_data", {}).get("url") or "")]
+            try:
+                _tab = self._ext_tab()
+                if _tab:
+                    _candidates.append(str(_tab.get("url") or ""))
+            except Exception:
+                pass
+            for _u in _candidates:
+                _m = _re.search(r"live\.bilibili\.com/(\d+)", _u)
+                if _m:
+                    room = _m.group(1)
+                    break
         else:
             import re as _re
             _m = _re.search(r"live\.bilibili\.com/(\d+)", room)
