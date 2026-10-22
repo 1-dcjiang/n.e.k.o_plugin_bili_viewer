@@ -2323,7 +2323,7 @@ def now_watching(tab: dict | None = None) -> dict:
         url = str(tab.get("url") or "")
         title = str(tab.get("title") or "")
         parsed = parse_bili_url(url, title)
-        if parsed is not None:
+        if isinstance(parsed, dict):
             parsed["from"] = "extension-tab"
         else:
             parsed = parse_window_title(title, "chrome.exe")

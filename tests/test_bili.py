@@ -238,7 +238,7 @@ def test_my_info_default_account_uses_yui(monkeypatch) -> None:
 
     monkeypatch.setattr(bili, "_http_get", fake_get)
     info = bili.my_info()
-    assert seen == ["yui"]  # 默认小号
+    assert seen == ["yui", "yui"]  # nav + relation/stat 补查（v0.7.11+），两次都走小号
     assert info["mid"] == 9
 
 
@@ -257,6 +257,7 @@ def test_msg_length_validation(monkeypatch) -> None:
     from plugin.plugins.bili_viewer.bili import BiliError, live_send_danmaku
 
     monkeypatch.setenv("BILI_COOKIE", "SESSDATA=abc; bili_jct=tok")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=abc; bili_jct=tok")  # 默认 yui
     try:
         live_send_danmaku("1", "这" * 40)
         raise AssertionError("should raise")
@@ -341,6 +342,7 @@ def test_live_send_danmaku_uses_msg_send(monkeypatch) -> None:
     from plugin.plugins.bili_viewer import bili
 
     monkeypatch.setenv("BILI_COOKIE", "SESSDATA=abc; bili_jct=tok")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=abc; bili_jct=tok")  # 默认 yui（v0.7.36+）
     posted: dict = {}
 
     def _fake_post(url, form, timeout=12.0, account="main"):
@@ -364,8 +366,9 @@ def test_live_send_danmaku_uses_msg_send(monkeypatch) -> None:
 def test_no_csrf_for_write(monkeypatch) -> None:
     from plugin.plugins.bili_viewer.bili import BiliError, live_send_danmaku
 
-    # 有 SESSDATA 但缺 bili_jct：应明确提示缺 CSRF
+    # 有 SESSDATA 但缺 bili_jct：应明确提示缺 CSRF（默认 yui，需配 yui 侧 cookie）
     monkeypatch.setenv("BILI_COOKIE", "SESSDATA=abc")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=abc")
     try:
         live_send_danmaku("1", "你好")
         raise AssertionError("should raise")
@@ -390,6 +393,7 @@ def test_video_send_danmaku_posts_with_cid(monkeypatch) -> None:
     from plugin.plugins.bili_viewer import bili
 
     monkeypatch.setenv("BILI_COOKIE", "SESSDATA=abc; bili_jct=tok")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=abc; bili_jct=tok")  # 默认 yui
     posted: dict = {}
 
     def _fake_video_info(bvid):
@@ -425,6 +429,7 @@ def test_video_send_danmaku_keeps_biz_code(monkeypatch) -> None:
     from plugin.plugins.bili_viewer.bili import BiliError
 
     monkeypatch.setenv("BILI_COOKIE", "SESSDATA=abc; bili_jct=tok")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=abc; bili_jct=tok")  # 默认 yui
 
     def _fake_video_info(bvid):
         return {"title": "测试", "pages": [{"cid": 10086}]}
@@ -448,6 +453,7 @@ def test_video_send_danmaku_msg_limit(monkeypatch) -> None:
     from plugin.plugins.bili_viewer.bili import BiliError, send_video_danmaku
 
     monkeypatch.setenv("BILI_COOKIE", "SESSDATA=abc; bili_jct=tok")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=abc; bili_jct=tok")  # 默认 yui
     try:
         send_video_danmaku("BV1xx411c7mD", "这" * 120)
         raise AssertionError("should raise")

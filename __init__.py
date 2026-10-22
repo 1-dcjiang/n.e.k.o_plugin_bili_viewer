@@ -283,7 +283,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 if tab:
                     # 扩展标签页：本地 URL 解析（零网络），精确感知当前 B站页面
                     parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
-                    if parsed is None:
+                    if not isinstance(parsed, dict):
                         parsed = bili.parse_window_title(tab.get("title", ""), "chrome.exe")
                 else:
                     parsed = bili.pick_now_watching()
@@ -894,7 +894,8 @@ class BiliViewerPlugin(NekoPluginBase):
         browser = (browser or params.get("browser") or "").strip().lower()
         if not room:
             import re as _re
-            _candidates = [str(getattr(self, "_ext_dom_data", {}).get("url") or "")]
+            _domd = getattr(self, "_ext_dom_data", None)
+            _candidates = [str(_domd.get("url") or "") if isinstance(_domd, dict) else ""]
             try:
                 _tab = self._ext_tab()
                 if _tab:
@@ -1333,21 +1334,22 @@ class BiliViewerPlugin(NekoPluginBase):
             tab = self._ext_tab()
             if tab:
                 parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
-                if parsed is not None and parsed.get("kind") == "live" and parsed.get("room_id"):
+                if isinstance(parsed, dict) and parsed.get("kind") == "live" and parsed.get("room_id"):
                     room = str(parsed["room_id"])
             if not room and dom_live:
                 parsed = bili.parse_bili_url(dom_live.get("url", ""), "")
-                if parsed is not None and parsed.get("room_id"):
+                if isinstance(parsed, dict) and parsed.get("room_id"):
                     room = str(parsed["room_id"])
         if not room:
             return {"output": "未提供房间号且感知不到当前直播。", "is_error": True, "error": "NO_ROOM"}
         try:
-            if dom_live and bili.parse_bili_url(dom_live.get("url", ""), ""):
+            _pl = bili.parse_bili_url(dom_live.get("url", ""), "") if dom_live else None
+            if dom_live and isinstance(_pl, dict):
                 # 页面级实时 DOM 优先：标题/在线/弹幕来自浏览器页面（比 API 更即时）
                 d = dom_live
                 see = {
                     "kind": "live",
-                    "room_id": int((bili.parse_bili_url(d.get("url", ""), "") or {}).get("room_id") or 0) or None,
+                    "room_id": int(_pl.get("room_id") or 0) or None,
                     "uname": d.get("uname", ""),
                     "title": d.get("title", ""),
                     "status": "直播中",
@@ -1398,11 +1400,11 @@ class BiliViewerPlugin(NekoPluginBase):
             tab = self._ext_tab()
             if tab:
                 parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
-                if parsed is not None and parsed.get("kind") == "video" and parsed.get("bvid"):
+                if isinstance(parsed, dict) and parsed.get("kind") == "video" and parsed.get("bvid"):
                     bvid = str(parsed["bvid"])
             if not bvid and dom_video:
                 parsed = bili.parse_bili_url(dom_video.get("url", ""), "")
-                if parsed is not None and parsed.get("bvid"):
+                if isinstance(parsed, dict) and parsed.get("bvid"):
                     bvid = str(parsed["bvid"])
         if not bvid:
             return {"output": "未提供BV号且感知不到当前视频。", "is_error": True, "error": "NO_BVID"}
@@ -1466,7 +1468,7 @@ class BiliViewerPlugin(NekoPluginBase):
         page_room = None
         if tab:
             parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
-            if parsed is not None and parsed.get("kind") == "live" and parsed.get("room_id"):
+            if isinstance(parsed, dict) and parsed.get("kind") == "live" and parsed.get("room_id"):
                 page_room = str(parsed["room_id"])
         if not room:
             # 兜底：LLM 直接函数调用未给 room 时，感知当前正在看的直播自动补齐
@@ -1550,7 +1552,7 @@ class BiliViewerPlugin(NekoPluginBase):
             tab = self._ext_tab()
             if tab:
                 parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
-                if parsed is not None and parsed.get("kind") == "video" and parsed.get("bvid"):
+                if isinstance(parsed, dict) and parsed.get("kind") == "video" and parsed.get("bvid"):
                     bvid = parsed["bvid"]
         if not bvid:
             self._record_send_result("video", False, "NO_BVID", "无视频目标（未提供 BV 号且感知不到当前视频）", "")
@@ -1629,33 +1631,33 @@ class BiliViewerPlugin(NekoPluginBase):
         type_id = None
         if target:
             parsed = bili.parse_bili_url(target, "")
-            if parsed is None:
+            if not isinstance(parsed, dict):
                 # 裸 BV 号 / 裸房间号兜底解析
                 try:
                     parsed = {"kind": "video", "bvid": bili._parse_bvid(target)}
                 except bili.BiliError:
                     parsed = {"kind": "live", "room_id": target} if target.isdigit() and len(target) >= 5 else None
-            if parsed is not None and parsed.get("kind") == "video" and parsed.get("bvid"):
+            if isinstance(parsed, dict) and parsed.get("kind") == "video" and parsed.get("bvid"):
                 try:
                     aid = bili.video_info(parsed["bvid"]).get("aid")
                     if aid:
                         oid, type_id = int(aid), 1
                 except bili.BiliError:
                     oid, type_id = None, None
-            elif parsed is not None and parsed.get("kind") == "live" and parsed.get("room_id"):
+            elif isinstance(parsed, dict) and parsed.get("kind") == "live" and parsed.get("room_id"):
                 oid, type_id = int(parsed["room_id"]), 11
         if oid is None:
             tab = self._ext_tab()
             if tab:
                 parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
-                if parsed is not None and parsed.get("kind") == "video" and parsed.get("bvid"):
+                if isinstance(parsed, dict) and parsed.get("kind") == "video" and parsed.get("bvid"):
                     try:
                         aid = bili.video_info(parsed["bvid"]).get("aid")
                         if aid:
                             oid, type_id = int(aid), 1
                     except bili.BiliError:
                         pass
-                elif parsed is not None and parsed.get("kind") == "live" and parsed.get("room_id"):
+                elif isinstance(parsed, dict) and parsed.get("kind") == "live" and parsed.get("room_id"):
                     oid, type_id = int(parsed["room_id"]), 11
         if oid is None or type_id is None:
             return {"output": "无法确定评论目标：请提供视频BV号或直播间房间号（或先在 B站看这个内容）。", "is_error": True, "error": "NO_TARGET"}
@@ -2200,7 +2202,7 @@ class BiliViewerPlugin(NekoPluginBase):
         tab = self._ext_tab()
         if tab:
             parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
-            if parsed is not None:
+            if isinstance(parsed, dict):
                 kind = parsed.get("kind")
                 if text and kind == "video" and parsed.get("bvid"):
                     return await self.bili_video_send_danmaku(bvid=parsed["bvid"], text=text, progress=progress, account=account)
@@ -2367,6 +2369,8 @@ class BiliViewerPlugin(NekoPluginBase):
         DOM 数据仅本地使用：为 bili_see_live / bili_see_video 提供页面级实时内容，
         不上传、不写日志。
         """
+        if not isinstance(body, dict):
+            return {"ok": False, "detail": "bad payload: expect dict"}
         ts = float(body.get("at") or 0) or time.time()
         raw_dms = body.get("danmaku") or []
         if isinstance(raw_dms, list):
@@ -2400,7 +2404,7 @@ class BiliViewerPlugin(NekoPluginBase):
     def _ext_dom(self) -> dict | None:
         """返回新鲜（120s 内）的扩展页面 DOM 实况；无或过期返回 None。"""
         dom = getattr(self, "_ext_dom_data", None)
-        if not dom:
+        if not isinstance(dom, dict):
             return None
         if time.time() - float(dom.get("at") or 0) > web_ui._EXT_ONLINE_WINDOW:
             return None
@@ -2699,7 +2703,7 @@ class BiliViewerPlugin(NekoPluginBase):
         返回最新 tab。
         """
         tab = getattr(self, "_ext_tab_data", None)
-        if not tab:
+        if not isinstance(tab, dict):
             return None
         if time.time() - float(tab.get("at") or 0) > web_ui._EXT_ONLINE_WINDOW:
             return None
