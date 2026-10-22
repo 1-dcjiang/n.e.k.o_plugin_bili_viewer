@@ -241,6 +241,10 @@ async function checkCommands() {
     const cmd = await resp.json();
     if (!cmd || !cmd.id) return;
     if (cmd.type === "enter-live" && cmd.room) {
+      // v0.2.23：指令可指定浏览器执行；非目标浏览器跳过（不执行不 ack，留给目标扩展）
+      const want = (cmd.browser || "").toLowerCase();
+      const mine = EXT_SOURCE.includes("-edge-") ? "edge" : EXT_SOURCE.includes("-360-") ? "360" : "chrome";
+      if (want && want !== mine) return;
       try {
         const url = `https://live.bilibili.com/${cmd.room}`;
         const all = await chrome.tabs.query({});

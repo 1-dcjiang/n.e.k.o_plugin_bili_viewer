@@ -279,9 +279,11 @@ class _PanelHandler(BaseHTTPRequestHandler):
             body = self._read_json_body()
             cmd_type = body.get("type") or ""
             room = body.get("room") or ""
+            browser = str(body.get("browser") or "").strip().lower()
             if cmd_type == "enter-live" and str(room).isdigit():
                 _CMD_SEQ += 1
-                _CMD_QUEUE.append({"id": _CMD_SEQ, "type": "enter-live", "room": str(room), "created": time.time()})
+                _CMD_QUEUE.append({"id": _CMD_SEQ, "type": "enter-live", "room": str(room),
+                                   "browser": browser or None, "created": time.time()})
                 self._json(200, {"queued": True, "id": _CMD_SEQ})
             else:
                 self._json(400, {"error": "bad command"})

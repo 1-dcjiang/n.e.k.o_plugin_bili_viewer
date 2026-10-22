@@ -871,7 +871,10 @@ class BiliViewerPlugin(NekoPluginBase):
             "让 YUI 小号真正进入指定直播间（出现在该直播间观众/在线名单里）：先验证房间号，"
             "再命令浏览器扩展打开该直播间标签页并驻场（浏览器需已登录小号 YUI小猫娘）。"
             "何时用：用户说'让她进直播间/进入直播间/挂在直播间/让她在场'等需要 YUI 以观众身份在场时。"
-            "参数 room：直播间房间号（必填，纯数字，如 9458332）；account：yui（默认）/ main。"
+            "参数 room：直播间房间号（必填，纯数字，如 9458332）；account：yui（默认）/ main；"
+            "browser：指定由哪个浏览器扩展执行（chrome/edge/360，可选）。用户明确说'走 Edge 后台/用 Edge 进直播间'"
+            "时必须传 edge——只有 Edge 扩展会执行并开标签，其余浏览器扩展不会抢走指令。"
+            "浏览器需已登录小号 YUI小猫娘，否则驻场的是浏览器当前登录的其它账号。"
         ),
         parameters={
             "type": "object",
@@ -883,12 +886,15 @@ class BiliViewerPlugin(NekoPluginBase):
         },
         timeout=30.0,
     )
-    async def bili_enter_live(self, *, room: str = "", account: str = "", **_):
+    async def bili_enter_live(self, *, room: str = "", account: str = "", browser: str = "", **_):
         params = _.get("parameters") or {}
         room = (room or params.get("room") or "").strip()
         acct = (account or params.get("account") or "yui").strip() or "yui"
+        browser = (browser or params.get("browser") or "").strip().lower()
         if not room.isdigit():
             return {"output": "房间号格式错误：请输入纯数字直播间房间号。", "is_error": True, "error": "BAD_ROOM"}
+        if browser and browser not in ("chrome", "edge", "360"):
+            return {"output": "browser 参数只能为 chrome / edge / 360。", "is_error": True, "error": "BAD_BROWSER"}
         try:
             bili.live_info(room)
         except bili.BiliError as exc:
@@ -897,9 +903,12 @@ class BiliViewerPlugin(NekoPluginBase):
         try:
             import json as _json
             import urllib.request
+            body = {"type": "enter-live", "room": room}
+            if browser:
+                body["browser"] = browser
             req = urllib.request.Request(
                 "http://127.0.0.1:8765/api/queue-command",
-                data=_json.dumps({"type": "enter-live", "room": room}).encode("utf-8"),
+                data=_json.dumps(body).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
@@ -909,12 +918,14 @@ class BiliViewerPlugin(NekoPluginBase):
             return {"output": f"指令下发失败（面板服务不可达）：{exc}", "is_error": True, "error": "CMD_FAILED"}
         if not r.get("queued"):
             return {"output": "指令入队失败，请检查面板服务。", "is_error": True, "error": "CMD_QUEUE_FAILED"}
+        who = {"chrome": "Chrome", "edge": "Edge", "360": "360浏览器"}.get(browser, "浏览器")
         return {
-            "output": f"已向浏览器扩展下发进入直播间指令（房间 {room}，小号身份驻场，数秒内打开标签页）。",
+            "output": f"已向{who}扩展下发进入直播间指令（房间 {room}，小号身份驻场，数秒内打开标签页）。",
             "is_error": False,
             "room": room,
             "account": acct,
-            "note": "观众名单将在标签页加载后显示小号；若浏览器未登录小号则需先登录",
+            "browser": browser or "any",
+            "note": "观众名单将在标签页加载后显示小号；若该浏览器未登录小号则需先登录",
             "meta": {"agent": {"delivery": "silent"}},
         }
 
