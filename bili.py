@@ -1107,6 +1107,7 @@ def render_see(see: dict) -> str:
     if see.get("kind") == "live":
         lines = [
             f"直播间实况：{see.get('title') or '（无标题）'}",
+            f"房间号：{see.get('room_id') or '未知'}",
             f"主播：{see.get('uname') or '未知'}｜状态：{see.get('status') or '未知'}｜在线：{see.get('online') or 0}人",
             f"分区：{see.get('parent_area') or ''}{see.get('area') or ''}",
             "最近弹幕：",
