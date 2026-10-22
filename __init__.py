@@ -871,7 +871,8 @@ class BiliViewerPlugin(NekoPluginBase):
             "让 YUI 小号真正进入指定直播间（出现在该直播间观众/在线名单里）：先验证房间号，"
             "再命令浏览器扩展打开该直播间标签页并驻场（浏览器需已登录小号 YUI小猫娘）。"
             "何时用：用户说'让她进直播间/进入直播间/挂在直播间/让她在场'等需要 YUI 以观众身份在场时。"
-            "参数 room：直播间房间号（必填，纯数字，如 9458332）；account：yui（默认）/ main；"
+            "参数 room：直播间房间号（可省略——未提供时自动从浏览器当前打开的直播间页面获取，无需用户手动提供；"
+            "浏览器当前未打开直播间时则必须提供）。account：yui（默认）/ main；"
             "browser：指定由哪个浏览器扩展执行（chrome/edge/360，可选）。用户明确说'走 Edge 后台/用 Edge 进直播间'"
             "时必须传 edge——只有 Edge 扩展会执行并开标签，其余浏览器扩展不会抢走指令。"
             "浏览器需已登录小号 YUI小猫娘，否则驻场的是浏览器当前登录的其它账号。"
@@ -891,8 +892,19 @@ class BiliViewerPlugin(NekoPluginBase):
         room = (room or params.get("room") or "").strip()
         acct = (account or params.get("account") or "yui").strip() or "yui"
         browser = (browser or params.get("browser") or "").strip().lower()
+        if not room:
+            import re as _re
+            _url = str(getattr(self, "_ext_dom_data", {}).get("url") or "")
+            _m = _re.search(r"live\.bilibili\.com/(\d+)", _url)
+            if _m:
+                room = _m.group(1)
+        else:
+            import re as _re
+            _m = _re.search(r"live\.bilibili\.com/(\d+)", room)
+            if _m:
+                room = _m.group(1)
         if not room.isdigit():
-            return {"output": "房间号格式错误：请输入纯数字直播间房间号。", "is_error": True, "error": "BAD_ROOM"}
+            return {"output": "未能从当前直播间页面获取房间号：请提供纯数字房间号，或先在浏览器打开直播间页面。", "is_error": True, "error": "NO_ROOM"}
         if browser and browser not in ("chrome", "edge", "360"):
             return {"output": "browser 参数只能为 chrome / edge / 360。", "is_error": True, "error": "BAD_BROWSER"}
         try:
