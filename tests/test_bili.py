@@ -403,7 +403,7 @@ def test_video_send_danmaku_posts_with_cid(monkeypatch) -> None:
     def _fake_post(url, form, timeout=12.0, account="main"):
         assert url.endswith("/x/v2/dm/post")
         posted.update(url=url, form=form, account=account)
-        return {"code": 0, "message": "0"}
+        return {"code": 0, "message": "0", "data": {"dmid": 900123}}  # v0.7.50: 需 dmid 才确认成功
 
     monkeypatch.setattr(bili, "video_info", _fake_video_info)
     monkeypatch.setattr(bili, "_http_post", _fake_post)
@@ -1248,3 +1248,93 @@ def test_video_send_danmaku_dedup_once(monkeypatch) -> None:
     r3 = asyncio.run(inst.bili_video_send_danmaku(bvid="BV1GJ411x7h7", text="镇站之宝", progress=30))
     assert r3["is_error"] is False and r3["result"].get("dedup") is None
     assert len(sent) == 2
+
+# ══════════ v0.7.50：评论回读验证 / 弹幕 dmid 校验（防假成功） ══════════
+
+
+def test_reply_visible_hit(monkeypatch) -> None:
+    from plugin.plugins.bili_viewer import bili
+
+    def fake_wbi_get(url, params, timeout=12.0):
+        return {
+            "code": 0,
+            "data": {
+                "replies": [
+                    {
+                        "member": {"mid": 3494363678116792, "uname": "yui"},
+                        "content": {"message": "天梯T0卡组，美澳跳很强"},
+                        "rpid": 1,
+                    }
+                ]
+            },
+        }
+
+    monkeypatch.setattr(bili, "_wbi_get", fake_wbi_get)
+    assert bili._reply_visible(123, 1, "3494363678116792", "美澳跳很强") is True
+
+
+def test_reply_visible_miss(monkeypatch) -> None:
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setattr(bili, "_wbi_get", lambda url, params, timeout=12.0: {"code": 0, "data": {"replies": []}})
+    assert bili._reply_visible(123, 1, "3494363678116792", "不存在的内容") is False
+
+
+def test_add_reply_unverified_when_not_visible(monkeypatch) -> None:
+    """接口 code=0 但回读看不到自己的评论 → 必须抛 REPLAY_UNVERIFIED，禁止假成功。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setattr(bili, "_csrf", lambda account: "tok")
+    monkeypatch.setattr(bili, "_http_post", lambda url, form, timeout=12.0, account="main", query=None: {"code": 0})
+    monkeypatch.setattr(bili, "my_info", lambda account: {"mid": 3494363678116792})
+    monkeypatch.setattr(bili, "_reply_visible", lambda oid, type_id, uid, text, tries=2: False)
+    try:
+        bili.add_reply(999999999999, 1, "测试评论")
+        raise AssertionError("应当抛 REPLAY_UNVERIFIED")
+    except bili.BiliError as exc:
+        assert exc.code == "REPLY_UNVERIFIED"
+
+
+def test_add_reply_verify_false_skips_check(monkeypatch) -> None:
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setattr(bili, "_csrf", lambda account: "tok")
+    monkeypatch.setattr(bili, "_http_post", lambda url, form, timeout=12.0, account="main", query=None: {"code": 0})
+    called: list[bool] = []
+    monkeypatch.setattr(bili, "_reply_visible", lambda *a, **k: called.append(True) or True)
+    r = bili.add_reply(123, 1, "测试评论", verify=False)
+    assert r["ok"] is True
+    assert not called  # verify=False 不做回读
+
+
+def test_send_video_danmaku_unverified_without_dmid(monkeypatch) -> None:
+    """弹幕接口 code=0 但不返回 dmid → 抛 DANMAKU_UNVERIFIED，禁止声称已发出。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setattr(bili, "_csrf", lambda account: "tok")
+    monkeypatch.setattr(bili, "video_info", lambda bvid: {"aid": 123, "pages": [{"cid": 456}]})
+    monkeypatch.setattr(bili, "_get_mixin_key", lambda: "m" * 32)
+    monkeypatch.setattr(bili, "_wbi_sign", lambda params, mixin: params)
+    monkeypatch.setattr(bili, "_http_post", lambda url, form, timeout=12.0, account="main", query=None: {"code": 0, "data": {}})
+    try:
+        bili.send_video_danmaku("BV1xx411c7mD", "测试弹幕")
+        raise AssertionError("应当抛 DANMAKU_UNVERIFIED")
+    except bili.BiliError as exc:
+        assert exc.code == "DANMAKU_UNVERIFIED"
+
+
+def test_send_video_danmaku_ok_with_dmid(monkeypatch) -> None:
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setattr(bili, "_csrf", lambda account: "tok")
+    monkeypatch.setattr(bili, "video_info", lambda bvid: {"aid": 123, "pages": [{"cid": 456}]})
+    monkeypatch.setattr(bili, "_get_mixin_key", lambda: "m" * 32)
+    monkeypatch.setattr(bili, "_wbi_sign", lambda params, mixin: params)
+    monkeypatch.setattr(bili, "_http_post", lambda url, form, timeout=12.0, account="main", query=None: {"code": 0, "data": {"dmid": 8888}})
+    r = bili.send_video_danmaku("BV1xx411c7mD", "测试弹幕")
+    assert r["ok"] is True
+    assert r["dmid"] == "8888"

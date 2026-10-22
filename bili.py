@@ -1748,7 +1748,14 @@ def send_video_danmaku(bvid: str, text: str, progress_ms: int = 0, account: str 
         data = _http_post(_API + "/x/v2/dm/post", form, account=account)
     except BiliError as exc:
         raise BiliError("视频弹幕发送失败：" + exc.message, "SEND_FAILED:" + exc.code) from exc
-    return {"ok": True, "bvid": bvid, "cid": int(cid), "text": text, "progress_ms": int(progress_ms), "server": data.get("message") or ""}
+    dm = data.get("data") or {}
+    dmid = str(dm.get("dmid") or "")
+    if not dmid:
+        raise BiliError(
+            "弹幕接口已接受（code=0）但未返回弹幕 ID（dmid），可能被风控拦截——不能确认已发送，请勿声称已发出。",
+            "DANMAKU_UNVERIFIED",
+        )
+    return {"ok": True, "bvid": bvid, "cid": int(cid), "text": text, "progress_ms": int(progress_ms), "dmid": dmid}
 
 
 # ══════════════ YUI 独立小号写操作（评论/动态/投稿） ══════════════
@@ -1800,13 +1807,18 @@ def _http_post_json(
     return resp_data
 
 
-def add_reply(oid: int, type_id: int, text: str, account: str = "yui") -> dict:
+def add_reply(oid: int, type_id: int, text: str, account: str = "yui", verify: bool = True) -> dict:
     """用指定账号发一条评论。type_id：1=视频，2=动态，3=专栏，11=直播。
 
     参数：
         oid：目标对象的 id（视频=aid、动态=动态id、直播=房间号、专栏=cvid）。
         type_id：评论区类型（1 视频 / 2 动态 / 3 专栏 / 11 直播）。
         text：评论内容（最长 1000 字）。
+        verify：发送后回读评论区验证自己的评论真实可见（v0.7.50 防假成功）。
+
+    注意：B站 评论接口对无效目标/风控命中也可能返回 code=0（假成功），
+    仅凭 code==0 判定成功不可靠；verify=True 时会回读评论区，
+    找不到自己的评论即抛 REPLAY_UNVERIFIED，绝不静默声称已发送。
     """
     _require_login(account)
     text = (text or "").strip()
@@ -1829,7 +1841,45 @@ def add_reply(oid: int, type_id: int, text: str, account: str = "yui") -> dict:
         _http_post(_API + "/x/v2/reply/add", form, account=account)
     except BiliError as exc:
         raise BiliError("评论发送失败：" + exc.message, "REPLY_FAILED:" + exc.code) from exc
+    if verify:
+        try:
+            uid = str((my_info(account) or {}).get("mid") or "")
+        except BiliError:
+            uid = ""
+        if uid and not _reply_visible(int(oid), int(type_id), uid, text):
+            raise BiliError(
+                "评论接口已接受（code=0），但未在评论区回读到这条评论——可能被风控/审核拦截、"
+                "目标无效或入池延迟。不能确认已发送，请勿向用户声称'已发送'；可稍后自行到评论区核实。",
+                "REPLY_UNVERIFIED",
+            )
     return {"ok": True, "oid": int(oid), "type": int(type_id), "text": text}
+
+
+def _reply_visible(oid: int, type_id: int, uid: str, text: str, tries: int = 2) -> bool:
+    """回读评论区（最新一页）确认 uid 的评论真实可见（v0.7.50）。
+
+    评论入池有秒级时滞，未命中时短等重试一次；内容用包含匹配容忍格式差异。
+    """
+    text = (text or "").strip()
+    for attempt in range(max(1, tries)):
+        try:
+            data = _wbi_get(
+                _API + "/x/v2/reply/main",
+                {"type": type_id, "oid": oid, "mode": 2, "next": 0, "ps": 20},
+            ).get("data") or {}
+        except BiliError:
+            data = {}
+        for reply in data.get("replies") or []:
+            member = reply.get("member") or {}
+            content = reply.get("content") or {}
+            message = content.get("message") or ""
+            if str(member.get("mid")) == str(uid) and message and (
+                text in message or message in text
+            ):
+                return True
+        if attempt < max(1, tries) - 1:
+            time.sleep(1.5)
+    return False
 
 
 def post_dynamic(text: str, account: str = "yui") -> dict:

@@ -1611,7 +1611,7 @@ class BiliViewerPlugin(NekoPluginBase):
             self._record_send_result("video", False, exc.code, exc.message, bvid)
             return self._wrap_auth(exc, "发送弹幕")
         self._mark_danmaku_sent("video", bvid, text, progress)
-        self._record_send_result("video", True, "", result.get("server") or "", bvid)
+        self._record_send_result("video", True, "", result.get("dmid") or "", bvid)
         return {
             "output": "弹幕已发送。",
             "is_error": False, "meta": {"agent": {"delivery": "silent"}},
@@ -1706,7 +1706,28 @@ class BiliViewerPlugin(NekoPluginBase):
         except bili.BiliError as exc:
             if account == "yui":
                 self._yui_rate_rollback("comment", key)
+            kind_name = "video" if type_id == 1 else ("live" if type_id == 11 else f"type{type_id}")
+            if exc.code == "REPLY_UNVERIFIED":
+                _logger.info(
+                    "comment send result: kind=%s ok=False error=REPLY_UNVERIFIED target=%s:%s account=%s",
+                    kind_name, type_id, oid, account,
+                )
+                return {
+                    "output": exc.message,
+                    "is_error": True,
+                    "error": "REPLY_UNVERIFIED",
+                    "meta": {"agent": {"delivery": "silent"}},
+                }
+            _logger.info(
+                "comment send result: kind=%s ok=False error=%s target=%s:%s account=%s",
+                kind_name, type_id, oid, exc.code, account,
+            )
             return self._wrap_auth(exc, "发送评论")
+        kind_name = "video" if type_id == 1 else ("live" if type_id == 11 else f"type{type_id}")
+        _logger.info(
+            "comment send result: kind=%s ok=True target=%s:%s account=%s",
+            kind_name, type_id, oid, account,
+        )
         return {"output": "评论已发送。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": {"ok": True, "oid": oid, "type": type_id}}
 
     @llm_tool(
