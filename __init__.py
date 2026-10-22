@@ -626,9 +626,9 @@ class BiliViewerPlugin(NekoPluginBase):
         #      让 YUI 随时能听到，而不是等 bili_listen_audio 被调用才冷启动。
         try:
             self._ensure_sys_audio_bridge()
-            logger.info("sys audio bridge ensured at startup")
+            _logger.info("sys audio bridge ensured at startup")
         except Exception as e:
-            logger.warning(f"sys audio bridge startup ensure failed: {e}")
+            _logger.warning(f"sys audio bridge startup ensure failed: {e}")
         return {"status": "ready", "plugin": "bili_viewer"}
 
     @lifecycle(id="shutdown")
