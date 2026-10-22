@@ -873,7 +873,8 @@ class BiliViewerPlugin(NekoPluginBase):
             "何时用：用户说'让她进直播间/进入直播间/挂在直播间/让她在场'等需要 YUI 以观众身份在场时。"
             "参数 room：直播间房间号（可省略——未提供时自动从浏览器当前打开的直播间页面获取；若没拿到房间号直接调用本工具即可，"
             "无需用户提供，禁止向用户索要房间号）。account：yui（默认）/ main；"
-            "browser：指定由哪个浏览器扩展执行（chrome/edge/360，可选）。用户明确说'走 Edge 后台/用 Edge 进直播间'"
+            "browser：指定由哪个浏览器扩展执行（chrome/edge/360，可选）。留空时自动按最近推送的绑定浏览器定向"
+            "（避免 Chrome/Edge 双扩展抢指令，实际仍以当前绑定浏览器为准）。用户明确说'走 Edge 后台/用 Edge 进直播间'"
             "时必须传 edge——只有 Edge 扩展会执行并开标签，其余浏览器扩展不会抢走指令。"
             "浏览器需已登录小号 YUI小猫娘，否则驻场的是浏览器当前登录的其它账号。"
         ),
@@ -892,6 +893,15 @@ class BiliViewerPlugin(NekoPluginBase):
         room = (room or params.get("room") or "").strip()
         acct = (account or params.get("account") or "yui").strip() or "yui"
         browser = (browser or params.get("browser") or "").strip().lower()
+        # v0.7.44：browser 留空时按最近推送的绑定浏览器定向，消除 Chrome/Edge 双扩展抢指令竞态
+        if not browser:
+            src = (getattr(self, "_ext_source", "") or "").lower()
+            if "edge" in src:
+                browser = "edge"
+            elif "360" in src:
+                browser = "360"
+            elif "chrome" in src:
+                browser = "chrome"
         if not room:
             import re as _re
             _domd = getattr(self, "_ext_dom_data", None)
