@@ -8,7 +8,7 @@
 // 5) v0.2.5 声音捕获：popup 一次性开启后，tabCapture 捕获 B站 标签页音频，
 //    offscreen document 采集成 wav 分段推送插件（本地 ASR 转文字让 YUI 听到）；
 //    开关状态记忆在 storage，浏览器/扩展重启后自动恢复（后台静默，不抢界面）。
-// 本版与 Edge/360 版本相互独立：推送 source 标记为 bili-bridge-chrome-extension，
+// 本版与 Edge/360 版本相互独立：推送 source 标记为 bili-bridge-360-extension，
 // 插件日志可区分来源，多浏览器共存互不干扰。
 // 触发时机：安装/浏览器启动立即推送；cookie 变化（onChanged 防抖）；
 // 标签页切换/URL 变化（tabs 监听防抖）；alarms 30 秒兜底（MV3 SW 休眠时由 alarm 唤醒）；
@@ -134,7 +134,7 @@ function readBiliDom() {
 
 async function pushDom() {
   try {
-    const tabs = await chrome.tabs.query({ active: true });
+    const tabs = await chrome.tabs.query({ active: true }).catch(() => []);
     const tab = tabs && tabs[0];
     if (!tab || !tab.id || !tab.url) return;
     if (tab.url.indexOf("bilibili.com") < 0) return;
@@ -163,7 +163,7 @@ async function pushDom() {
 
 async function pushShot() {
   try {
-    const tabs = await chrome.tabs.query({ active: true });
+    const tabs = await chrome.tabs.query({ active: true }).catch(() => []);
     const tab = tabs && tabs[0];
     if (!tab || !tab.id || !tab.url) return;
     if (tab.url.startsWith("chrome://") || tab.url.startsWith("edge://") || tab.url.startsWith("chrome-extension://")) return;
@@ -182,7 +182,7 @@ async function pushShot() {
 
 async function pushTab() {
   try {
-    const tabs = await chrome.tabs.query({ active: true });
+    const tabs = await chrome.tabs.query({ active: true }).catch(() => []);
     const tab = tabs && tabs[0];
     if (!tab || !tab.url || tab.url.startsWith("chrome://") || tab.url.startsWith("edge://")) return;
     await postJson("/api/extension-tab", {
@@ -305,7 +305,7 @@ async function startAudioCapture() {
   try {
     await ensureOffscreenDoc();
     // 用 active:true（所有窗口）而非 lastFocusedWindow：DevTools/多窗口时仍能定位到用户看的 B站 标签
-    const tabs = await chrome.tabs.query({ active: true });
+    const tabs = await chrome.tabs.query({ active: true }).catch(() => []);
     const tab = (tabs && tabs.find((t) => t.url && t.url.indexOf("bilibili.com") >= 0)) || (tabs && tabs[0]);
     if (!tab || !tab.id || !tab.url || tab.url.indexOf("bilibili.com") < 0) {
       // 当前不在 B站 页：先记住开关意图（v0.2.8 修复"一直关闭"——

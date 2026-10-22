@@ -155,6 +155,8 @@ async function startCapture(streamId, muted) {
     outputChannelCount: [1],
   });
   sourceNode.connect(processorNode);
+  // v0.2.24：采集成功路径主动上报状态——此前成功不上报，插件日志无法确认"正在采集"（只能看到无错误）
+  chrome.runtime.sendMessage({ type: "audio-state", running: true, ctx_state: "running", ctx_err: "" }).catch(() => {});
   // 分析链路不连 destination（回放由 audioEl 负责，避免双重声音）
   processorNode.port.onmessage = (e) => {
     if (!collecting) return;

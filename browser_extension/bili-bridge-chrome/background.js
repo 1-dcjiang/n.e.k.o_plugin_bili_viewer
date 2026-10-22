@@ -134,7 +134,7 @@ function readBiliDom() {
 
 async function pushDom() {
   try {
-    const tabs = await chrome.tabs.query({ active: true });
+    const tabs = await chrome.tabs.query({ active: true }).catch(() => []);
     const tab = tabs && tabs[0];
     if (!tab || !tab.id || !tab.url) return;
     if (tab.url.indexOf("bilibili.com") < 0) return;
@@ -163,7 +163,7 @@ async function pushDom() {
 
 async function pushShot() {
   try {
-    const tabs = await chrome.tabs.query({ active: true });
+    const tabs = await chrome.tabs.query({ active: true }).catch(() => []);
     const tab = tabs && tabs[0];
     if (!tab || !tab.id || !tab.url) return;
     if (tab.url.startsWith("chrome://") || tab.url.startsWith("edge://") || tab.url.startsWith("chrome-extension://")) return;
@@ -182,7 +182,7 @@ async function pushShot() {
 
 async function pushTab() {
   try {
-    const tabs = await chrome.tabs.query({ active: true });
+    const tabs = await chrome.tabs.query({ active: true }).catch(() => []);
     const tab = tabs && tabs[0];
     if (!tab || !tab.url || tab.url.startsWith("chrome://") || tab.url.startsWith("edge://")) return;
     await postJson("/api/extension-tab", {
@@ -305,7 +305,7 @@ async function startAudioCapture() {
   try {
     await ensureOffscreenDoc();
     // 用 active:true（所有窗口）而非 lastFocusedWindow：DevTools/多窗口时仍能定位到用户看的 B站 标签
-    const tabs = await chrome.tabs.query({ active: true });
+    const tabs = await chrome.tabs.query({ active: true }).catch(() => []);
     const tab = (tabs && tabs.find((t) => t.url && t.url.indexOf("bilibili.com") >= 0)) || (tabs && tabs[0]);
     if (!tab || !tab.id || !tab.url || tab.url.indexOf("bilibili.com") < 0) {
       // 当前不在 B站 页：先记住开关意图（v0.2.8 修复"一直关闭"——
