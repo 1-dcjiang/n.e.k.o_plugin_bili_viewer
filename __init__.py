@@ -1848,7 +1848,7 @@ class BiliViewerPlugin(NekoPluginBase):
             "对外回复必须如实说明任务已启动（条数/间隔/房间），严禁声称'已发完 N 条'除非用 bili_live_danmaku_status 确认；"
             "用户要求停止时用 bili_live_danmaku_stop。"
             "参数 room：直播间房间号或链接；text：弹幕内容（最长 30 字）；times：总次数（1-1000）；"
-            "interval：间隔秒数（默认 5，最小 3，对齐 B站 实际风控 5 秒）；account：yui（默认）/ main。"
+            "interval：间隔秒数（默认 5，最小 5——B站 实际风控 5 秒，不允许更低）；account：yui（默认）/ main。"
         ),
         parameters={
             "type": "object",
@@ -1856,7 +1856,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 "room": {"type": "string", "description": "直播间房间号或链接"},
                 "text": {"type": "string", "description": "弹幕内容，最长 30 字"},
                 "times": {"type": "integer", "description": "总发送次数，1-1000"},
-                "interval": {"type": "number", "description": "间隔秒数，默认 5，最小 3"},
+                "interval": {"type": "number", "description": "间隔秒数，默认 5，最小 5（B站 风控）"},
                 "account": {"type": "string", "description": "yui=YUI 小号（默认）/ main=主账号"},
             },
             "required": ["room", "text", "times"],
@@ -1876,7 +1876,7 @@ class BiliViewerPlugin(NekoPluginBase):
             return {"output": f"弹幕最长 30 字，当前 {len(text)} 字。", "is_error": True, "error": "TOO_LONG"}
         if not 1 <= times <= 1000:
             return {"output": "总次数需在 1-1000 之间。", "is_error": True, "error": "BAD_TIMES"}
-        interval = max(3.0, interval)
+        interval = max(5.0, interval)  # v0.9.17：强制最小 5 秒，对齐 B站 实际风控
         st = {
             "room": room,
             "text": text,

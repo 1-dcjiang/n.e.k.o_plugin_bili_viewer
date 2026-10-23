@@ -1576,6 +1576,30 @@ def test_danmaku_loop_tick_send_and_finish(monkeypatch) -> None:
     assert len(calls) == 2
 
 
+def test_danmaku_loop_interval_min_is_5(monkeypatch) -> None:
+    """连发任务间隔被强制钳制到最小 5 秒（B站 风控，v0.9.17）。"""
+    import asyncio
+
+    from plugin.plugins.bili_viewer import BiliViewerPlugin
+
+    inst = object.__new__(BiliViewerPlugin)
+    saved: dict = {}
+
+    def fake_load():
+        return saved
+
+    def fake_save(s):
+        saved.clear()
+        saved.update(s)
+
+    monkeypatch.setattr(inst, "_loop_load", fake_load)
+    monkeypatch.setattr(inst, "_loop_save", fake_save)
+    monkeypatch.setattr(inst, "_danmaku_loop_tick", lambda: None)
+    r = asyncio.run(inst.bili_live_danmaku_loop(room="1025219", text="喵", times=3, interval=1))
+    assert r["is_error"] is False
+    assert saved["interval"] == 5.0  # 请求 1 秒被钳到 5 秒
+
+
 def test_danmaku_loop_tick_stop_on_fail(monkeypatch) -> None:
     """弹幕连发任务：连续 3 次真失败自动停止（v0.9.15）。"""
     from plugin.plugins.bili_viewer import BiliViewerPlugin, bili
