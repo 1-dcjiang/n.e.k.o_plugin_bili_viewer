@@ -643,21 +643,34 @@ def dm_send(account: str = "yui", uid: str = "", text: str = "", allow_new: bool
         raise _guard_exc(exc) from exc
     # 回读验证：最近一条应为我们的内容（真实发送铁律）
     if not _dm_verified(account, talker, text):
-        raise bili.BiliError("私信接口返回成功但回读未确认（请勿重复发送）", "DM_UNVERIFIED")
+        raise bili.BiliError(
+            "私信接口已接受发送，但回读未确认到（消息可能已经发出，B站接口同步有延迟）；"
+            "严禁重复发送——重复发送会导致对方收到多条相同私信。请告知用户'私信可能已发出，"
+            "请在 B站 私信页面确认'，不要再次调用 bili_dm_send。",
+            "DM_UNVERIFIED",
+        )
     record_limit("dm", params, {"ok": True}, account=account)
     return {"uid": talker, "text_len": len(text), "sent": True, "allowed_because": reason or "allow_new"}
 
 
-def _dm_verified(account: str, talker: int, text: str, tries: int = 2) -> bool:
-    for _ in range(tries):
+def _dm_verified(account: str, talker: int, text: str, tries: int = 3) -> bool:
+    """发送后回读验证：最近一条我发的消息应为我们的内容。
+
+    v0.9.2：tries 从 2 增到 3、间隔从 1.2s 增到 1.5s（B站 fetch_session_msgs 同步有延迟，
+    原 2.4s 总等待不够，导致发送成功但回读未确认 → DM_UNVERIFIED 误报 → YUI 重复发送）。
+    text 比对忽略首尾空白。
+    """
+    for i in range(tries):
         try:
             msgs = dm_messages(account, str(talker), 5).get("messages") or []
         except bili.BiliError:
             return False
         for m in reversed(msgs):
             if m.get("from") == "me":
-                return (m.get("text") or "").strip() == text
-        time.sleep(1.2)
+                if (m.get("text") or "").strip() == text.strip():
+                    return True
+        if i < tries - 1:
+            time.sleep(1.5)
     return False
 
 

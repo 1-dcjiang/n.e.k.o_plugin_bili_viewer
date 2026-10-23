@@ -76,6 +76,14 @@
 > `bili_dm_read`/`bili_dm_list`/`bili_inbox` 专用工具；(2) input_schema 去掉 `query` 选项；
 > (3) `entry_run` 增加 `action=query` 分支（只做页面感知，不做私信查询）；
 > (4) `bili_dm_read` description 加强触发词（"你看到我的私信了吗/我发的你能看到吗"）。
+> v0.9.2 修复私信发送假失败（修复"YUI说发不出去但实际发了两条"）：日志+截图实证
+> YUI 调 `bili_dm_send` 发私信，接口实际发送成功（B站网页能看到"喵~看到你的私信啦！"），
+> 但 `_dm_verified` 回读验证返回 False（B站 `fetch_session_msgs` 接口同步有延迟，原 tries=2
+> 间隔 1.2s 总共等 2.4s 不够），抛 `DM_UNVERIFIED`，YUI 基于错误结果说"发不出去"并重试，
+> 导致重复发送（对方收到两条相同私信）。修复：(1) `_dm_verified` tries 从 2 增到 3、间隔
+> 从 1.2s 增到 1.5s（总等待从 2.4s 增到 4.5s）；(2) `DM_UNVERIFIED` 错误消息明确说"私信
+> 可能已经发出去了，严禁重复发送"；(3) `bili_dm_send` description 加 `DM_UNVERIFIED` 处理
+> 铁律（返回此错误时不要重试，回复用户'私信可能已发出，请在 B站 私信页面确认'）。
 
 ## 使用示例（对 YUI 说）
 
