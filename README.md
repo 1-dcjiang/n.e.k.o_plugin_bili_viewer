@@ -38,6 +38,8 @@
 > 此前 YUI 传 owner 曾按昵称搜到真名 owner 的陌生账号，现已根治。
 > v0.8.3 自主查看私信：后台每 3 分钟轮询小号未读（私信/回复/@/赞/系统），有未读且 20 分钟
 > 冷却已过时静默注入 YUI 上下文，YUI 自主查看并酌情回复（bili_inbox/bili_dm_read/bili_dm_send）。
+> v0.8.4 私信漏报修复：B站 网页打开会话后 unread_count/msgfeed.chat 归 0（新消息仍真实存在），
+> 已改为本地已读游标按 msg_seqno 增量判定新私信（dm_seen.json），未读/收件箱/自主轮询同口径。
 
 ## 使用示例（对 YUI 说）
 

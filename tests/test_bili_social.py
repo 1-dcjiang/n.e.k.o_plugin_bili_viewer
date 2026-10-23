@@ -167,6 +167,94 @@ def test_resolve_dm_uid_digit():
     assert bili_social._resolve_dm_uid("123456789", "yui") == 123456789
 
 
+# ══════════ 私信已读游标（v0.8.3：B站 unread 计数不可靠的修复） ══════════
+
+
+def _mk_session(talker, sender_uid, seqno, ts, me=100):
+    return {
+        "talker_id": talker,
+        "unread_count": 0,  # 模拟 B站 网页打开后计数归 0（新消息仍真实存在）
+        "last_msg": {"sender_uid": sender_uid, "msg_seqno": seqno, "timestamp": ts},
+    }
+
+
+def _read_seen(social_dir):
+    p = os.path.join(social_dir, "dm_seen.json")
+    with open(p, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def test_is_new_msg_no_cursor_window(social_dir):
+    """无本地游标时：只认 6 小时内对方消息；超过 6 小时不算新；自己发的永远不算。"""
+    import time
+
+    bili_social = _social()
+    now = time.time()
+    assert bili_social._is_new_msg(_mk_session(11, 999, 50, int(now - 60)), "yui", 100) is True
+    assert bili_social._is_new_msg(_mk_session(22, 999, 60, int(now - 8 * 3600)), "yui", 100) is False
+    assert bili_social._is_new_msg(_mk_session(33, 100, 70, int(now - 10)), "yui", 100) is False
+
+
+def test_is_new_msg_with_cursor(social_dir):
+    """有游标后：seqno 大于游标才算新；小于等于不算。"""
+    bili_social = _social()
+    bili_social.record_dm_seen("yui", 11, 100)
+    assert bili_social._is_new_msg(_mk_session(11, 999, 101, 1700000000), "yui", 100) is True
+    assert bili_social._is_new_msg(_mk_session(11, 999, 100, 1700000000), "yui", 100) is False
+    assert bili_social._is_new_msg(_mk_session(11, 999, 99, 1700000000), "yui", 100) is False
+
+
+def test_record_dm_seen_keeps_max_and_isolated(social_dir):
+    bili_social = _social()
+    bili_social.record_dm_seen("yui", 11, 50)
+    bili_social.record_dm_seen("yui", 11, 40)  # 旧值不回退
+    bili_social.record_dm_seen("main", 11, 5)  # 分账号隔离
+    seen = _read_seen(social_dir)
+    assert seen["yui"]["11"] == 50
+    assert seen["main"]["11"] == 5
+
+
+def test_new_dm_count_and_unread_only_filter(social_dir, monkeypatch):
+    """new_dm_count / dm_conversations(unread_only=True) 用游标判定，不再信 unread_count=0。"""
+    import time
+
+    bili_social = _social()
+    bili = _bili()
+    now = time.time()
+    sessions = [
+        _mk_session(11, 999, 100, int(now - 60)),        # 对方新发（无游标 → 6h 窗口）
+        _mk_session(22, 100, 5, int(now - 10)),          # 自己发的 → 不算
+        _mk_session(33, 999, 8, int(now - 9 * 3600)),    # 对方但超 6h → 不算
+    ]
+    monkeypatch.setattr(bili_social, "_fetch_sessions", lambda account, limit=50: sessions)
+    monkeypatch.setattr(bili, "cookie_uid", lambda cookie: 100)
+    assert bili_social.new_dm_count("yui") == 1
+    convs = bili_social.dm_conversations("yui", unread_only=True, limit=20)
+    assert [c["uid"] for c in convs] == [11]
+    assert convs[0]["new"] is True
+    assert convs[0]["unread"] == 0  # 即使 B站 计数为 0，仍判定为新（修复核心）
+
+
+def test_inbox_private_messages_uses_cursor(social_dir, monkeypatch):
+    """inbox 的私信未读数与列表同源（游标判定），修复 msgfeed.chat=0 漏报。"""
+    import time
+
+    bili_social = _social()
+    bili = _bili()
+    now = time.time()
+    sessions = [_mk_session(11, 999, 100, int(now - 30))]
+    monkeypatch.setattr(bili_social, "_fetch_sessions", lambda account, limit=50: sessions)
+    monkeypatch.setattr(bili, "cookie_uid", lambda cookie: 100)
+    monkeypatch.setattr(
+        bili_social, "unread_counts",
+        lambda account="yui": {"replies": 0, "mentions": 0, "likes": 0, "private_messages": 0, "system": 0},
+    )
+    out = bili_social.inbox("yui", 5)
+    assert out["unread"]["private_messages"] == 1
+    assert len(out["private_messages"]) == 1
+    assert out["private_messages"][0]["uid"] == 11
+
+
 def test_limit_table_complete():
     bili_social = _social()
     # 新模块引用的 action 都必须出现在 LIMITS 表中

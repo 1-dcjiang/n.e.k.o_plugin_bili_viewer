@@ -413,6 +413,11 @@ class BiliViewerPlugin(NekoPluginBase):
         - 小号未配置/风控/网络失败一律静默跳过（调用方兜底捕获）。
         """
         counts = bili_social.unread_counts("yui")
+        # v0.8.3：私信未读以本地游标为准（B站 msgfeed.chat 网页打开后归 0，不可靠）
+        try:
+            counts["private_messages"] = max(counts.get("private_messages") or 0, bili_social.new_dm_count("yui"))
+        except bili.BiliError:
+            pass  # 私信游标统计失败时沿用 msgfeed 数值，不阻断主循环
         total = int(counts.get("replies") or 0) + int(counts.get("mentions") or 0) + int(counts.get("likes") or 0) + int(counts.get("private_messages") or 0) + int(counts.get("system") or 0)
         if not total:
             return
@@ -2208,6 +2213,8 @@ class BiliViewerPlugin(NekoPluginBase):
         account = self._resolve_account(account or params.get("account") or "")
         try:
             data = bili_social.unread_counts(account)
+            # v0.8.3：私信未读以本地游标为准（B站 msgfeed.chat 网页打开后归 0，不可靠）
+            data["private_messages"] = max(data.get("private_messages") or 0, bili_social.new_dm_count(account))
         except bili.BiliError as exc:
             return _wrap_err(exc)
         names = {"replies": "回复", "mentions": "@我", "likes": "赞", "private_messages": "私信", "system": "系统通知"}

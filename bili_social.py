@@ -29,6 +29,7 @@ _MEMBER_API = "https://member.bilibili.com"
 _DEVICE_ID_FILE = "device_id.txt"        # 私信 per-install dev_id（模拟真实浏览器，防风控）
 _RATELIMIT_FILE = "ratelimit.json"       # 限流状态
 _AUDIT_FILE = "audit.log"                # 审计日志（JSONL）
+_DM_SEEN_FILE = "dm_seen.json"           # 私信已读游标：{account: {talker_id: 已读最大 msg_seqno}}
 
 # ══════════════ 护栏：本地限流 + 审计 ══════════════
 
@@ -344,8 +345,11 @@ def inbox(account: str = "yui", limit: int = 5) -> dict[str, Any]:
     """收件箱一次看完：未读数 + 新的回复/@/赞/系统通知/未读私信（feed.py inbox 精华）。
 
     注意：和网页上点开通知一样，读取后 B站 会把这些消息标为已读。
+    私信未读以本地游标判定（v0.8.3）：B站 msgfeed.chat 在网页打开会话后归 0 不可靠。
     """
     counts = unread_counts(account)
+    convs = dm_conversations(account, True, limit)
+    counts["private_messages"] = max(counts.get("private_messages") or 0, len(convs))
     result: dict[str, Any] = {"unread": counts, "total": sum(counts.values())}
     if not result["total"]:
         result["note"] = "没有新消息。"
@@ -359,13 +363,14 @@ def inbox(account: str = "yui", limit: int = 5) -> dict[str, Any]:
     if counts["system"]:
         result["system"] = (feed_system(account, limit).get("items") or [])[: min(counts["system"], limit)]
     if counts["private_messages"]:
-        result["private_messages"] = (dm_conversations(account, True, limit) or [])[: min(counts["private_messages"], limit)]
+        result["private_messages"] = convs[: min(counts["private_messages"], limit)]
     return result
 
 
 # ══════════════ 私信（dm） ══════════════
 
 _DM_MAX_LEN = 500
+_NEW_DM_WINDOW = 6 * 3600  # 首次接入（无本地游标）时只认 6 小时内的对方消息，防把老消息全当新
 _USER_CARDS_URL = _VC_API + "/account/v1/user/cards"
 _RELATION_URL = _API + "/x/relation"
 _GET_SESSIONS_URL = _VC_API + "/session_svr/v1/session_svr/get_sessions"
@@ -373,6 +378,55 @@ _FETCH_MSGS_URL = _VC_API + "/svr_sync/v1/svr_sync/fetch_session_msgs"
 _SEND_MSG_URL = _VC_API + "/web_im/v1/web_im/send_msg"
 _ACK_URL = _VC_API + "/session_svr/v1/session_svr/update_ack"
 _MSG_TYPES = {1: "text", 2: "image", 5: "withdrawn", 7: "video_share", 10: "notification", 12: "card"}
+
+
+def _load_seen() -> dict[str, dict[str, int]]:
+    try:
+        with open(_state_path(_DM_SEEN_FILE), "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_seen(state: dict[str, dict[str, int]]) -> None:
+    p = _state_path(_DM_SEEN_FILE)
+    try:
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False)
+        os.replace(tmp, p)
+    except OSError:
+        pass
+
+
+def record_dm_seen(account: str, talker: int, seqno: int) -> None:
+    """记录某会话已读游标（最高 msg_seqno）；只在真实读到消息后调用（v0.8.3 修复未读误判）。"""
+    state = _load_seen()
+    cur = state.setdefault(account, {})
+    key = str(talker)
+    cur[key] = max(cur.get(key, 0), int(seqno or 0))
+    _save_seen(state)
+
+
+def _is_new_msg(s: dict[str, Any], account: str, me: int) -> bool:
+    """该会话的最近一条消息是否是「对方新发的」——不依赖 B站 的 unread_count（网页打开即清零，不可靠）。
+
+    判定：最后一条是对方发的，且 msg_seqno > 本地已读游标；首次接入（无游标）时
+    只认 6 小时内对方消息，避免把历史老消息全部当新消息刷屏。
+    """
+    last = s.get("last_msg") or {}
+    if not last or int(last.get("sender_uid") or 0) in (0, me):
+        return False
+    seqno = int(last.get("msg_seqno") or 0)
+    if not seqno:
+        return False
+    seen = (_load_seen().get(account) or {}).get(str(s.get("talker_id")))
+    if seen:
+        return seqno > seen
+    try:
+        return (time.time() - int(last.get("timestamp") or 0)) < _NEW_DM_WINDOW
+    except (TypeError, ValueError):
+        return False
 
 
 def _user_cards(mids: list[int], account: str) -> dict[int, str]:
@@ -396,8 +450,8 @@ def _main_uid() -> int | None:
     return bili.cookie_uid(bili._cookie("main"))
 
 
-def dm_conversations(account: str = "yui", unread_only: bool = False, limit: int = 20) -> list[dict[str, Any]]:
-    """私信会话列表：对方是谁、未读数、最后一条消息（dm.py 精华）。"""
+def _fetch_sessions(account: str, limit: int = 50) -> list[dict[str, Any]]:
+    """私信会话列表原始数据（talker_id 过滤；限流/失败抛原错）。"""
     bili._require_login(account)
     data = bili._http_get(
         _GET_SESSIONS_URL,
@@ -405,12 +459,32 @@ def dm_conversations(account: str = "yui", unread_only: bool = False, limit: int
         account=account,
     ).get("data") or {}
     sessions = data.get("session_list") or []
-    sessions = [s for s in sessions if s.get("talker_id")]
-    if unread_only:
-        sessions = [s for s in sessions if s.get("unread_count")]
-    sessions = sessions[:limit]
+    return [s for s in sessions if s.get("talker_id")][:limit]
+
+
+def new_dm_count(account: str = "yui") -> int:
+    """按本地已读游标统计「对方新发私信」的会话数（不依赖 B站 unread 计数）。
+
+    v0.8.3 修复：B站 网页打开过会话后 unread_count/msgfeed.chat 均归 0，
+    但新消息真实存在——此前 YUI 因此误判"没收到私信"。
+    """
+    sessions = _fetch_sessions(account)
+    me = bili.cookie_uid(bili._cookie(account)) or 0
+    return sum(1 for s in sessions if _is_new_msg(s, account, me))
+
+
+def dm_conversations(account: str = "yui", unread_only: bool = False, limit: int = 20) -> list[dict[str, Any]]:
+    """私信会话列表：对方是谁、是否新消息、最后一条消息（dm.py 精华）。
+
+    unread_only=True：只看「对方新发过消息」的会话——判定基于本地已读游标
+    （_is_new_msg），不再依赖 B站 网页打开后即清零的 unread_count（v0.8.3 修复）。
+    """
+    sessions = _fetch_sessions(account, limit * 2)
     me = bili.cookie_uid(bili._cookie(account)) or 0
     owner = _main_uid()
+    if unread_only:
+        sessions = [s for s in sessions if _is_new_msg(s, account, me)]
+    sessions = sessions[:limit]
     names = _user_cards([int(s["talker_id"]) for s in sessions], account)
     items = []
     for s in sessions:
@@ -420,6 +494,7 @@ def dm_conversations(account: str = "yui", unread_only: bool = False, limit: int
             "uid": mid,
             "name": names.get(mid),
             "is_owner": mid == owner,
+            "new": _is_new_msg(s, account, me),
             "unread": s.get("unread_count", 0),
             "last_message": {
                 "from": "me" if int(last.get("sender_uid") or 0) == me else "them",
@@ -479,6 +554,8 @@ def dm_messages(account: str = "yui", uid: str = "", limit: int = 30, mark_read:
                 account=account,
             )
             marked = True
+            # v0.8.3：写本地已读游标——此后该会话的新消息判定以 seqno 增量为准
+            record_dm_seen(account, talker, int(msgs[-1].get("msg_seqno") or 0))
         except bili.BiliError:
             marked = False
     return {"uid": talker, "messages": items, "marked_read": marked}
