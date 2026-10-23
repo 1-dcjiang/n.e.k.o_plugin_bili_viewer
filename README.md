@@ -69,6 +69,13 @@
 > 失败降级为原提醒），YUI 一眼就能看到对方什么时候说了什么；`bili_dm_read` 输出从
 > 原始 JSON 改为易读文本（"[时间] 对方/我：内容"），LLM 友好。私信发送仍有回读验证
 > （`_dm_verified`），假成功抛 `DM_UNVERIFIED`，严禁声称已发送。
+> v0.9.1 修复私信查询工具路由（修复"YUI说没有你的消息"）：日志实证 YUI 查私信时
+> TaskExecutor 误选 `run` 通用入口（`entry=run, action=query`），但 `run` 入口的 `action=query`
+> **根本没有实现私信查询**——走到兜底返回"用户当前正在看「xxx页面」"，YUI 基于错误结果
+> 说"没有你的消息"。修复：(1) `run` 入口 description 明确排除私信/收件箱查询，引导走
+> `bili_dm_read`/`bili_dm_list`/`bili_inbox` 专用工具；(2) input_schema 去掉 `query` 选项；
+> (3) `entry_run` 增加 `action=query` 分支（只做页面感知，不做私信查询）；
+> (4) `bili_dm_read` description 加强触发词（"你看到我的私信了吗/我发的你能看到吗"）。
 
 ## 使用示例（对 YUI 说）
 
