@@ -148,6 +148,10 @@
 > `live_send_danmaku` 无 dmid 不再抛 DANMAKU_UNVERIFIED，返回 ok=True + unverified 标记；
 > `bili_live_send_danmaku` 收到成功结果即逐字回复"弹幕已发送。"，严禁因无 dmid 声称失败/纠结确认/重复重试；
 > 连发任务失败分支只处理真 SEND_FAILED。
+> v0.9.18 弹幕回读验证防假成功（用户再实证：接口 code=0 无 dmid 但直播间**不显示**，B站 会静默吞弹幕）：
+> `live_send_danmaku` 发送后回读 `ajax/msg` 最近弹幕，命中自己 uid+文本才算 confirmed；
+> 单发未确认 → 如实上报 DANMAKU_UNCONFIRMED（"接口已接受但直播间未出现，疑似被 B站 拦截"），严禁声称已发送；
+> 连发任务改为"发送→3秒后回读确认"两段式，确认才计 sent，未确认立即停止（继续发大概率也被吞），绝不假成功。
 
 ## 使用示例（对 YUI 说）
 

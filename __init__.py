@@ -436,17 +436,18 @@ class BiliViewerPlugin(NekoPluginBase):
             pass
 
     def _danmaku_loop_tick(self) -> None:
-        """弹幕连发任务推进：sync 轮询里调用，到点发一条（v0.9.15）。
+        """弹幕连发任务推进：sync 轮询里调用（v0.9.15）。
 
-        - 连续 3 次发送失败自动停止（防止无限盲发）；
-        - DANMAKU_UNVERIFIED（无 dmid 但很可能已发出）计入发送并标记未确认，不视为失败；
-        - 发满 total 自动停止；进度留档可用 bili_live_danmaku_status 查询。
+        v0.9.18 改为"发送 → 下轮回读确认"两段式：
+        - 发送用 verify=False（不阻塞主循环），记录 pending（3 秒后回读验证）；
+        - 到点先回读上一条：直播间最近弹幕命中自己 uid+文本 → sent+1 继续；
+          未命中 → 疑似被 B站 静默拦截，立即停止并如实上报（严禁假成功）；
+        - 连续 3 次真发送失败自动停止；发满 total 自动停止。
         """
         st = self._loop_load()
         if not st.get("active"):
             return
-        if time.time() < float(st.get("next_due") or 0):
-            return
+        now = time.time()
         room = str(st.get("room") or "").strip()
         text = str(st.get("text") or "").strip()
         account = str(st.get("account") or "yui")
@@ -454,23 +455,57 @@ class BiliViewerPlugin(NekoPluginBase):
             st.update({"active": False, "last_error": "任务参数缺失", "updated_at": time.strftime("%H:%M:%S")})
             self._loop_save(st)
             return
+        # 1) 回读上一条（v0.9.18）：确认才计入 sent
+        pending = st.get("pending")
+        if isinstance(pending, dict) and pending.get("verify_due", 0) <= now:
+            try:
+                my_uid = bili._yui_uid(account)
+                msgs = bili._live_recent_danmaku(int(room), account)
+                hit = any(
+                    int(m.get("uid") or 0) == my_uid
+                    and (m.get("text") or "").strip() == str(pending.get("text") or "")
+                    for m in msgs
+                )
+            except Exception:
+                hit = False
+            st["pending"] = None
+            if hit:
+                st["sent"] = int(st.get("sent") or 0) + 1
+                st["fail_streak"] = 0
+                st["last_error"] = ""
+            else:
+                # 接口接受但直播间未出现：继续发大概率也被吞——停止连发，如实上报
+                st["active"] = False
+                st["stopped_reason"] = "弹幕未在直播间出现（接口已接受但回读无此条，疑似被 B站 拦截），已停止"
+                st["last_error"] = "DANMAKU_UNCONFIRMED: 接口已接受但直播间未出现"
+                st["updated_at"] = time.strftime("%H:%M:%S")
+                self._loop_save(st)
+                _logger.warning("danmaku loop stopped: unconfirmed room=%s text=%r", room, text[:20])
+                return
+            if int(st.get("sent") or 0) >= int(st.get("total") or 0):
+                st["active"] = False
+                st["stopped_reason"] = "已完成全部次数"
+                st["updated_at"] = time.strftime("%H:%M:%S")
+                self._loop_save(st)
+                return
+        if time.time() < float(st.get("next_due") or 0):
+            self._loop_save(st)
+            return
+        # 2) 发送下一条（verify=False，立即返回，回读交给下一轮）
         try:
-            bili.live_send_danmaku(room, text, account=account)
-            st["sent"] = int(st.get("sent") or 0) + 1
+            bili.live_send_danmaku(room, text, account=account, verify=False)
+            st["pending"] = {"room": room, "text": text, "verify_due": time.time() + 3.0}
+            st["next_due"] = time.time() + max(float(st.get("interval") or 5.0), 5.0)
             st["fail_streak"] = 0
             st["last_error"] = ""
         except bili.BiliError as exc:
-            # v0.9.16：无 dmid 不再抛错（常态已发出）；这里只处理真正的发送失败
             st["fail_streak"] = int(st.get("fail_streak") or 0) + 1
             st["last_error"] = f"{exc.code}: {str(exc.message)[:80]}"
             if st["fail_streak"] >= 3:
                 st["active"] = False
                 st["stopped_reason"] = "连续 3 次发送失败"
-        st["next_due"] = time.time() + max(float(st.get("interval") or 5.0), 2.5)
+            st["next_due"] = time.time() + max(float(st.get("interval") or 5.0), 5.0)
         st["updated_at"] = time.strftime("%H:%M:%S")
-        if int(st.get("sent") or 0) >= int(st.get("total") or 0):
-            st["active"] = False
-            st["stopped_reason"] = "已完成全部次数"
         self._loop_save(st)
 
     def _unread_tick(self) -> None:
@@ -1776,9 +1811,10 @@ class BiliViewerPlugin(NekoPluginBase):
             "严禁主动询问'要不要发弹幕/要不要回复弹幕'。"
             "本工具已包含发送全流程：调用一次即完成，禁止再次调用本工具或 run/bili_danmaku 等任何发送入口"
             "重复发送同一弹幕（同目标同内容 5 秒内会被自动去重，只发一次）。"
-            "【无 dmid=已发出·v0.9.16】B站直播弹幕接口已常态不返回 dmid（回流ID），但弹幕均正常出现在直播间"
-            "（用户已实测）——接口接受即视为已发出，YUI 收到成功结果直接回复'弹幕已发送。'，"
-            "严禁因无 dmid 而声称失败、纠结确认或重复重试。"
+            "【无 dmid=已发出·v0.9.16 修正版·v0.9.18】B站直播弹幕接口常态不返回 dmid，弹幕多数正常发出；"
+            "但实测也存在接口 code=0 却静默吞弹幕（直播间不显示）的情况——本工具发送后会回读直播间最近弹幕验证："
+            "确认出现才返回成功（回复'弹幕已发送。'）；未确认（DANMAKU_UNCONFIRMED）如实报告"
+            "'接口已接受但直播间未出现，疑似被 B站 弹幕过滤拦截'，严禁声称已发送，严禁重试刷屏。"
         ),
         parameters={
             "type": "object",
@@ -1836,14 +1872,25 @@ class BiliViewerPlugin(NekoPluginBase):
             return self._wrap_auth(exc, "发送弹幕")
         self._mark_danmaku_sent("live", room, text, 0)
         self._record_send_result("live", True, "", result.get("server") or "", room, dmid=result.get("dmid") or "")
-        return {"output": "弹幕已发送。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": result}
+        if result.get("confirmed", True):
+            return {"output": "弹幕已发送。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": result}
+        # v0.9.18：接口接受但回读未在直播间出现（B站 静默吞弹幕）——如实报告，严禁假成功
+        note = result.get("confirm_note") or "接口已接受但直播间最近弹幕未出现该条"
+        _logger.warning("live danmaku UNCONFIRMED room=%s text=%r note=%s", room, text[:20], note)
+        return {
+            "output": "接口已接受，但回读直播间弹幕未出现该条（疑似被 B站 弹幕过滤/风控拦截），未确认已发出；已停止，不重试以免刷屏。",
+            "is_error": True,
+            "error": "DANMAKU_UNCONFIRMED",
+            "result": result,
+        }
 
     @llm_tool(
         name="bili_live_danmaku_loop",
         description=(
-            "【弹幕连发任务·v0.9.15】启动后台自动连发弹幕任务：调用一次即可让插件按 interval 秒间隔自动发送，"
-            "直到发满 times 次 / 连续 3 次发送失败 / 用户停止——无需用户逐条下指令，YUI 不会再挂机。"
-            "发送逐条真实验证：无 dmid（DANMAKU_UNVERIFIED）记为'很可能已发出'不重试不视为失败。"
+            "【弹幕连发任务·v0.9.15/0.9.18】启动后台自动连发弹幕任务：调用一次即可让插件按 interval 秒间隔自动发送，"
+            "直到发满 times 次 / 弹幕未在直播间出现（疑似被 B站 拦截）/ 连续 3 次发送失败 / 用户停止——无需逐条下指令。"
+            "【真实验证·v0.9.18】每条发送后回读直播间最近弹幕，确认出现才计入已发（sent）；"
+            "接口接受但回读未出现 → 立即停止并如实上报（严禁假成功/继续盲发）。"
             "【铁律】调用一次即启动，严禁反复调用同一任务；启动后立即发送第一条并后台持续推进；"
             "对外回复必须如实说明任务已启动（条数/间隔/房间），严禁声称'已发完 N 条'除非用 bili_live_danmaku_status 确认；"
             "用户要求停止时用 bili_live_danmaku_stop。"
@@ -1927,7 +1974,8 @@ class BiliViewerPlugin(NekoPluginBase):
     @llm_tool(
         name="bili_live_danmaku_status",
         description=(
-            "查询弹幕连发任务进度（v0.9.15）：是否运行中、已发/总数、未确认条数、最近错误、停止原因。"
+            "查询弹幕连发任务进度（v0.9.15）：是否运行中、已确认发送/总数、最近错误、停止原因。"
+            "sent 仅为回读确认出现在直播间的条数（v0.9.18 真实验证）。"
             "YUI 汇报连发进度或用户询问'发到哪了/发了几条'时调用。参数：无。"
         ),
         parameters={"type": "object", "properties": {}, "required": []},

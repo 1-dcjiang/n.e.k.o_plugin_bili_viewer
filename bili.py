@@ -1704,12 +1704,34 @@ def edit_video(bvid: str, title: str | None = None, desc: str | None = None, tag
     return {"bvid": bvid, "title": form["title"], "desc": form["desc"], "tag": form["tag"], "ok": True}
 
 
-def live_send_danmaku(room: str, text: str, account: str = "yui") -> dict:
+def _live_recent_danmaku(room_id: int, account: str = "yui") -> list:
+    """回读直播间最近弹幕（v0.9.18）：ajax/msg 返回 data.admin + data.normal 列表。
+
+    用途：发送弹幕后验证是否真的出现在直播间——B站 /msg/send 会返回 code=0 但静默丢弃
+    弹幕（实测 2026-10-23：接口接受、无 dmid，但直播间不显示，疑似防刷屏/屏蔽词过滤）。"""
+    d = _http_get(
+        "https://api.live.bilibili.com/ajax/msg",
+        {"roomid": str(room_id), "token": "", "page": 1},
+        timeout=_TIMEOUT,
+        account=account,
+    )
+    data = d.get("data") or {}
+    msgs: list = []
+    for key in ("admin", "normal"):
+        msgs.extend(data.get(key) or [])
+    return msgs
+
+
+def live_send_danmaku(room: str, text: str, account: str = "yui", verify: bool = True) -> dict:
     """向直播间发送一条弹幕。account=yui 小号（默认）/ main 主账号。
 
     注意：msg/send 的 roomid 必须是页面显示的房间号（URL 上的数字，
     与 B站 Web 端一致），不能用 room_init 解析出的真实 room_id——
     两者不一致时弹幕会发进错误房间（v0.6.30）。
+
+    verify（v0.9.18）：发送后回读直播间最近弹幕验证（默认 True）——接口接受（code=0）≠ 已显示，
+    实测 B站 会静默吞弹幕（code=0 无 dmid 但直播间不出现）；回读最多 2 次（各等 3 秒），
+    命中自己 uid + 文本才算 confirmed。verify=False 供连发任务使用（不阻塞主循环，由任务下轮回读）。
     """
     _require_login(account)
     text = (text or "").strip()
@@ -1747,9 +1769,28 @@ def live_send_danmaku(room: str, text: str, account: str = "yui") -> dict:
     dmid = ""
     if isinstance(resp_data, dict):
         dmid = str(resp_data.get("dmid") or resp_data.get("dmid_str") or "")
-    # v0.9.16 用户实测确认：B站直播弹幕接口已常态不返回 dmid（回流ID），但弹幕均正常出现在直播间
-    # （截图实证"发出去了，但拿不到回流ID，直播间全看到了"）。无 dmid 视为已发出（unverified 标记），
-    # 不再抛 DANMAKU_UNVERIFIED 错误让 YUI 纠结确认/重试。
+    # v0.9.16 用户实测确认：B站直播弹幕接口常态不返回 dmid（回流ID），弹幕通常已正常发出
+    # v0.9.18 用户再实测：接口 code=0 无 dmid 时弹幕也可能被 B站 静默吞掉（直播间不显示）——
+    # 必须回读验证，confirmed=False 时如实上报，严禁假成功
+    confirmed = False
+    confirm_note = ""
+    if verify:
+        try:
+            my_uid = _yui_uid(account)
+            for _ in range(2):
+                time.sleep(3)
+                msgs = _live_recent_danmaku(int(page_room), account)
+                if any(
+                    int(m.get("uid") or 0) == my_uid
+                    and (m.get("text") or "").strip() == text
+                    for m in msgs
+                ):
+                    confirmed = True
+                    break
+            if not confirmed:
+                confirm_note = "接口已接受但直播间最近弹幕未出现该条，疑似被 B站 弹幕过滤/风控拦截"
+        except Exception:
+            confirm_note = "回读验证失败（网络/风控），未确认是否出现在直播间"
     return {
         "ok": True,
         "room_id": int(page_room),
@@ -1758,6 +1799,8 @@ def live_send_danmaku(room: str, text: str, account: str = "yui") -> dict:
         "resp_code": data.get("code"),
         "dmid": dmid,
         "unverified": not dmid,
+        "confirmed": confirmed,
+        "confirm_note": confirm_note,
     }
 
 

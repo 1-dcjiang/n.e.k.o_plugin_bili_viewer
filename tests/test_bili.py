@@ -1548,32 +1548,67 @@ def test_fans_list(monkeypatch) -> None:
 
 
 def test_danmaku_loop_tick_send_and_finish(monkeypatch) -> None:
-    """弹幕连发任务：到点发送、发满自动停止（v0.9.15，无 dmid 视为已发出 v0.9.16）。"""
+    """弹幕连发任务：发送→回读确认→sent 递增→发满自动停止（v0.9.18 真实验证）。"""
     from plugin.plugins.bili_viewer import BiliViewerPlugin, bili
 
     inst = object.__new__(BiliViewerPlugin)
 
     calls = []
 
-    def fake_send(room, text, account="yui"):
+    def fake_send(room, text, account="yui", verify=True):
         calls.append((room, text, account))
-        return {"ok": True, "dmid": "", "unverified": True}  # 无 dmid 但已发出（v0.9.16）
+        return {"ok": True, "dmid": "", "unverified": True, "confirmed": False}
 
     monkeypatch.setattr(bili, "live_send_danmaku", fake_send)
+    monkeypatch.setattr(bili, "_live_recent_danmaku", lambda room_id, account="yui": [{"uid": 3494363678116792, "text": "666"}])
+    monkeypatch.setattr(bili, "_yui_uid", lambda account: 3494363678116792)
     st = {
         "room": "1", "text": "666", "total": 2, "sent": 0, "unconfirmed": 0,
         "interval": 5.0, "active": True, "fail_streak": 0, "last_error": "",
-        "next_due": 0, "account": "yui",
+        "next_due": 0, "account": "yui", "pending": None,
     }
     monkeypatch.setattr(inst, "_loop_load", lambda: st)
     monkeypatch.setattr(inst, "_loop_save", lambda s: st.update(s))
-    inst._danmaku_loop_tick()
-    assert st["sent"] == 1 and st["active"] is True
+    inst._danmaku_loop_tick()  # 发送#1 → pending
+    assert st["pending"] is not None and st["sent"] == 0
+    st["pending"]["verify_due"] = 0  # 模拟 3 秒后
     st["next_due"] = 0
-    inst._danmaku_loop_tick()
+    inst._danmaku_loop_tick()  # 回读#1 确认 → sent=1 → 发送#2 → pending
+    assert st["sent"] == 1 and st["pending"] is not None
+    st["pending"]["verify_due"] = 0
+    st["next_due"] = 0
+    inst._danmaku_loop_tick()  # 回读#2 确认 → sent=2 → 完成停止
     assert st["sent"] == 2
     assert st["active"] is False and st["stopped_reason"] == "已完成全部次数"
     assert len(calls) == 2
+
+
+def test_danmaku_loop_tick_unconfirmed_stops(monkeypatch) -> None:
+    """弹幕连发任务：接口接受但回读未在直播间出现 → 立即停止，绝不假成功（v0.9.18）。"""
+    from plugin.plugins.bili_viewer import BiliViewerPlugin, bili
+
+    inst = object.__new__(BiliViewerPlugin)
+
+    def fake_send(room, text, account="yui", verify=True):
+        return {"ok": True, "dmid": "", "unverified": True, "confirmed": False}
+
+    monkeypatch.setattr(bili, "live_send_danmaku", fake_send)
+    monkeypatch.setattr(bili, "_live_recent_danmaku", lambda room_id, account="yui": [])  # 回读无此弹幕
+    monkeypatch.setattr(bili, "_yui_uid", lambda account: 3494363678116792)
+    st = {
+        "room": "1", "text": "666", "total": 10, "sent": 0, "unconfirmed": 0,
+        "interval": 5.0, "active": True, "fail_streak": 0, "last_error": "",
+        "next_due": 0, "account": "yui", "pending": None,
+    }
+    monkeypatch.setattr(inst, "_loop_load", lambda: st)
+    monkeypatch.setattr(inst, "_loop_save", lambda s: st.update(s))
+    inst._danmaku_loop_tick()  # 发送 → pending
+    st["pending"]["verify_due"] = 0  # 模拟 3 秒后
+    st["next_due"] = 0
+    inst._danmaku_loop_tick()  # 回读未命中 → 停止
+    assert st["active"] is False
+    assert "未在直播间出现" in (st.get("stopped_reason") or "")
+    assert st["sent"] == 0
 
 
 def test_danmaku_loop_interval_min_is_5(monkeypatch) -> None:
@@ -1606,7 +1641,7 @@ def test_danmaku_loop_tick_stop_on_fail(monkeypatch) -> None:
 
     inst = object.__new__(BiliViewerPlugin)
 
-    def fake_send(room, text, account="yui"):
+    def fake_send(room, text, account="yui", verify=True):
         raise bili.BiliError("接口失败", "SEND_FAILED")
 
     monkeypatch.setattr(bili, "live_send_danmaku", fake_send)
