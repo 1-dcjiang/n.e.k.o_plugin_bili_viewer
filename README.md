@@ -198,6 +198,13 @@
 > 私信白名单（owner/粉丝/对方先发/互关，粉丝全放行满足"适用于所有关注她的粉丝"）、私信 payload（嵌套
 > msg[sender_uid]/msg[dev_id] per-install + wbi query）、动态发布/删除双回读、直播弹幕回读、5 秒风控间隔、
 > 弹幕连发任务（danmaku_loop.json）。
+> v0.9.30 视频有效性校验防空壳：
+> 用户实证：yui_uploads 积累 8 个 4096 字节无效 .mp4 占位（文件头 0x00010001 重复、非视频容器），
+> 因下载链路只校验'非空'而被当作成功视频继续投稿——新增模块级 _looks_like_video 容器头识别
+> （MP4/M4V/MOV 的 ftyp box、FLV、WebM/MKV 的 EBML、AVI 的 RIFF）+ 最小 64KB 阈值：
+> bili_yui_upload_video_url 下载后校验，非视频容器判 DOWNLOAD_BAD_CONTENT、删除半成品、不投稿；
+> bili_yui_upload 投稿前同样校验，无效文件判 INVALID_VIDEO_FILE、不消耗日额度；
+> 顺带清理历史空壳、并修复 pytest mock 下载污染真实 yui_uploads 目录的问题。
 > v0.9.29 视频素材自给自足编排：
 > 用户实证：YUI 在直播间向玩家要'豆包生成视频的 http/https 直链'——需要视频素材却不知道自取。
 > 自主运营注入（_yui_autonomy_text 动作 5）与三个桥工具描述现统一注入编排：

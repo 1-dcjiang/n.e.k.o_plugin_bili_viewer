@@ -135,6 +135,26 @@ def _looks_like_danmaku_instruction(text: str) -> bool:
     return any(head.startswith(h) for h in hints)
 
 
+def _looks_like_video(head: bytes) -> bool:
+    """校验文件头是否为常见视频容器（v0.9.30）。
+
+    用户实证：yui_uploads 曾积累 8 个 4096 字节的无效 .mp4（文件头为 0x00010001
+    重复占位，非任何视频容器），却因下载链路只校验'非空'而被当作成功视频继续投稿。
+    识别：MP4/M4V/MOV（ftyp box）、FLV、WebM/MKV（EBML）、AVI（RIFF…AVI）。
+    """
+    if not head or len(head) < 12:
+        return False
+    if head[4:8] == b"ftyp":  # MP4 / M4V / MOV / 3GP
+        return True
+    if head[:3] == b"FLV":  # FLV
+        return True
+    if head[:4] == b"\x1a\x45\xdf\xa3":  # WebM / MKV (EBML)
+        return True
+    if head[:4] == b"RIFF" and head[8:12] == b"AVI ":  # AVI
+        return True
+    return False
+
+
 # 插件配置段与 Cookie 配置键
 _CONFIG_SECTION = "settings"
 _CONFIG_COOKIE_KEY = "bili_cookie"
@@ -2548,6 +2568,16 @@ class BiliViewerPlugin(NekoPluginBase):
         if not os.path.isfile(file_path):
             self._yui_daily_release("upload")
             return {"output": f"yui_uploads 目录下没有这个文件：{base}（请先把视频文件放到插件目录的 yui_uploads 文件夹）", "is_error": True, "error": "NO_FILE"}
+        # v0.9.30：投稿前校验文件有效性——防历史遗留的 4KB 占位/空壳文件被上传到 B站
+        try:
+            with open(file_path, "rb") as _vf:
+                _vhead = _vf.read(16)
+            if not _looks_like_video(_vhead):
+                self._yui_daily_release("upload")
+                return {"output": f"yui_uploads 里的 {base} 不是有效视频文件（可能是不完整下载的占位/空壳），请删除后重新下载，本次未消耗投稿额度。", "is_error": True, "error": "INVALID_VIDEO_FILE"}
+        except OSError:
+            self._yui_daily_release("upload")
+            return {"output": f"无法读取文件：{base}，请检查文件后重试。", "is_error": True, "error": "FILE_READ_ERROR"}
         # 投稿互斥（复查优化 v0.7.8）：同一时刻只允许一个上传流程（分钟级长任务）。
         # 大号/小号同时行动时，自主引擎与手动调用可能并发触发投稿：
         # 互斥锁保证后到者返回 BUSY，且投稿串行执行使天级计数天然不被并发突破。
@@ -2633,6 +2663,19 @@ class BiliViewerPlugin(NekoPluginBase):
                     out.write(chunk)
             if total <= 0:
                 raise bili.BiliError("下载内容为空（0 字节），拒绝投稿", "EMPTY_DOWNLOAD")
+            # v0.9.30：有效性校验——防 4KB 占位/错误响应当成功视频（用户实证空壳文件）
+            with open(dest, "rb") as _vf:
+                _vhead = _vf.read(16)
+            if not _looks_like_video(_vhead) or total < 64 * 1024:
+                try:
+                    os.remove(dest)
+                except OSError:
+                    pass
+                raise bili.BiliError(
+                    "下载内容不是有效视频文件（文件头无视频容器特征，可能被拦截/防盗链），"
+                    "已删除半成品，请换可下载直链重试",
+                    "DOWNLOAD_BAD_CONTENT",
+                )
         except bili.BiliError as exc:
             try:
                 os.remove(dest)

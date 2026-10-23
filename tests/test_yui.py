@@ -350,22 +350,32 @@ def test_yui_upload_mutex_blocks_second(monkeypatch) -> None:
     from plugin.plugins.bili_viewer import bili
 
     monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
-    monkeypatch.setattr(_os.path, "isfile", lambda p: True)  # 绕过真实文件检查
     calls: list[str] = []
+    upload_dir = _os.path.join(_os.path.dirname(_os.path.abspath(bili.__file__)), "yui_uploads")
+    _os.makedirs(upload_dir, exist_ok=True)
+    fake_file = _os.path.join(upload_dir, "v.mp4")
+    with open(fake_file, "wb") as _f:
+        _f.write(b"\x00\x00\x00\x1cftypisom\x00\x00\x02\x00isomiso2mp41" + b"\x00" * (80 * 1024))
+    try:
 
-    def fake_submit(file_path, title, desc="", tags="", tid=171, account="yui"):
-        calls.append(title)
-        return {"ok": True}
+        def fake_submit(file_path, title, desc="", tags="", tid=171, account="yui"):
+            calls.append(title)
+            return {"ok": True}
 
-    monkeypatch.setattr(bili, "submit_video", fake_submit)
-    inst = _make_inst(monkeypatch)
-    # 手动占住上传互斥（模拟自主引擎正在上传）
-    with inst._yui_upload_lock:
-        inst._yui_uploading = True
-    r = asyncio.run(inst.bili_yui_upload(file="v.mp4", title="第二个"))
-    inst._yui_uploading = False
-    assert r.get("error") == "BUSY"
-    assert calls == []  # 第二个流程没有启动
+        monkeypatch.setattr(bili, "submit_video", fake_submit)
+        inst = _make_inst(monkeypatch)
+        # 手动占住上传互斥（模拟自主引擎正在上传）
+        with inst._yui_upload_lock:
+            inst._yui_uploading = True
+        r = asyncio.run(inst.bili_yui_upload(file="v.mp4", title="第二个"))
+        inst._yui_uploading = False
+        assert r.get("error") == "BUSY"
+        assert calls == []  # 第二个流程没有启动
+    finally:
+        try:
+            _os.remove(fake_file)
+        except OSError:
+            pass
 
 
 # ══════════ 评论目标解析 ══════════
@@ -507,10 +517,11 @@ def test_upload_video_url_delegates_to_upload(monkeypatch) -> None:
     from plugin.plugins.bili_viewer import bili_social
 
     monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
-    # mock 下载：返回 4KB 假视频
+    # mock 下载：返回带 ftyp 头、>64KB 的有效视频体
     class _FakeResp:
         def __init__(self):
-            self._data = b"\x00\x01" * 2048
+            head = b"\x00\x00\x00\x1cftypisom\x00\x00\x02\x00isomiso2mp41"
+            self._data = head + b"\x00" * (80 * 1024)
             self._sent = False
 
         def read(self, n):
@@ -528,6 +539,10 @@ def test_upload_video_url_delegates_to_upload(monkeypatch) -> None:
     monkeypatch.setattr(_ur, "urlopen", lambda req, timeout=30: _FakeResp())
     monkeypatch.setattr(bili_social, "check_limit", lambda *a, **k: None)
     monkeypatch.setattr(bili_social, "record_limit", lambda *a, **k: None)
+    from plugin.plugins.bili_viewer import bili as _bili
+
+    upload_dir = os.path.join(os.path.dirname(os.path.abspath(_bili.__file__)), "yui_uploads")
+    before = set(os.listdir(upload_dir)) if os.path.isdir(upload_dir) else set()
     inst = _make_inst(monkeypatch)
     calls: list[tuple] = []
 
@@ -536,10 +551,18 @@ def test_upload_video_url_delegates_to_upload(monkeypatch) -> None:
         return {"output": "稿件已提交审核。", "is_error": False}
 
     monkeypatch.setattr(inst, "bili_yui_upload", fake_upload)
-    out = asyncio.run(inst.bili_yui_upload_video_url(url="https://cdn.example.com/video.mp4", title="测试投稿", tags="测试"))
-    assert out.get("is_error") is False
-    assert calls and calls[0][0].startswith("yui_url_upload_") and calls[0][0].endswith(".mp4")
-    assert calls[0][1] == "测试投稿"
+    try:
+        out = asyncio.run(inst.bili_yui_upload_video_url(url="https://cdn.example.com/video.mp4", title="测试投稿", tags="测试"))
+        assert out.get("is_error") is False
+        assert calls and calls[0][0].startswith("yui_url_upload_") and calls[0][0].endswith(".mp4")
+        assert calls[0][1] == "测试投稿"
+    finally:
+        # 清理 mock 下载产物，避免 pytest 运行污染真实 yui_uploads 目录
+        for name in set(os.listdir(upload_dir)) - before:
+            try:
+                os.remove(os.path.join(upload_dir, name))
+            except OSError:
+                pass
     # 下载产物应落在 yui_uploads（由委托的 fake 跳过，这里验证扩展名与命名即可）
 
 
@@ -562,6 +585,87 @@ def test_upload_video_url_download_failure_cleans_up(monkeypatch) -> None:
     assert out.get("error") == "DOWNLOAD_FAILED"
     after = set(os.listdir(upload_dir)) if os.path.isdir(upload_dir) else set()
     assert after <= before  # 无新增残留文件
+
+
+# ══════════ 视频有效性校验（v0.9.30：防 4KB 占位/空壳被当成功视频） ══════════
+
+
+def test_looks_like_video_container_heads() -> None:
+    """常见视频容器文件头识别；占位/空数据不识别。"""
+    import plugin.plugins.bili_viewer as _pkg
+
+    assert _pkg._looks_like_video(b"\x00\x00\x00\x1cftypisom\x00\x00\x02\x00isomiso2mp41") is True
+    assert _pkg._looks_like_video(b"FLV\x01\x05\x00\x00\x00\x09\x00\x00\x00\x00") is True
+    assert _pkg._looks_like_video(b"\x1a\x45\xdf\xa3\x9f\x42\x86\x81\x01\x00\x00\x00") is True
+    assert _pkg._looks_like_video(b"RIFF\x24\x00\x00\x00AVI LIST") is True
+    assert _pkg._looks_like_video(b"\x00\x01\x00\x01\x00\x01\x00\x01\x00\x01\x00\x01") is False
+    assert _pkg._looks_like_video(b"") is False
+    assert _pkg._looks_like_video(b"\x00" * 16) is False
+    assert _pkg._looks_like_video(b"<html>too slow</html>") is False
+
+
+def test_upload_video_url_bad_content_rejected(monkeypatch) -> None:
+    """下载得到 4KB 占位（无视频容器头）→ DOWNLOAD_BAD_CONTENT，删除半成品，不投稿。"""
+    import urllib.request as _ur
+
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+
+    class _FakeResp:
+        def __init__(self):
+            self._data = b"\x00\x01" * 2048
+            self._sent = False
+
+        def read(self, n):
+            if self._sent:
+                return b""
+            self._sent = True
+            return self._data[:n]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(_ur, "urlopen", lambda req, timeout=30: _FakeResp())
+    upload_dir = os.path.join(os.path.dirname(os.path.abspath(bili.__file__)), "yui_uploads")
+    before = set(os.listdir(upload_dir)) if os.path.isdir(upload_dir) else set()
+    inst = _make_inst(monkeypatch)
+    called: list[str] = []
+
+    async def fake_upload(**kw):
+        called.append(kw.get("file", ""))
+        return {"output": "ok", "is_error": False}
+
+    monkeypatch.setattr(inst, "bili_yui_upload", fake_upload)
+    out = asyncio.run(inst.bili_yui_upload_video_url(url="https://cdn.example.com/v.mp4", title="t"))
+    assert out.get("error") == "DOWNLOAD_BAD_CONTENT"
+    assert called == []  # 未委托投稿
+    after = set(os.listdir(upload_dir)) if os.path.isdir(upload_dir) else set()
+    assert after <= before  # 半成品已删除，无残留
+
+
+def test_yui_upload_rejects_invalid_file(monkeypatch) -> None:
+    """bili_yui_upload 对 yui_uploads 里的无效空壳文件 → INVALID_VIDEO_FILE，不消耗额度。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    upload_dir = os.path.join(os.path.dirname(os.path.abspath(bili.__file__)), "yui_uploads")
+    os.makedirs(upload_dir, exist_ok=True)
+    shell = os.path.join(upload_dir, "yui_shell_test.mp4")
+    with open(shell, "wb") as f:
+        f.write(b"\x00\x01" * 2048)
+    try:
+        inst = _make_inst(monkeypatch)
+        out = asyncio.run(inst.bili_yui_upload(file="yui_shell_test.mp4", title="t"))
+        assert out.get("error") == "INVALID_VIDEO_FILE"
+    finally:
+        try:
+            os.remove(shell)
+        except OSError:
+            pass
 
 
 # ══════════ 自主唤醒冷却 + 后台静默（read 不抢界面） ══════════
