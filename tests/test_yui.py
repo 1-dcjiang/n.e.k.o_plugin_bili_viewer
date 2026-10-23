@@ -952,3 +952,137 @@ def test_yui_cookie_file_mtime_cache(monkeypatch, tmp_path) -> None:
     # mtime 变化（文件被改）→ 重读
     assert bili._cookie("yui") == "SESSDATA=abc; bili_jct=def"  # 内容文件未真正改，重读仍同值
     assert reads["n"] == 2
+
+# ══════════ v0.9.24：run 批量点赞 + 防编造 + 通知防复述 + accounts 一致性 ══════════
+
+
+def _fake_videos():
+    return [
+        {"bvid": "BV1", "title": "视频一"},
+        {"bvid": "BV2", "title": "视频二"},
+        {"bvid": "BV3", "title": "视频三"},
+    ]
+
+
+def test_like_all_success(monkeypatch) -> None:
+    """v0.9.24：批量点赞全部成功 → 汇总输出，逐个真实调用 + 回读。"""
+    from plugin.plugins.bili_viewer import bili, bili_social
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=yui; bili_jct=y")
+    called = []
+
+    def fake_user_videos(mid, page=1, limit=15):
+        called.append(("list", mid, page, limit))
+        return _fake_videos()
+
+    def fake_like(bvid, account, undo=False):
+        called.append(("like", bvid, account, undo))
+        return {"bvid": bvid, "liked": True}
+
+    monkeypatch.setattr(bili, "user_videos", fake_user_videos)
+    monkeypatch.setattr(bili_social, "video_like", fake_like)
+    inst = _make_inst(monkeypatch)
+    r = asyncio.run(inst.bili_like_all(mid="1426057300", account="yui", limit=3))
+    assert r["is_error"] is False
+    assert "3 个视频点赞" in r["output"]
+    assert [c[0] for c in called] == ["list", "like", "like", "like"]
+    assert called[0] == ("list", 1426057300, 1, 3)
+
+
+def test_like_all_partial_fail_no_interrupt(monkeypatch) -> None:
+    """v0.9.24：风控/限流单个失败不中断，其余继续 → 部分成功汇总。"""
+    from plugin.plugins.bili_viewer import bili, bili_social
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=yui; bili_jct=y")
+    likes = iter([
+        {"bvid": "BV1", "liked": True},
+        None,  # BV2 抛错
+        {"bvid": "BV3", "liked": True},
+    ])
+
+    def fake_like(bvid, account, undo=False):
+        r = next(likes)
+        if r is None:
+            raise bili.BiliError("被风控拦截，请降低操作频率", "RISK_CONTROL")
+        return r
+
+    monkeypatch.setattr(bili, "user_videos", lambda mid, page=1, limit=15: _fake_videos())
+    monkeypatch.setattr(bili_social, "video_like", fake_like)
+    inst = _make_inst(monkeypatch)
+    r = asyncio.run(inst.bili_like_all(mid="1426057300", account="yui", limit=3))
+    assert r["is_error"] is False
+    assert "已点赞 2 个，1 个未点成" in r["output"]
+    assert r["result"]["liked"][0]["bvid"] == "BV1"
+    assert r["result"]["failed"][0]["error"] == "RISK_CONTROL"
+
+
+def test_like_all_missing_mid(monkeypatch) -> None:
+    """v0.9.24：缺 mid → EMPTY_MID，提示传 UP主 uid。"""
+    inst = _make_inst(monkeypatch)
+    r = asyncio.run(inst.bili_like_all(mid="", account="yui"))
+    assert r["is_error"] is True and r["error"] == "EMPTY_MID"
+    assert "mid" in r["output"]
+
+
+def test_like_all_all_failed(monkeypatch) -> None:
+    """v0.9.24：全部失败 → is_error=True，禁止假成功。"""
+    from plugin.plugins.bili_viewer import bili, bili_social
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=yui; bili_jct=y")
+
+    def fake_like(bvid, account, undo=False):
+        raise bili.BiliError("登录态失效或触发风控", "AUTH_FAILED")
+
+    monkeypatch.setattr(bili, "user_videos", lambda mid, page=1, limit=15: _fake_videos())
+    monkeypatch.setattr(bili_social, "video_like", fake_like)
+    inst = _make_inst(monkeypatch)
+    r = asyncio.run(inst.bili_like_all(mid="1426057300", account="yui", limit=3))
+    assert r["is_error"] is True and r["error"] == "LIKE_ALL_FAILED"
+    assert "点赞失败" in r["output"]
+
+
+def test_entry_run_like_branch(monkeypatch) -> None:
+    """v0.9.24：run 入口 action=like → 路由批量点赞（mid 必填）。"""
+    from plugin.plugins.bili_viewer import bili, bili_social
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=yui; bili_jct=y")
+    monkeypatch.setattr(bili, "user_videos", lambda mid, page=1, limit=15: _fake_videos())
+    monkeypatch.setattr(bili_social, "video_like", lambda bvid, account, undo=False: {"bvid": bvid, "liked": True})
+    inst = _make_inst(monkeypatch)
+    r = asyncio.run(inst.entry_run(action="like", mid="1426057300", account="yui", limit=3))
+    assert r["is_error"] is False and "点赞" in r["output"]
+
+
+def test_run_no_action_anti_lying(monkeypatch) -> None:
+    """v0.9.24：不支持的 action → NO_ACTION，明确禁止编造风控/成功。"""
+    inst = _make_inst(monkeypatch)
+    monkeypatch.setattr(inst, "_ext_tab", lambda force=False: None)
+    r = asyncio.run(inst.entry_run(action="give_me_a_pony"))
+    assert r["is_error"] is True and r["error"] == "NO_ACTION"
+    assert "严禁编造" in r["output"]
+    assert "本插件暂不支持" in r["output"]
+
+
+def test_assign_cookie_refresh_syncs_uid(monkeypatch, tmp_path) -> None:
+    """v0.9.24：刷新分支同步 accounts uid；未知新 uid 拒绝不改写角色映射。"""
+    from plugin.plugins.bili_viewer import bili
+
+    pkg = _pkg()
+    monkeypatch.delenv("BILI_COOKIE", raising=False)
+    monkeypatch.delenv("BILI_YUI_COOKIE", raising=False)
+    monkeypatch.setattr(bili, "_YUI_COOKIE_DIR", str(tmp_path))
+    monkeypatch.setattr(pkg, "_accounts_path", lambda: str(tmp_path / "accounts.json"))
+    inst = _make_inst(monkeypatch)
+    # 先绑定 main=111、yui=222
+    inst._assign_cookie("SESSDATA=a; DedeUserID=111; bili_jct=a1", 0, "extension")
+    inst._assign_cookie("SESSDATA=b; DedeUserID=222; bili_jct=b2", 0, "extension")
+    # 刷新 yui=222 → 账号条目 uid 保持 222，bound_at 更新
+    r = inst._assign_cookie("SESSDATA=b3; DedeUserID=222; bili_jct=b3b", 5, "extension")
+    assert r["bound"] is True and "小号" in r["detail"]
+    acc = pkg._read_accounts()
+    assert acc["yui"]["uid"] == 222
+    # 未知新 uid（如主账号 333）→ 拒绝，不改写任何角色映射
+    r2 = inst._assign_cookie("SESSDATA=c; DedeUserID=333; bili_jct=c3", 6, "extension")
+    assert r2["bound"] is False
+    acc = pkg._read_accounts()
+    assert acc["main"]["uid"] == 111 and acc["yui"]["uid"] == 222

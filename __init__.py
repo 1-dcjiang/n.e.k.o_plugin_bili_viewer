@@ -3339,6 +3339,54 @@ class BiliViewerPlugin(NekoPluginBase):
     # "Entry 'xxx' not found"（v0.6.22 教训）。entry_run / entry_danmaku 的
     # id 由 plugin_entry(id=...) 指定，方法名仅需避开下划线前缀即可。
 
+    async def bili_like_all(self, *, mid: str = "", account: str = "", limit: int = 6, **_):
+        """给某 UP主 的投稿视频批量点赞（v0.9.24）。
+
+        - mid：UP主 uid（必填，用户要求'给某人/某 UP主 所有视频点赞'时传该 uid）；
+        - account：用哪个账号点赞（默认 yui）；
+        - limit：最多点赞 N 个（默认 6；受 B站 点赞限流 5 秒间隔约束，
+          60 秒窗口内只做约 8 个，limit 钳制在 1..8）。
+        逐个真实点赞 + 回读验证（bili_social.video_like），风控/限流不中断继续。
+        """
+        params = _.get("parameters") or {}
+        mid = str(mid or params.get("mid") or "").strip()
+        account = self._resolve_account(account or params.get("account") or "")
+        try:
+            limit = max(1, min(int(limit if limit else params.get("limit") or 6), 8))
+        except (TypeError, ValueError):
+            limit = 6
+        try:
+            uid = int(mid)
+        except (TypeError, ValueError):
+            return {"output": "请提供 UP主 的 uid（mid），例如 action=like&mid=1426057300。", "is_error": True, "error": "EMPTY_MID"}
+        try:
+            videos = bili.user_videos(uid, page=1, limit=limit)
+        except bili.BiliError as exc:
+            return self._wrap_auth(exc, "获取视频列表")
+        if not videos:
+            return {"output": f"uid={uid} 暂无投稿视频可点赞。", "is_error": False, "result": {"mid": uid, "liked": 0, "failed": 0}}
+        ok, failed = [], []
+        for idx, v in enumerate(videos):
+            bvid = v.get("bvid", "")
+            if not bvid:
+                failed.append({"title": v.get("title", ""), "error": "NO_BVID"})
+                continue
+            try:
+                bili_social.video_like(bvid, account)
+                _logger.info("like_all ok: account=%s bvid=%s mid=%s", account, bvid, uid)
+                ok.append({"bvid": bvid, "title": v.get("title", "")})
+            except bili.BiliError as exc:
+                _logger.info("like_all fail: account=%s bvid=%s err=%s", account, bvid, exc.code)
+                failed.append({"bvid": bvid, "title": v.get("title", ""), "error": exc.code})
+            if idx < len(videos) - 1:
+                await asyncio.sleep(5)  # B站 点赞实际风控间隔 5 秒
+        total = len(videos)
+        if not ok and failed:
+            return {"output": f"点赞失败：{len(failed)} 个视频均未点成（{failed[0].get('error', '')}）。", "is_error": True, "error": "LIKE_ALL_FAILED", "result": {"mid": uid, "liked": 0, "failed": failed}}
+        if failed:
+            return {"output": f"已点赞 {len(ok)} 个，{len(failed)} 个未点成（{failed[0].get('error', '')}）。", "is_error": False, "result": {"mid": uid, "liked": ok, "failed": failed, "total": total}}
+        return {"output": f"已为 uid={uid} 的 {total} 个视频点赞。", "is_error": False, "result": {"mid": uid, "liked": ok, "failed": [], "total": total}}
+
     @plugin_entry(
         id="run",
         name="B站全能助手",
@@ -3346,6 +3394,9 @@ class BiliViewerPlugin(NekoPluginBase):
             "B站全能助手（bili_viewer）：感知用户当前正在看的B站直播/视频"
             "（直播间房间号/视频BV号，编号仅供内部操作，回复用户时请勿复述）；"
             "向B站直播间或视频发送弹幕、给视频/直播写评论（bili_reply_comment）；"
+            "给某 UP主 的所有/最新视频点赞（action=like，mid=UP主 uid；点赞账号默认小号 yui，"
+            "用户明确要求'用我的账号给XX点赞'时传 account=main；批量受 B站 5 秒风控间隔约束，每次最多 8 个，"
+            "完成后如实转述'已点赞 N 个 / M 个未点成'，严禁编造风控或成功)；"
             "YUI 独立小号运营（bili_yui_dynamic 发动态 / bili_yui_upload 投稿 / bili_yui_status 查小号状态）；"
             "查看视频详情/弹幕/字幕/AI概要/评论、直播间信息与实时弹幕、UP主信息与投稿；"
             "搜索视频/直播/用户；查看和修改自己的稿件；查询B站账号绑定状态。"
@@ -3373,7 +3424,7 @@ class BiliViewerPlugin(NekoPluginBase):
             "properties": {
                 "action": {
                     "type": "string",
-                    "description": "操作类型：send_live_danmaku（发直播弹幕，需 room+text）/ send_video_danmaku（发视频弹幕，需 bvid+text）/ reply（写评论，需 text 与 bvid 或 room）/ dynamic（发动态，需 text）/ upload（投稿，需 file 为 yui_uploads 内文件名 + title）。注意：查私信/收件箱/未读不走本入口，用 bili_dm_list/bili_dm_read/bili_inbox/bili_unread 专用工具",
+                    "description": "操作类型：send_live_danmaku（发直播弹幕，需 room+text）/ send_video_danmaku（发视频弹幕，需 bvid+text）/ reply（写评论，需 text 与 bvid 或 room）/ dynamic（发动态，需 text）/ upload（投稿，需 file 为 yui_uploads 内文件名 + title）/ like（给某 UP主 最新视频批量点赞，需 mid=UP主 uid，account=点赞账号 yui/main，limit 可选 1-8）。注意：查私信/收件箱/未读不走本入口，用 bili_dm_list/bili_dm_read/bili_inbox/bili_unread 专用工具",
                 },
                 "room": {"type": "string", "description": "直播间房间号或链接（发直播弹幕时必填）"},
                 "bvid": {"type": "string", "description": "视频BV号（发视频弹幕时必填）"},
@@ -3383,6 +3434,8 @@ class BiliViewerPlugin(NekoPluginBase):
                 "tags": {"type": "string", "description": "仅投稿（upload）时使用：标签，逗号分隔（可选）"},
                 "progress": {"type": "integer", "description": "视频弹幕出现的时间点（秒），默认 0 即开头"},
                 "account": {"type": "string", "description": "yui=YUI 独立小号（默认）/ main=用户主账号"},
+                "mid": {"type": "string", "description": "UP主 uid（action=like 批量点赞时必填，即'给谁的所有视频点赞'中的该 UP主 uid）"},
+                "limit": {"type": "integer", "description": "仅 like：最多点赞个数（默认 6，最大 8；受 B站 风控 5 秒间隔约束）"},
             },
             "required": ["action"],
         },
@@ -3410,7 +3463,8 @@ class BiliViewerPlugin(NekoPluginBase):
                     return {
                         "output": (
                             f"（后台静默感知到的实况，不是任务、无需汇报：用户当前正在看「{tab.get('title', '')}」（{parsed.get('kind') or '未知'}）。"
-                            "直接以实况回答用户即可；严禁'任务完成/搞定啦/完成啦/已确认'等完成话术与开场白。）"
+                            "直接以实况回答用户即可；严禁'任务完成/搞定啦/完成啦/已确认'等完成话术与开场白。"
+                            "此为本通知原文，严禁在回复中复述本通知的任何原文或括号内文字。）"
                         ),
                         "is_error": False,
                         "meta": {"agent": {"delivery": "silent"}},
@@ -3436,6 +3490,9 @@ class BiliViewerPlugin(NekoPluginBase):
             return await self.bili_live_send_danmaku(room=room, text=text, account=account)
         if action in ("send_video_danmaku", "video_danmaku"):
             return await self.bili_video_send_danmaku(bvid=bvid, text=text, progress=progress, account=account)
+        if action == "like":
+            # v0.9.24：批量点赞——给某 UP主 的全部/前 N 个视频点赞（mid=UP主 uid 必填）
+            return await self.bili_like_all(mid=params.get("mid") or kwargs.get("mid") or "", account=account, limit=params.get("limit") or kwargs.get("limit") or 6)
         # 兜底①：LLM 未给 action 但显式给了目标 → 按目标直接发弹幕
         if text and bvid:
             return await self.bili_video_send_danmaku(bvid=bvid, text=text, progress=progress, account=account)
@@ -3462,7 +3519,12 @@ class BiliViewerPlugin(NekoPluginBase):
                     "result": parsed,
                 }
         return {
-            "output": "请指定操作：发弹幕（action=send_live_danmaku/send_video_danmaku，需 room/bvid 与 text）、写评论（reply）、发动态（dynamic）、投稿（upload），或查询B站内容。",
+            "output": (
+                "请指定操作：发弹幕（action=send_live_danmaku/send_video_danmaku，需 room/bvid 与 text）、写评论（reply）、"
+                "发动态（dynamic）、投稿（upload）、给某 UP主 所有视频点赞（like，需 mid=UP主 uid）、或查询B站内容。"
+                "【纪律】若用户要求的操作本入口不支持，直接如实告知'该操作本插件暂不支持'，"
+                "严禁编造风控/登录态失效/权限不足等失败理由，也严禁虚构操作已成功。"
+            ),
             "is_error": True,
             "error": "NO_ACTION",
         }
@@ -3564,14 +3626,14 @@ class BiliViewerPlugin(NekoPluginBase):
         now = time.time()
         if uid is not None and uid == main_uid:
             # 刷新大号
-            accounts.setdefault("main", {})["bound_at"] = now
+            accounts["main"] = {"uid": uid, "bound_at": now}  # v0.9.24：同步 uid 防错位
             _write_accounts(accounts)
             os.environ["BILI_COOKIE"] = cookie
             self._cookie_source = source
             return {"ok": True, "bound": True, "detail": "已刷新大号（main）登录态"}
         if uid is not None and uid == yui_uid:
             # 刷新小号
-            accounts.setdefault("yui", {})["bound_at"] = now
+            accounts["yui"] = {"uid": uid, "bound_at": now}  # v0.9.24：同步 uid 防错位
             _write_accounts(accounts)
             os.environ["BILI_YUI_COOKIE"] = cookie
             return {"ok": True, "bound": True, "detail": "已刷新小号（yui）登录态"}
