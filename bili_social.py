@@ -399,6 +399,7 @@ def dm_conversations(account: str = "yui", unread_only: bool = False, limit: int
         account=account,
     ).get("data") or {}
     sessions = data.get("session_list") or []
+    sessions = [s for s in sessions if s.get("talker_id")]
     if unread_only:
         sessions = [s for s in sessions if s.get("unread_count")]
     sessions = sessions[:limit]
