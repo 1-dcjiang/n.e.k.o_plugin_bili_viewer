@@ -464,25 +464,27 @@ class BiliViewerPlugin(NekoPluginBase):
         """v0.9.0：读取最新私信内容用于自主注入（优先主账号会话，失败返回空串）。
 
         只读最近 5 条、不标记已读（不影响用户在 B站 网页的未读红点）；
-        格式化输出：「时间」对方/我：内容。
+        优化（v0.9.0 复查）：用 dm_conversations 自带的 name 字段（批量获取），
+        不再单独调 user_info；优先主账号+有新消息的会话，最多试 2 个，
+        网络请求从最多 7 次降到最多 3 次（1 次会话列表 + 最多 2 次消息读取）。
         """
         try:
-            owner_uid = str(bili_social._main_uid() or "")
+            convs = bili_social.dm_conversations(account, unread_only=False, limit=10)
         except Exception:
-            owner_uid = ""
-        candidates = []
-        if owner_uid:
-            candidates.append(owner_uid)
-        # 兜底：遍历会话列表找最近活跃的（非主账号）
-        try:
-            convs = bili_social.dm_conversations(account, unread_only=False, limit=5)
-            for c in convs:
-                uid = str(c.get("uid") or "")
-                if uid and uid not in candidates:
-                    candidates.append(uid)
-        except Exception:
-            pass
-        for uid in candidates[:3]:  # 最多试 3 个会话
+            return ""
+        if not convs:
+            return ""
+        # 排序：主账号优先，其次有新消息的，最后按原顺序（dm_conversations 已按最近活跃排序）
+        def _sort_key(c: dict) -> tuple:
+            is_owner = 0 if c.get("is_owner") else 1
+            is_new = 0 if c.get("new") else 1
+            return (is_owner, is_new)
+        convs.sort(key=_sort_key)
+        for c in convs[:2]:  # 最多试 2 个会话
+            uid = str(c.get("uid") or "")
+            name = str(c.get("name") or "")
+            if not uid:
+                continue
             try:
                 data = bili_social.dm_messages(account, uid, limit=5, mark_read=False)
                 msgs = data.get("messages") or []
@@ -493,12 +495,6 @@ class BiliViewerPlugin(NekoPluginBase):
                     who = "对方" if m.get("from") == "them" else "我"
                     lines.append(f"  「{m.get('time','')}」{who}：{str(m.get('text') or '')[:100]}")
                 if lines:
-                    name = ""
-                    try:
-                        uinfo = bili.user_info(int(uid))
-                        name = str(uinfo.get("name") or "")
-                    except Exception:
-                        pass
                     header = f"与 {name or uid} 的私信（最近 {len(lines)} 条）："
                     return header + "\n" + "\n".join(lines)
             except Exception:
