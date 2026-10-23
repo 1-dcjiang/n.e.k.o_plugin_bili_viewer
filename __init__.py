@@ -2074,6 +2074,8 @@ class BiliViewerPlugin(NekoPluginBase):
             "用 YUI 独立小号发一条 B站文字动态（账号日常运营）。何时用：YUI 自主运营任务中想表达观点/"
             "分享内容时，或用户要求'发条动态'时。参数 text：动态内容（最长 2000 字）。"
             "发布成功后 result 中包含 dynamic_id（数字），如需删除该动态可传 dynamic_id 给 bili_dynamic_delete。"
+            "【DYN_UNVERIFIED 处理铁律】若返回 DYN_UNVERIFIED 错误，动态可能已成功发出（B站回读接口延迟），"
+            "严禁重复发送！你必须先告知用户'动态可能已发出，请到B站动态页面确认'，绝不能直接重试发布。"
             "节流：每天最多 6 条（插件强制，超限返回 RATE_LIMITED）。"
             "纪律：内容自然、不刷屏、不攻击。"
         ),

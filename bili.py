@@ -1978,21 +1978,24 @@ def post_dynamic(text: str, account: str = "yui") -> dict:
                     pass
             raise BiliError(
                 "动态发布后回读验证失败（内容与预期不符"
-                + ("，已自动删除误发动态" if looks_like_json_err else "，请在 B站 动态页面确认后手动处理")
-                + "）；请勿声称已发布，请重试。",
+                + ("，已自动删除误发动态" if looks_like_json_err else "，请在 B站 动态页面确认")
+                + "）。【重要】动态可能已成功发出，严禁重复发送！"
+                + "如需补发请先到 B站 动态页面确认当前状态，再决定是否删除重发。",
                 "DYN_UNVERIFIED",
             )
     return {"ok": True, "text": text[:100], "dynamic_id": dyn_id}
 
 
-def _dynamic_verified(account: str, dynamic_id: str, text: str, tries: int = 2) -> tuple[bool, str | None]:
+def _dynamic_verified(account: str, dynamic_id: str, text: str, tries: int = 3) -> tuple[bool, str | None]:
     """发布后回读验证：调动态详情接口，确认动态内容与发送的 text 一致。
 
     v0.9.3 新增：防假成功（接口返回 code=0 但内容被错误编码，如包成 JSON 字符串）。
     v0.9.3 复查优化：同时检查 card.item.content 和 card.item.description（不同动态类型字段不同）；
     返回 (verified, actual_content)——actual_content 用于判断是否为 JSON 编码错误以决定是否自动删除。
-    B站 动态详情接口同步有延迟，card 为空时重试 2 次间隔 1 秒；内容不匹配时直接返回（不是延迟问题）。
+    v0.9.5 修复假失败：tries 2→3，间隔 1.0→1.5s（B站动态详情接口同步有延迟，2次不够）；
+    内容不匹配时也重试一次（可能是接口延迟返回旧缓存），不是直接判定失败。
     """
+    last_actual: str | None = None
     for i in range(tries):
         try:
             data = _http_get(
@@ -2001,11 +2004,13 @@ def _dynamic_verified(account: str, dynamic_id: str, text: str, tries: int = 2) 
                 account=account,
             )
         except BiliError:
-            return False, None
+            if i < tries - 1:
+                time.sleep(1.5)
+            continue
         card_raw = ((data.get("data") or {}).get("card")) or ""
         if not card_raw:
             if i < tries - 1:
-                time.sleep(1.0)
+                time.sleep(1.5)
             continue
         try:
             card = json.loads(card_raw) if isinstance(card_raw, str) else card_raw
@@ -2014,11 +2019,13 @@ def _dynamic_verified(account: str, dynamic_id: str, text: str, tries: int = 2) 
         # v0.9.3 复查优化：同时检查 content（文字动态）和 description（图片/视频动态）
         item = card.get("item") or {}
         actual = (item.get("content") or item.get("description") or "").strip()
+        last_actual = actual
         if actual == text.strip():
             return True, actual
-        # 内容不匹配，不再重试（不是延迟问题，是编码错误或字段差异）
-        return False, actual
-    return False, None
+        # v0.9.5：内容不匹配时也重试一次（可能是接口延迟返回旧缓存），不是直接判定失败
+        if i < tries - 1:
+            time.sleep(1.5)
+    return False, last_actual
 
 
 def delete_dynamic(dynamic_id, account: str = "yui") -> dict:

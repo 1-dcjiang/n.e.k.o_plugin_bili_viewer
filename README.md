@@ -99,6 +99,12 @@
 > 是"新消息"，重复注入导致 YUI 重复回复。修复：(1) 私信未读注入用 `ai_behavior="respond"`
 > 触发回复，其他未读（回复/@/赞/系统）保持 `read`；(2) 冷却从 20 分钟缩短到 5 分钟；
 > (3) `_read_latest_dm_for_inject` 读取后立即调用 `record_dm_seen` 更新游标，防重复注入。
+> v0.9.5 修复动态发布假失败（修复"让她发一次，她发了3次"）：与 v0.9.2 私信假失败同一模式——
+> `_dynamic_verified` 只重试 2 次间隔 1 秒，B站动态详情接口同步有延迟，发布成功但回读未确认
+> → 抛 `DYN_UNVERIFIED` → YUI 认为失败重试 → 重复发布。修复：(1) `_dynamic_verified` tries 2→3，
+> 间隔 1.0→1.5s；(2) 内容不匹配时也重试一次（可能是接口延迟返回旧缓存），不是直接判定失败；
+> (3) `DYN_UNVERIFIED` 错误消息明确"动态可能已成功发出，严禁重复发送"；
+> (4) `bili_yui_dynamic` description 加 `DYN_UNVERIFIED` 处理铁律。
 
 ## 使用示例（对 YUI 说）
 
