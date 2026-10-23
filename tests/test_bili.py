@@ -212,7 +212,7 @@ def test_edit_video_wbi_signed_query(monkeypatch) -> None:
         return {"code": 0, "data": {}}
 
     monkeypatch.setattr(bili, "_http_post", fake_post)
-    monkeypatch.setattr(bili, "video_info", lambda bvid: {"aid": 123, "title": "旧标题", "desc": "", "tags": ["a"]})
+    monkeypatch.setattr(bili, "video_info", lambda bvid, account="main": {"aid": 123, "title": "旧标题", "desc": "", "tags": ["a"]})
     monkeypatch.setattr(bili, "_get_mixin_key", lambda: "m" * 32)
     r = bili.edit_video("BV1xx411c7mD", title="新标题")
     assert r["ok"] is True
@@ -236,7 +236,7 @@ def test_edit_video_default_account_uses_yui(monkeypatch) -> None:
         return {"code": 0, "data": {}}
 
     monkeypatch.setattr(bili, "_http_post", fake_post)
-    monkeypatch.setattr(bili, "video_info", lambda bvid: {"aid": 123, "title": "t", "desc": "", "tags": ["a"]})
+    monkeypatch.setattr(bili, "video_info", lambda bvid, account="main": {"aid": 123, "title": "t", "desc": "", "tags": ["a"]})
     monkeypatch.setattr(bili, "_get_mixin_key", lambda: "m" * 32)
     r = bili.edit_video("BV1xx411c7mD", title="新标题")
     assert r["ok"] is True
@@ -450,7 +450,7 @@ def test_video_send_danmaku_keeps_biz_code(monkeypatch) -> None:
     monkeypatch.setenv("BILI_COOKIE", "SESSDATA=abc; bili_jct=tok")
     monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=abc; bili_jct=tok")  # 默认 yui
 
-    def _fake_video_info(bvid):
+    def _fake_video_info(bvid, account="main"):
         return {"title": "测试", "pages": [{"cid": 10086}]}
 
     def _fake_post(url, form, timeout=12.0, account="main"):
@@ -491,7 +491,7 @@ def test_live_info_fallback_uses_wbi(monkeypatch) -> None:
 
     called = {"wbi": False}
 
-    def _fake_wbi_get(url, params):
+    def _fake_wbi_get(url, params, account="main"):
         called["wbi"] = True
         assert "/getInfoByRoom" in url
         return {"code": 0, "data": {"room_info": {"room_id": 1, "title": "测试直播间", "live_status": 1, "online": 99}}}
@@ -513,7 +513,7 @@ def test_live_danmaku_uses_wbi(monkeypatch) -> None:
 
     called = {"wbi": False}
 
-    def _fake_wbi_get(url, params):
+    def _fake_wbi_get(url, params, account="main"):
         called["wbi"] = True
         assert "/getDanmuInfo" in url
         return {"code": 0, "data": {"token": "t0k", "host_list": [{"host": "broadcastlv.chat.bilibili.com", "wss_port": 443}]}}
@@ -571,7 +571,7 @@ def test_video_danmaku_uses_seg_so(monkeypatch) -> None:
     """video_danmaku 应优先走 seg.so protobuf，而非失效的 dm/list.so XML。"""
     from plugin.plugins.bili_viewer import bili
 
-    def _fake_video_info(bvid):
+    def _fake_video_info(bvid, account="main"):
         return {"pages": [{"cid": 1001, "page": 1, "part": "正片"}]}
 
     def _fake_fetch_raw(url, params):
@@ -722,7 +722,7 @@ def test_now_watching_prefers_extension_tab(monkeypatch):
 
     called = {}
 
-    def _fake_video_info(bvid):
+    def _fake_video_info(bvid, account="main"):
         called["bvid"] = bvid
         return {"title": "精确视频", "owner_name": "UP", "view": 10, "danmaku": 2,
                 "duration": 3600, "pubdate": 1700000000, "desc": "描述"}
@@ -1274,7 +1274,7 @@ def test_video_send_danmaku_dedup_once(monkeypatch) -> None:
 def test_reply_visible_hit(monkeypatch) -> None:
     from plugin.plugins.bili_viewer import bili
 
-    def fake_wbi_get(url, params, timeout=12.0):
+    def fake_wbi_get(url, params, timeout=12.0, account="main"):
         return {
             "code": 0,
             "data": {
@@ -1295,7 +1295,7 @@ def test_reply_visible_hit(monkeypatch) -> None:
 def test_reply_visible_miss(monkeypatch) -> None:
     from plugin.plugins.bili_viewer import bili
 
-    monkeypatch.setattr(bili, "_wbi_get", lambda url, params, timeout=12.0: {"code": 0, "data": {"replies": []}})
+    monkeypatch.setattr(bili, "_wbi_get", lambda url, params, timeout=12.0, account="main": {"code": 0, "data": {"replies": []}})
     assert bili._reply_visible(123, 1, "3494363678116792", "不存在的内容") is False
 
 
@@ -1307,7 +1307,7 @@ def test_add_reply_unverified_when_not_visible(monkeypatch) -> None:
     monkeypatch.setattr(bili, "_csrf", lambda account: "tok")
     monkeypatch.setattr(bili, "_http_post", lambda url, form, timeout=12.0, account="main", query=None: {"code": 0})
     monkeypatch.setattr(bili, "my_info", lambda account: {"mid": 3494363678116792})
-    monkeypatch.setattr(bili, "_reply_visible", lambda oid, type_id, uid, text, tries=2: False)
+    monkeypatch.setattr(bili, "_reply_visible", lambda oid, type_id, uid, text, tries=2, account="main": False)
     try:
         bili.add_reply(999999999999, 1, "测试评论")
         raise AssertionError("应当抛 REPLAY_UNVERIFIED")
@@ -1334,7 +1334,7 @@ def test_send_video_danmaku_unverified_without_dmid(monkeypatch) -> None:
 
     monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
     monkeypatch.setattr(bili, "_csrf", lambda account: "tok")
-    monkeypatch.setattr(bili, "video_info", lambda bvid: {"aid": 123, "pages": [{"cid": 456}]})
+    monkeypatch.setattr(bili, "video_info", lambda bvid, account="main": {"aid": 123, "pages": [{"cid": 456}]})
     monkeypatch.setattr(bili, "_get_mixin_key", lambda: "m" * 32)
     monkeypatch.setattr(bili, "_wbi_sign", lambda params, mixin: params)
     monkeypatch.setattr(bili, "_http_post", lambda url, form, timeout=12.0, account="main", query=None: {"code": 0, "data": {}})
@@ -1350,7 +1350,7 @@ def test_send_video_danmaku_ok_with_dmid(monkeypatch) -> None:
 
     monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
     monkeypatch.setattr(bili, "_csrf", lambda account: "tok")
-    monkeypatch.setattr(bili, "video_info", lambda bvid: {"aid": 123, "pages": [{"cid": 456}]})
+    monkeypatch.setattr(bili, "video_info", lambda bvid, account="main": {"aid": 123, "pages": [{"cid": 456}]})
     monkeypatch.setattr(bili, "_get_mixin_key", lambda: "m" * 32)
     monkeypatch.setattr(bili, "_wbi_sign", lambda params, mixin: params)
     monkeypatch.setattr(bili, "_http_post", lambda url, form, timeout=12.0, account="main", query=None: {"code": 0, "data": {"dmid": 8888}})

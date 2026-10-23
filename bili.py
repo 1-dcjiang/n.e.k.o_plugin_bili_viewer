@@ -335,11 +335,11 @@ def _wbi_sign(params: dict, mixin_key: str) -> dict:
     return params
 
 
-def _wbi_get(url: str, params: dict, timeout: float = _TIMEOUT) -> dict:
-    """带 wbi 签名的 GET。"""
+def _wbi_get(url: str, params: dict, timeout: float = _TIMEOUT, account: str = "main") -> dict:
+    """带 wbi 签名的 GET。v0.9.6 复查：加 account 参数（默认 main 保持向后兼容）。"""
     mixin = _get_mixin_key()
     signed = _wbi_sign(params, mixin)
-    return _http_get(url, signed, timeout=timeout)
+    return _http_get(url, signed, timeout=timeout, account=account)
 
 
 # ══════════════ 解析辅助 ══════════════
@@ -1662,7 +1662,7 @@ def edit_video(bvid: str, title: str | None = None, desc: str | None = None, tag
     """
     _require_login(account)
     bvid = _parse_bvid(bvid)
-    info = video_info(bvid)
+    info = video_info(bvid, account=account)
     aid = info.get("aid")
     if not aid:
         raise BiliError("无法获取稿件编号", "NO_AID")
@@ -1762,7 +1762,7 @@ def send_video_danmaku(bvid: str, text: str, progress_ms: int = 0, account: str 
     if not csrf:
         raise BiliError("Cookie 缺少 bili_jct（CSRF token），无法发送弹幕", "NO_CSRF")
     bvid = _parse_bvid(bvid)
-    info = video_info(bvid)
+    info = video_info(bvid, account=account)
     pages = info.get("pages") or []
     if not pages:
         raise BiliError("该视频没有可用的分P信息", "NO_CID")
@@ -1894,7 +1894,7 @@ def add_reply(oid: int, type_id: int, text: str, account: str = "yui", verify: b
             uid = str((my_info(account) or {}).get("mid") or "")
         except BiliError:
             uid = ""
-        if uid and not _reply_visible(int(oid), int(type_id), uid, text):
+        if uid and not _reply_visible(int(oid), int(type_id), uid, text, account=account):
             raise BiliError(
                 "评论接口已接受（code=0），但未在评论区回读到这条评论——可能被风控/审核拦截、"
                 "目标无效或入池延迟。不能确认已发送，请勿向用户声称'已发送'；可稍后自行到评论区核实。",
@@ -1903,10 +1903,11 @@ def add_reply(oid: int, type_id: int, text: str, account: str = "yui", verify: b
     return {"ok": True, "oid": int(oid), "type": int(type_id), "text": text}
 
 
-def _reply_visible(oid: int, type_id: int, uid: str, text: str, tries: int = 2) -> bool:
+def _reply_visible(oid: int, type_id: int, uid: str, text: str, tries: int = 2, account: str = "main") -> bool:
     """回读评论区（最新一页）确认 uid 的评论真实可见（v0.7.50）。
 
     评论入池有秒级时滞，未命中时短等重试一次；内容用包含匹配容忍格式差异。
+    v0.9.6 复查：加 account 参数，回读用发评论的账号 cookie（原默认 main，main 失效会假失败）。
     """
     text = (text or "").strip()
     for attempt in range(max(1, tries)):
@@ -1914,6 +1915,7 @@ def _reply_visible(oid: int, type_id: int, uid: str, text: str, tries: int = 2) 
             data = _wbi_get(
                 _API + "/x/v2/reply/main",
                 {"type": type_id, "oid": oid, "mode": 2, "next": 0, "ps": 20},
+                account=account,
             ).get("data") or {}
         except BiliError:
             data = {}

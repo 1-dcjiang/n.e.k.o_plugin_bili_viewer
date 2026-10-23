@@ -105,6 +105,11 @@
 > 间隔 1.0→1.5s；(2) 内容不匹配时也重试一次（可能是接口延迟返回旧缓存），不是直接判定失败；
 > (3) `DYN_UNVERIFIED` 错误消息明确"动态可能已成功发出，严禁重复发送"；
 > (4) `bili_yui_dynamic` description 加 `DYN_UNVERIFIED` 处理铁律。
+> v0.9.6 全盘复查：修复 4 处 account 路由问题（写操作链路里 video_info/回读验证默认用 main cookie，
+> main 失效时导致假失败）：(1) `_wbi_get` 加 account 参数（默认 main 向后兼容）；
+> (2) `_reply_visible` 加 account 参数，回读评论用发评论的账号 cookie；
+> (3) `send_video_danmaku` 里 `video_info` 传 account；(4) `edit_video` 里 `video_info` 传 account。
+> 同步更新 8 个测试 mock 函数签名。
 
 ## 使用示例（对 YUI 说）
 
