@@ -641,6 +641,89 @@ def test_unread_tick_push_and_cooldown(monkeypatch) -> None:
     assert len(fake_ctx.pushed) == 1
 
 
+# ══════════ 弹幕@自主回复（v0.8.5）：带房间号可自主回弹幕，同直播间冷却 ══════════
+
+
+def test_handle_mention_auto_reply_with_room(monkeypatch) -> None:
+    """@消息带房间号：注入自主回复任务（bili_live_send_danmaku），静默 read。"""
+    import time
+
+    from plugin.plugins.bili_viewer import BiliViewerPlugin
+
+    fake_ctx = _FakeCtx()
+    inst = BiliViewerPlugin(ctx=fake_ctx)
+    inst._handle_mention({"at": time.time(), "text": "@yui小猫娘 你好呀", "sender": "路人A", "room": "12345"})
+    assert len(fake_ctx.pushed) == 1
+    kw = fake_ctx.pushed[0]
+    assert kw.get("ai_behavior") == "read"
+    assert kw.get("coalesce_key") == "danmaku_mention"
+    assert kw.get("metadata", {}).get("mention_auto_reply") is True
+    assert "bili_live_send_danmaku" in kw["parts"][0]["text"]
+    assert "房间 12345" in kw["parts"][0]["text"]
+
+
+def test_handle_mention_cooldown_same_room(monkeypatch) -> None:
+    """同一直播间冷却期内再次@：只提醒不催自主回复（防刷屏）。"""
+    import time
+
+    from plugin.plugins.bili_viewer import BiliViewerPlugin
+
+    fake_ctx = _FakeCtx()
+    inst = BiliViewerPlugin(ctx=fake_ctx)
+    m = {"at": time.time(), "text": "@小猫娘 在吗", "sender": "B", "room": "12345"}
+    inst._handle_mention(m)
+    inst._handle_mention(m)  # 冷却期内
+    assert len(fake_ctx.pushed) == 2
+    assert fake_ctx.pushed[0]["metadata"]["mention_auto_reply"] is True
+    assert fake_ctx.pushed[1]["metadata"]["mention_auto_reply"] is False
+    # 冷却过期后恢复自主回复
+    inst._mention_reply_cool["mention_reply:12345"] = 0.0
+    inst._handle_mention(m)
+    assert fake_ctx.pushed[2]["metadata"]["mention_auto_reply"] is True
+
+
+def test_handle_mention_no_room_only_remind(monkeypatch) -> None:
+    """无房间号（扩展未带）：只注入提醒，不催自主回复。"""
+    import time
+
+    from plugin.plugins.bili_viewer import BiliViewerPlugin
+
+    fake_ctx = _FakeCtx()
+    inst = BiliViewerPlugin(ctx=fake_ctx)
+    inst._handle_mention({"at": time.time(), "text": "yui 快看", "sender": "C", "room": ""})
+    assert len(fake_ctx.pushed) == 1
+    assert fake_ctx.pushed[0]["metadata"]["mention_auto_reply"] is False
+    assert "下次自然对话" in fake_ctx.pushed[0]["parts"][0]["text"]
+
+
+def test_handle_mention_stale_skipped(monkeypatch) -> None:
+    """超过 30 秒的旧@：不注入（感知循环已消费或过时）。"""
+    import time
+
+    from plugin.plugins.bili_viewer import BiliViewerPlugin
+
+    fake_ctx = _FakeCtx()
+    inst = BiliViewerPlugin(ctx=fake_ctx)
+    inst._handle_mention({"at": time.time() - 40, "text": "@yui 你好", "sender": "D", "room": "9"})
+    assert len(fake_ctx.pushed) == 0
+
+
+def test_mention_notify_room_roundtrip(monkeypatch) -> None:
+    """web_ui 的@通知 room 字段写入与 clear 清空（v0.8.5 新增字段）。"""
+    import web_ui
+
+    old = web_ui._MENTION_NOTIFY
+    try:
+        web_ui._MENTION_NOTIFY = {"at": 1.0, "text": "@小猫娘 在吗", "sender": "E", "room": "888"}
+        info = web_ui.get_mention_notify(clear=True)
+        assert info["room"] == "888"
+        assert web_ui._MENTION_NOTIFY["text"] == ""
+        assert web_ui._MENTION_NOTIFY["sender"] == ""
+        assert web_ui._MENTION_NOTIFY["room"] == ""
+    finally:
+        web_ui._MENTION_NOTIFY = old
+
+
 def test_yui_cookie_file_mtime_cache(monkeypatch, tmp_path) -> None:
     """v0.7.3 优化：小号 Cookie 文件 mtime 缓存，内容未变不重复读盘。"""
     from plugin.plugins.bili_viewer import bili

@@ -40,6 +40,9 @@
 > 冷却已过时静默注入 YUI 上下文，YUI 自主查看并酌情回复（bili_inbox/bili_dm_read/bili_dm_send）。
 > v0.8.4 私信漏报修复：B站 网页打开会话后 unread_count/msgfeed.chat 归 0（新消息仍真实存在），
 > 已改为本地已读游标按 msg_seqno 增量判定新私信（dm_seen.json），未读/收件箱/自主轮询同口径。
+> v0.8.5 弹幕@自主回复：直播间有人@小号时，扩展采集携带房间号（room），
+> 感知循环静默注入自主回复任务（bili_live_send_danmaku account=yui）；同一直播间 10 分钟冷却防刷屏，
+> 无房间号或冷却中只提醒不催回复。
 
 ## 使用示例（对 YUI 说）
 

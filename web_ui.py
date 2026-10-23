@@ -33,7 +33,7 @@ _EXT_DOM_MAX_BYTES = 2 * 1024 * 1024
 
 # v0.2.17：扩展采集的直播弹幕缓冲 + @小号通知（YUI 实时看到弹幕、被@时提醒）
 _DANMAKU_BUF: collections.deque = collections.deque(maxlen=120)  # (sender, text, at)
-_MENTION_NOTIFY: dict = {"at": 0.0, "text": "", "sender": ""}
+_MENTION_NOTIFY: dict = {"at": 0.0, "text": "", "sender": "", "room": ""}
 _YUI_NICKNAMES = ("yui小猫娘", "小猫娘", "yui")  # 弹幕 @ 匹配昵称（小号默认昵称）
 
 # v0.7.35：扩展指令队列——插件工具把"进入直播间"等命令写入，扩展 alarm 轮询拉取执行
@@ -116,6 +116,7 @@ def get_mention_notify(clear: bool = True) -> dict:
     if clear:
         _MENTION_NOTIFY["text"] = ""
         _MENTION_NOTIFY["sender"] = ""
+        _MENTION_NOTIFY["room"] = ""
     return info
 
 _PAGE = """<!DOCTYPE html>
@@ -390,6 +391,7 @@ class _PanelHandler(BaseHTTPRequestHandler):
                         _MENTION_NOTIFY["at"] = time.time()
                         _MENTION_NOTIFY["text"] = text
                         _MENTION_NOTIFY["sender"] = sender
+                        _MENTION_NOTIFY["room"] = room
                         _logger.info("ext danmaku: MENTION sender=%s room=%s text=%s", sender, room, text)
                     else:
                         _logger.info("ext danmaku: room=%s sender=%s text=%s", room, sender, text)

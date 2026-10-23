@@ -73,6 +73,8 @@ _BROWSER_MONITOR_EVERY = 24  # 浏览器接入监控刷新频率：约每 24 次
 # 自主查看私信（v0.8.2）：低频轮询小号未读 + 注入冷却，防止刷屏打扰
 _UNREAD_POLL_INTERVAL = 180.0       # 每 3 分钟轮询一次小号未读数（轻量接口）
 _UNREAD_INJECT_COOLDOWN = 1200.0    # 同一轮未读注入后 20 分钟内不再重复提醒（等 YUI 处理）
+# 自主回复弹幕@（v0.8.5）：同一直播间 10 分钟内最多唤醒一次自主回复
+_MENTION_REPLY_COOLDOWN = 600.0
 
 # YUI 自主运营（v0.7.0）
 _YUI_AUTONOMY_ENV = "YUI_AUTONOMY"       # "0" 关闭自主运营，默认开启
@@ -244,6 +246,8 @@ class BiliViewerPlugin(NekoPluginBase):
         # 自主查看私信状态（v0.8.2）：上次轮询/上次注入时间戳
         self._unread_poll_ts = 0.0
         self._unread_inject_ts = 0.0
+        # 自主回复弹幕@冷却表（v0.8.5）：room → 上次唤醒时间
+        self._mention_reply_cool: dict[str, float] = {}
         # 启动后台实时感知线程（守护线程，不阻塞插件生命周期）
         self._start_sync_watcher()
 
@@ -318,21 +322,13 @@ class BiliViewerPlugin(NekoPluginBase):
                 self._yui_autonomy_tick(parsed)
             except Exception:
                 pass
-            # v0.2.17：直播弹幕 @小号 提醒——弹幕区有人@小号时静默注入感知，
-            # YUI 下次自然对话会回应对方（不主动弹气泡、不打断玩家）
+            # v0.2.17 + v0.8.5：直播弹幕 @小号——静默注入感知；带房间号时可自主回弹幕
+            # （同一直播间冷却 _MENTION_REPLY_COOLDOWN 内不重复唤醒，防刷屏）
             try:
                 import web_ui as _web3
                 mention = _web3.get_mention_notify(clear=False)
-                if mention.get("text") and time.time() - mention.get("at", 0) < 30:
-                    self.ctx.push_message(
-                        visibility=[],
-                        ai_behavior="read",
-                        parts=[{"type": "text", "text": f"直播间弹幕里有人@了小号：『{mention['sender']}』说『{mention['text']}』。若合适可以礼貌回应对方。"}],
-                        source=self.plugin_id,
-                        coalesce_key="danmaku_mention",
-                        priority=0,
-                        metadata={"danmaku_mention": True},
-                    )
+                if mention.get("text"):
+                    self._handle_mention(mention)
                     _web3.get_mention_notify(clear=True)
             except Exception:
                 pass
@@ -448,6 +444,42 @@ class BiliViewerPlugin(NekoPluginBase):
             coalesce_key="bili_unread_sync",
             priority=0,
             metadata={"bili_unread": True},
+        )
+
+    def _handle_mention(self, mention: dict) -> None:
+        """处理直播间弹幕@（v0.2.17 注入 + v0.8.5 自主回复升级）。
+
+        - 弹幕含小号昵称（yui小猫娘/小猫娘/yui）时由扩展采集端写入（web_ui._MENTION_NOTIFY）；
+        - 30 秒内有效；带房间号（room）时注入"自主回复"任务：YUI 用 bili_live_send_danmaku
+          在该直播间回一条简短自然弹幕——同一直播间 _MENTION_REPLY_COOLDOWN 内不重复唤醒，防刷屏；
+        - 无房间号（扩展未带/未知）时只注入提醒，YUI 在下次自然对话中礼貌回应；
+        - 全程静默 read：不弹气泡、不汇报，写操作纪律与自主运营一致。
+        """
+        text = str(mention.get("text") or "").strip()
+        if not text or time.time() - float(mention.get("at") or 0) >= 30:
+            return
+        sender = str(mention.get("sender") or "").strip()
+        room = str(mention.get("room") or "").strip()
+        key = f"mention_reply:{room or 'unknown'}"
+        do_reply = bool(room and time.time() - self._mention_reply_cool.get(key, 0.0) >= _MENTION_REPLY_COOLDOWN)
+        if do_reply:
+            self._mention_reply_cool[key] = time.time()
+        action = (
+            "。这是可以自主回应的机会：用 bili_live_send_danmaku（account=yui）在这个直播间"
+            "发一条简短自然的回应弹幕，内容贴合对方的话、礼貌不刷屏、不复制已有弹幕；"
+            "若不确定怎么回就发一句礼貌问候。全程静默执行：不向玩家汇报、不转述工具结果、"
+            "不发完成话术；若无法定位直播间或不确定，则跳过不回复。"
+            if do_reply else
+            "。若合适可在下次自然对话中礼貌回应对方。"
+        )
+        self.ctx.push_message(
+            visibility=[],
+            ai_behavior="read",
+            parts=[{"type": "text", "text": f"直播间弹幕里有人@了小号：『{sender}』说『{text}』" + (f"（房间 {room}）" if room else "") + action}],
+            source=self.plugin_id,
+            coalesce_key="danmaku_mention",
+            priority=0,
+            metadata={"danmaku_mention": True, "mention_auto_reply": do_reply},
         )
 
     def _yui_daily_reserve(self, op: str) -> bool:
