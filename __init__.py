@@ -80,7 +80,8 @@ _MENTION_REPLY_COOLDOWN = 600.0
 _YUI_AUTONOMY_ENV = "YUI_AUTONOMY"       # "0" 关闭自主运营，默认开启
 _YUI_AUTONOMY_TICK = 30.0                # 自主唤醒判定间隔（秒）
 _YUI_AUTONOMY_COOLDOWN = 900.0           # 同一目标两次自主唤醒的最小间隔（15 分钟）
-_YUI_DANMAKU_WINDOW = 60.0               # 同一目标弹幕最小间隔（秒）
+_YUI_DANMAKU_WINDOW = 60.0               # 同一目标（视频）弹幕最小间隔（秒）
+_YUI_LIVE_DANMAKU_WINDOW = 5.0           # 直播弹幕最小间隔（秒）——对齐 B站 实际风控（v0.9.12）
 _YUI_COMMENT_WINDOW = 120.0              # 同一视频评论最小间隔（秒）
 _YUI_DYNAMIC_DAILY_MAX = 6               # 每日动态上限
 _YUI_UPLOAD_DAILY_MAX = 2                # 每日投稿上限
@@ -1698,13 +1699,13 @@ class BiliViewerPlugin(NekoPluginBase):
             "参数 room：房间号或链接；text：弹幕内容（最长 30 字）；account：yui（YUI 独立小号，默认）/ main（用户主账号）。"
             "账号规则：默认使用 YUI 独立小号；小号未配置时自动回退用户主账号；"
             "自主运营任务中必须显式传 account=yui，严禁用用户主账号。"
-            "节流：同一直播间 60 秒内最多发 1 条（插件强制，超限返回 RATE_LIMITED）。"
+            "节流：同一直播间 5 秒内最多发 1 条（插件强制，对齐 B站 实际风控，超限返回 RATE_LIMITED）。"
             "这是写操作：仅在用户明确要求发弹幕时调用；"
             "严禁主动询问'要不要发弹幕/要不要回复弹幕'。"
             "本工具已包含发送全流程：调用一次即完成，禁止再次调用本工具或 run/bili_danmaku 等任何发送入口"
-            "重复发送同一弹幕（同目标同内容 60 秒内会被自动去重，只发一次）。"
+            "重复发送同一弹幕（同目标同内容 5 秒内会被自动去重，只发一次）。"
             "【DANMAKU_UNVERIFIED 处理·v0.9.11】若工具返回 DANMAKU_UNVERIFIED（接口接受但未返回 dmid，"
-            "可能被风控拦截）——不能声称已发出；可等 60 秒后重试一次（单条弹幕重试不会造成重复刷屏，安全）；"
+            "可能被风控拦截）——不能声称已发出；可等 10 秒后重试一次（单条弹幕重试不会造成重复刷屏，安全）；"
             "连续两次仍无 dmid 即停止，如实告知用户'弹幕被B站拦截了，发不出去'，严禁反复盲试刷屏。"
         ),
         parameters={
@@ -1745,10 +1746,11 @@ class BiliViewerPlugin(NekoPluginBase):
             return {"output": "请提供要发送的弹幕内容。", "is_error": True, "error": "EMPTY_MSG"}
         if account == "yui":
             # 原子占用（v0.7.8）：并发双发防护；后续失败/去重命中必须回退
-            if not self._yui_rate_reserve("danmaku", f"live:{room}", _YUI_DANMAKU_WINDOW):
-                return {"output": "已发过弹幕（同一目标 60 秒内限 1 条），请稍后再试。", "is_error": True, "error": "RATE_LIMITED"}
+            # v0.9.12：直播节流对齐 B站 实际风控 5 秒（用户实测反馈 60 秒过严）
+            if not self._yui_rate_reserve("danmaku", f"live:{room}", _YUI_LIVE_DANMAKU_WINDOW):
+                return {"output": "已发过弹幕（同一直播间 5 秒内限 1 条），请稍后再试。", "is_error": True, "error": "RATE_LIMITED"}
         if self._danmaku_recently_sent("live", room, text, 0):
-            # 同房间同内容 60 秒内已发送过（可能是重复触发/兜底入口二次调用）→ 不重复发送
+            # 同房间同内容 5 秒内已发送过（v0.9.12：可能是极短时间内的重复调用）→ 不重复发送
             _logger.info("live danmaku dedup hit room=%s text=%r", room, text[:20])
             if account == "yui":
                 self._yui_rate_rollback("danmaku", f"live:{room}")
@@ -3822,7 +3824,8 @@ class BiliViewerPlugin(NekoPluginBase):
         _logger.info("danmaku send result: kind=%s ok=%s error=%s message=%s target=%s",
                      kind, ok, error, str(message or "")[:120], target)
 
-    _DANMAKU_DEDUP_WINDOW = 60.0  # 同目标同内容弹幕的去重窗口（秒）
+    _DANMAKU_DEDUP_WINDOW = 60.0  # 同目标同内容（视频）弹幕的去重窗口（秒）
+    _LIVE_DANMAKU_DEDUP_WINDOW = 5.0  # 同房间同内容（直播）弹幕去重窗口（秒，v0.9.12 对齐 B站 风控）
 
     def _dedup_lock(self) -> threading.Lock:
         # 惰性初始化：测试环境常用 object.__new__ 构造实例，__init__ 不会执行
@@ -3835,22 +3838,24 @@ class BiliViewerPlugin(NekoPluginBase):
     def _danmaku_recently_sent(self, kind: str, target: str, text: str, progress: int) -> bool:
         """幂等去重：同一目标（房间/BV+进度）与内容在窗口内是否已发送过。"""
         key = f"{kind}|{target}|{progress}|{text}"
+        window = self._LIVE_DANMAKU_DEDUP_WINDOW if kind == "live" else self._DANMAKU_DEDUP_WINDOW
         with self._dedup_lock():
             sent = getattr(self, "_danmaku_sent", None)
             ts = (sent or {}).get(key)
-            return ts is not None and (time.time() - ts) < self._DANMAKU_DEDUP_WINDOW
+            return ts is not None and (time.time() - ts) < window
 
     def _mark_danmaku_sent(self, kind: str, target: str, text: str, progress: int) -> None:
         """记录一次真实发送时间戳；超过窗口的旧记录惰性清理。"""
         key = f"{kind}|{target}|{progress}|{text}"
         now = time.time()
+        window = self._LIVE_DANMAKU_DEDUP_WINDOW if kind == "live" else self._DANMAKU_DEDUP_WINDOW
         with self._dedup_lock():
             sent = getattr(self, "_danmaku_sent", None)
             if sent is None:
                 sent = {}
                 self._danmaku_sent = sent
             sent[key] = now
-            stale = [k for k, ts in sent.items() if now - ts > self._DANMAKU_DEDUP_WINDOW * 2]
+            stale = [k for k, ts in sent.items() if now - ts > window * 2]
             for k in stale:
                 sent.pop(k, None)
 
