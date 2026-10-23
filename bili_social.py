@@ -486,11 +486,9 @@ def dm_messages(account: str = "yui", uid: str = "", limit: int = 30, mark_read:
 
 def _resolve_dm_uid(target: str, account: str) -> int:
     target = (target or "").strip()
-    if target in ("owner", "main", "主人"):
-        uid = _main_uid()
-        if not uid:
-            raise bili.BiliError("还没有配置主账号（main）登录态", "NEED_LOGIN")
-        return uid
+    if target in ("owner", "main", "主人", "主账号", "大号"):
+        # 与 bili._resolve_uid 别名语义一致：优先走 bili 的统一解析（未配置主账号时抛 NEED_MAIN_LOGIN）
+        return bili._resolve_uid(target, account)
     if re.fullmatch(r"\d{1,12}", target):
         return int(target)
     return bili._resolve_uid(target, account)

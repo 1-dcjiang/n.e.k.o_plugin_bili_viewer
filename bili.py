@@ -1301,14 +1301,34 @@ def format_my_info(info: dict) -> str:
 
 # ══════════════ 关注 / 取消关注（v0.7.26） ══════════════
 
+# 主账号别名：LLM/用户说"关注你的大号/主账号/主人"时，任何工具传这几个词都必须解析为
+# 主账号 uid（v0.8.1 修复：此前"owner"被当昵称搜索，YUI 曾关注到昵称真叫 owner 的陌生账号）。
+_OWNER_ALIASES = ("owner", "main", "主人", "主账号", "大号")
+
+
+def _main_uid() -> int:
+    """主账号（main）uid；未配置主账号时抛 NEED_MAIN_LOGIN（绝不回落昵称搜索）。"""
+    uid = cookie_uid(_cookie("main"))
+    if not uid:
+        raise BiliError(
+            "还没有配置主账号（main）登录态，无法把 owner/main/主人 解析为主账号；"
+            "请先绑定主账号，或改用对方 UID/完整昵称",
+            "NEED_MAIN_LOGIN",
+        )
+    return uid
+
+
 def _resolve_uid(target: str, account: str = "yui") -> int:
-    """把用户输入解析为 B站 uid：纯数字按 uid；否则按昵称搜索并精确匹配（忽略大小写/空格，
-    严禁取搜索结果的近似第一个——防关注错人，v0.7.34）。"""
+    """把用户输入解析为 B站 uid：纯数字按 uid；owner/main/主人 等别名按主账号；
+    否则按昵称搜索并精确匹配（忽略大小写/空格，严禁取搜索结果的近似第一个——
+    防关注错人，v0.7.34）。"""
     target = (target or "").strip()
     if not target:
         raise BiliError("目标为空：请提供要关注/取关的用户 uid 或昵称", "EMPTY_TARGET")
     if re.fullmatch(r"\d{1,12}", target):
         return int(target)
+    if target in _OWNER_ALIASES:
+        return _main_uid()
     try:
         data = _http_get(
             _API + "/x/web-interface/search/type",
@@ -1345,6 +1365,14 @@ def _resolve_uid(target: str, account: str = "yui") -> int:
 def _resolve_uname(target: str, account: str = "yui") -> str:
     """与 _resolve_uid 配套：返回目标昵称（uid 输入时尽力反查昵称，查不到返回 uid 字符串）。"""
     target = (target or "").strip()
+    if target in _OWNER_ALIASES:
+        try:
+            info = my_info("main")
+            if info.get("uname"):
+                return str(info["uname"])
+        except BiliError:
+            pass
+        return "主账号"
     if re.fullmatch(r"\d{1,12}", target):
         try:
             data = _http_get(

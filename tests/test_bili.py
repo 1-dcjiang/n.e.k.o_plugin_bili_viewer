@@ -170,6 +170,25 @@ def test_require_login(monkeypatch) -> None:
         assert exc.code == "NEED_LOGIN"
 
 
+def test_resolve_uid_owner_alias(monkeypatch) -> None:
+    """owner/main/主人/主账号/大号 必须解析为主账号 uid，绝不按昵称搜索（v0.8.1 关注错人修复）。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_COOKIE", "SESSDATA=s; bili_jct=c; DedeUserID=88888888; sid=1")
+    for alias in ("owner", "main", "主人", "主账号", "大号"):
+        assert bili._resolve_uid(alias, "yui") == 88888888
+
+    # 未配置主账号时：抛 NEED_MAIN_LOGIN，绝不过度回落到昵称搜索
+    monkeypatch.delenv("BILI_COOKIE", raising=False)
+    monkeypatch.setattr(bili, "_main_cookie_from_file", lambda: "")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=s2; bili_jct=c2; DedeUserID=99999999")
+    try:
+        bili._resolve_uid("owner", "yui")
+        raise AssertionError("should raise")
+    except bili.BiliError as exc:
+        assert exc.code == "NEED_MAIN_LOGIN"
+
+
 def test_edit_video_requires_cookie(monkeypatch) -> None:
     from plugin.plugins.bili_viewer.bili import BiliError, edit_video
 
