@@ -141,6 +141,27 @@ def test_dm_content_types():
     assert bili_social._dm_content({"msg_type": 1, "content": "不是json"}) == "不是json"
 
 
+def test_notice_item_business_type_string():
+    """business_id 为字符串时也要正确映射类型（防漏映射）。"""
+    bili_social = _social()
+    raw = {
+        "id": 1,
+        "reply_time": 1700000000,
+        "user": {"mid": 9, "nickname": "A"},
+        "item": {
+            "business_id": "1",
+            "source_id": 55,
+            "source_content": "x",
+            "uri": "https://www.bilibili.com/video/BV1xx411c7mD",
+            "subject_id": 7,
+        },
+    }
+    n = bili_social._notice_item(raw, "reply_time", True)
+    assert n["on"]["type"] == "video"
+    assert n["on"]["bvid"] == "BV1xx411c7mD"
+    assert n["reply_with"].startswith("bili_reply_comment target=BV1xx411c7mD parent=55")
+
+
 def test_resolve_dm_uid_digit():
     bili_social = _social()
     assert bili_social._resolve_dm_uid("123456789", "yui") == 123456789

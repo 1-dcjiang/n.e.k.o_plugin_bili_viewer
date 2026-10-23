@@ -1,8 +1,9 @@
 """bili-cli 精华移植（v0.8.0）：收件箱 / 私信 / 表态 / 榜单 + 本地护栏。
 
 兼容原则（用户红线）：
-- 纯同步 urllib，复用 bili.py 的 _http_get/_wbi_get/_http_post/_cookie/_csrf/
-  _require_login/_resolve_uid/BiliError，不引入 bilibili-api/httpx 等任何重依赖；
+- 纯同步 urllib，复用 bili.py 的 _http_get/_http_post/_cookie/_csrf/
+  _require_login/_resolve_uid/_wbi_sign/_get_mixin_key/BiliError，
+  不引入 bilibili-api/httpx 等任何重依赖；
 - 写操作铁律：真实发送 + 回读验证（LIKE/COIN/FAV/TRIPLE/DM_UNVERIFIED 一律算失败，
   严禁假成功）；本地限流（间隔/小时/日上限）+ 审计日志（JSONL），风控/限流错误带提示；
 - 私信默认白名单：主账号（主人）/ 对方先发过 / 互关；主动私信陌生人需 allow_new=true；
@@ -227,6 +228,11 @@ def _notice_item(raw: dict[str, Any], time_key: str, is_comment: bool) -> dict[s
     item = raw.get("item") or {}
     user = raw.get("user") or {}
     m = _BV_RE.search(item.get("uri") or "")
+    try:
+        business_id = int(item.get("business_id"))
+    except (TypeError, ValueError):
+        business_id = None
+    business_type = _TYPE_NAMES.get(business_id) if business_id is not None else None
     out: dict[str, Any] = {
         "id": raw.get("id"),
         "time": _fmt_time(raw.get(time_key)),
@@ -234,7 +240,7 @@ def _notice_item(raw: dict[str, Any], time_key: str, is_comment: bool) -> dict[s
         "content": item.get("source_content"),
         "replying_to": item.get("target_reply_content") or item.get("root_reply_content") or None,
         "on": {
-            "type": _TYPE_NAMES.get(item.get("business_id"), item.get("business")),
+            "type": business_type or item.get("business"),
             "title": item.get("title") or None,
             "bvid": m.group(1) if m else None,
             "oid": item.get("subject_id"),
