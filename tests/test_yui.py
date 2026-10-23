@@ -484,6 +484,85 @@ def test_yui_upload_path_safety(monkeypatch) -> None:
     assert out3.get("error") == "NO_FILE"
 
 
+# ══════════ 视频直链投稿（v0.9.26 接入视频制作系统：URL→yui_uploads→投稿） ══════════
+
+
+def test_upload_video_url_bad_inputs(monkeypatch) -> None:
+    """缺 url/标题、非 http 链接 → 拒绝，不下载。"""
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    inst = _make_inst(monkeypatch)
+    out1 = asyncio.run(inst.bili_yui_upload_video_url(title="t"))
+    assert out1.get("error") == "NO_URL"
+    out2 = asyncio.run(inst.bili_yui_upload_video_url(url="ftp://x/v.mp4", title="t"))
+    assert out2.get("error") == "BAD_URL"
+    out3 = asyncio.run(inst.bili_yui_upload_video_url(url="https://x/v.mp4"))
+    assert out3.get("error") == "NO_TITLE"
+
+
+def test_upload_video_url_delegates_to_upload(monkeypatch) -> None:
+    """下载成功后委托 bili_yui_upload 投稿（日限额/互斥/安全全复用）。"""
+    import urllib.request as _ur
+
+    from plugin.plugins.bili_viewer import bili_social
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    # mock 下载：返回 4KB 假视频
+    class _FakeResp:
+        def __init__(self):
+            self._data = b"\x00\x01" * 2048
+            self._sent = False
+
+        def read(self, n):
+            if self._sent:
+                return b""
+            self._sent = True
+            return self._data[:n]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(_ur, "urlopen", lambda req, timeout=30: _FakeResp())
+    monkeypatch.setattr(bili_social, "check_limit", lambda *a, **k: None)
+    monkeypatch.setattr(bili_social, "record_limit", lambda *a, **k: None)
+    inst = _make_inst(monkeypatch)
+    calls: list[tuple] = []
+
+    async def fake_upload(**kw):
+        calls.append((kw.get("file"), kw.get("title")))
+        return {"output": "稿件已提交审核。", "is_error": False}
+
+    monkeypatch.setattr(inst, "bili_yui_upload", fake_upload)
+    out = asyncio.run(inst.bili_yui_upload_video_url(url="https://cdn.example.com/video.mp4", title="测试投稿", tags="测试"))
+    assert out.get("is_error") is False
+    assert calls and calls[0][0].startswith("yui_url_upload_") and calls[0][0].endswith(".mp4")
+    assert calls[0][1] == "测试投稿"
+    # 下载产物应落在 yui_uploads（由委托的 fake 跳过，这里验证扩展名与命名即可）
+
+
+def test_upload_video_url_download_failure_cleans_up(monkeypatch) -> None:
+    """下载异常 → 报错且不留半成品文件。"""
+    import urllib.request as _ur
+
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+
+    def boom(req, timeout=30):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(_ur, "urlopen", boom)
+    upload_dir = os.path.join(os.path.dirname(os.path.abspath(bili.__file__)), "yui_uploads")
+    before = set(os.listdir(upload_dir)) if os.path.isdir(upload_dir) else set()
+    inst = _make_inst(monkeypatch)
+    out = asyncio.run(inst.bili_yui_upload_video_url(url="https://cdn.example.com/v.mp4", title="t"))
+    assert out.get("error") == "DOWNLOAD_FAILED"
+    after = set(os.listdir(upload_dir)) if os.path.isdir(upload_dir) else set()
+    assert after <= before  # 无新增残留文件
+
+
 # ══════════ 自主唤醒冷却 + 后台静默（read 不抢界面） ══════════
 
 

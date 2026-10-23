@@ -27,6 +27,8 @@ import shutil
 import subprocess
 import threading
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from plugin.sdk.plugin import NekoPluginBase, lifecycle, llm_tool, neko_plugin, plugin_entry
@@ -2505,6 +2507,86 @@ class BiliViewerPlugin(NekoPluginBase):
             with self._yui_upload_lock:
                 self._yui_uploading = False
         return {"output": "稿件已提交审核。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": {"ok": True, "file": base, "title": title}}
+
+    @llm_tool(
+        name="bili_yui_upload_video_url",
+        description=(
+            "【发送纪律·最高优先】投稿提交后，你的对外回复必须逐字原样只有一句话：'稿件已提交审核。'"
+            "严禁添加任何其它文字：严禁'喵/搞定/任务搞定啦/完成啦/做好啦/发出去了/发出去啦/任务完成/搞定啦'等"
+            "任何口语化完成话术、表情、开场白与后缀。"
+            "把一条视频直链下载到 yui_uploads 并用 YUI 独立小号投稿（web 分片上传 + 提交审核）。"
+            "何时用：媒体生成器（media_generator 的 generate_video）刚生成的视频 URL、或用户提供的"
+            "可下载视频直链，要发布到 B站 时（v0.9.26 接入视频制作系统的桥：生成→下载→投稿一条链路）。"
+            "参数 url：视频直链（http/https，必填）；title：稿件标题（必填）；"
+            "desc：简介；tags：标签（逗号分隔）；tid：分区 id（默认 171 电子竞技）。"
+            "安全与节流：只接受 http/https 直链；下载到 yui_uploads 目录并校验非空后才投稿；"
+            "单文件上限 2GB，超限报错不投稿；下载失败如实上报、删除半成品文件，严禁编造成功；"
+            "每日最多 2 个稿件（与 bili_yui_upload 共用额度）。投稿走审核流程，需小号有投稿权限。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "视频直链（http/https），必填"},
+                "title": {"type": "string", "description": "稿件标题，必填"},
+                "desc": {"type": "string", "description": "稿件简介（可选）"},
+                "tags": {"type": "string", "description": "标签，逗号分隔（可选）"},
+                "tid": {"type": "integer", "description": "分区 id，默认 171（电子竞技）"},
+            },
+            "required": ["url", "title"],
+        },
+        timeout=300.0,
+    )
+    async def bili_yui_upload_video_url(self, *, url: str = "", title: str = "", desc: str = "", tags: str = "", tid: int = 0, **_):
+        params = _.get("parameters") or {}
+        url = (url or params.get("url") or "").strip()
+        title = (title or params.get("title") or "").strip()
+        desc = (desc or params.get("desc") or "").strip()
+        tags = (tags or params.get("tags") or "").strip()
+        if not url:
+            return {"output": "请提供视频直链（url）。", "is_error": True, "error": "NO_URL"}
+        if not title:
+            return {"output": "请提供稿件标题。", "is_error": True, "error": "NO_TITLE"}
+        if not url.lower().startswith(("http://", "https://")):
+            return {"output": "只接受 http/https 直链。", "is_error": True, "error": "BAD_URL"}
+        # 扩展名从 URL 路径提取，未识别按 mp4（B站 web 投稿接受常见视频格式）
+        ext = ""
+        path = urllib.parse.urlsplit(url).path
+        m = re.search(r"\.([a-zA-Z0-9]{2,5})$", path)
+        if m and m.group(1).lower() in ("mp4", "flv", "avi", "mov", "mkv", "wmv", "webm", "m4v", "mpg", "mpeg"):
+            ext = m.group(1).lower()
+        base = f"yui_url_upload_{int(time.time())}.{ext or 'mp4'}"
+        upload_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), _YUI_UPLOAD_DIR)
+        os.makedirs(upload_dir, exist_ok=True)
+        dest = os.path.join(upload_dir, base)
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            with urllib.request.urlopen(req, timeout=30) as resp, open(dest, "wb") as out:
+                total = 0
+                while True:
+                    chunk = resp.read(256 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > 2 * 1024 * 1024 * 1024:
+                        raise bili.BiliError("视频文件超过 2GB，拒绝投稿", "FILE_TOO_LARGE")
+                    out.write(chunk)
+            if total <= 0:
+                raise bili.BiliError("下载内容为空（0 字节），拒绝投稿", "EMPTY_DOWNLOAD")
+        except bili.BiliError as exc:
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+            return {"output": exc.message, "is_error": True, "error": exc.code}
+        except Exception as exc:
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+            return {"output": f"视频下载失败：{exc}", "is_error": True, "error": "DOWNLOAD_FAILED"}
+        _logger.info("yui upload from url: downloaded size=%d file=%s", total, base)
+        # 复用 bili_yui_upload 的投稿链路（日限额/互斥/路径安全/失败回退额度全部沿用）
+        return await self.bili_yui_upload(file=base, title=title, desc=desc, tags=tags, tid=tid)
 
     @llm_tool(
         name="bili_yui_status",

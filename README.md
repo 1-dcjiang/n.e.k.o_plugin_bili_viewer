@@ -198,6 +198,12 @@
 > 私信白名单（owner/粉丝/对方先发/互关，粉丝全放行满足"适用于所有关注她的粉丝"）、私信 payload（嵌套
 > msg[sender_uid]/msg[dev_id] per-install + wbi query）、动态发布/删除双回读、直播弹幕回读、5 秒风控间隔、
 > 弹幕连发任务（danmaku_loop.json）。
+> v0.9.26 接入视频制作系统（生成→下载→投稿一条链路）：
+> 新增 bili_yui_upload_video_url 工具——接受媒体生成器（media_generator 的 generate_video，豆包 Seedance/可灵）
+> 产出的视频直链或其他可下载视频 URL → 下载到 yui_uploads（限 http/https、2GB 上限、失败删除半成品）→
+> 委托 bili_yui_upload 复用现有投稿链路（分片上传+提交审核、每日 2 稿额度、互斥、失败回退额度）；
+> YUI 自主编排示例：generate_video(prompt=...) → bili_yui_upload_video_url(url=返回URL, title=...) → 稿件进审核。
+> 前提：media_generator 需配置 DOUBAO_ARK_API_KEY+DOUBAO_ARK_ENDPOINT（Seedance）或 KLING_API_KEY+KLING_SECRET_KEY（可灵）。
 
 ## 使用示例（对 YUI 说）
 
