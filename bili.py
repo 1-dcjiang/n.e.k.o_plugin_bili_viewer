@@ -271,6 +271,9 @@ def _http_get(url: str, params: dict | None = None, timeout: float = _TIMEOUT, a
         code = data.get("code", -1)
         if code in (-352, -401, -412):
             raise BiliError("触发风控限制，请稍后再试（或配置 BILI_COOKIE）", "RISK_CONTROL")
+        if code == -509:
+            # v0.9.25 对照 bili-cli errors.py BILI_CODE_MAP：-509 = 访问过于频繁
+            raise BiliError("访问过于频繁，请等待 1-2 分钟后重试（严禁连续重试）", "RISK_CONTROL")
         if code == -101:
             raise BiliError("登录态失效或未登录（请重新配置有效的 BILI_COOKIE）", "AUTH_FAILED")
         if code == -404:
