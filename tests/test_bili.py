@@ -1458,3 +1458,64 @@ def test_post_dynamic_visible_in_feed_ok(monkeypatch) -> None:
     r = bili.post_dynamic("成功动态", account="yui")
     assert r["ok"] is True
     assert r["dynamic_id"] == "222"
+
+
+def test_main_uid_detects_cookie_misconfig(monkeypatch) -> None:
+    """main_cookie.txt 被误写成小号 Cookie（uid 相同）→ 抛 MAIN_COOKIE_WRONG（v0.9.10）。
+
+    实测发现 main_cookie.txt 与 yui_cookie.txt 的 DedeUserID 相同（都是小号），
+    导致 owner 解析成 YUI 自己 → 私信回复 SELF_DM、白名单误判。
+    """
+    from plugin.plugins.bili_viewer import bili
+
+    # 两个 cookie 都是同一个 uid（小号）
+    monkeypatch.setenv("BILI_COOKIE", "SESSDATA=m; bili_jct=mj; DedeUserID=3494363678116792")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj; DedeUserID=3494363678116792")
+    try:
+        bili._main_uid()
+        raise AssertionError("应当抛 MAIN_COOKIE_WRONG")
+    except bili.BiliError as exc:
+        assert exc.code == "MAIN_COOKIE_WRONG"
+
+
+def test_may_message_follower(monkeypatch) -> None:
+    """粉丝（对方关注了我，attribute=2）允许私信；互关 attribute=6 仍返回 mutual_follow（v0.9.10）。"""
+    from plugin.plugins.bili_viewer import bili, bili_social
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj; DedeUserID=3494363678116792")
+    monkeypatch.setenv("BILI_COOKIE", "SESSDATA=m; bili_jct=mj; DedeUserID=1426057300")
+    # 主账号解析正常（uid 不同），owner 判定走主账号
+    monkeypatch.setattr(bili, "_cookie", lambda account: {"yui": "SESSDATA=y; bili_jct=yj; DedeUserID=3494363678116792", "main": "SESSDATA=m; bili_jct=mj; DedeUserID=1426057300"}[account])
+
+    def fake_http_get(url, params=None, account="yui", timeout=12.0):
+        if "x/relation" in str(url) and "fid" in str(params or {}):
+            attr = {"2222": 2, "3333": 6}.get(str(params["fid"]), 0)
+            return {"code": 0, "data": {"attribute": attr}}
+        if "fetch_session_msgs" in str(url):
+            return {"code": 0, "data": {"messages": []}}
+        return {"code": 0, "data": {}}
+
+    monkeypatch.setattr(bili, "_http_get", fake_http_get)
+    assert bili_social._may_message("yui", 2222) == "follower"
+    assert bili_social._may_message("yui", 3333) == "mutual_follow"
+    assert bili_social._may_message("yui", 1426057300) == "owner"
+    assert bili_social._may_message("yui", 9999) is None
+
+
+def test_may_message_survives_main_cookie_wrong(monkeypatch) -> None:
+    """main cookie 配错（与 yui 相同）时，粉丝判定仍工作，不抛错（v0.9.10）。"""
+    from plugin.plugins.bili_viewer import bili, bili_social
+
+    # main cookie 被误写成小号（uid 相同）→ _main_uid 抛 MAIN_COOKIE_WRONG
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj; DedeUserID=3494363678116792")
+    monkeypatch.setenv("BILI_COOKIE", "SESSDATA=x; bili_jct=xj; DedeUserID=3494363678116792")
+
+    def fake_http_get(url, params=None, account="yui", timeout=12.0):
+        if "x/relation" in str(url) and "fid" in str(params or {}):
+            return {"code": 0, "data": {"attribute": 2}}
+        if "fetch_session_msgs" in str(url):
+            return {"code": 0, "data": {"messages": []}}
+        return {"code": 0, "data": {}}
+
+    monkeypatch.setattr(bili, "_http_get", fake_http_get)
+    assert bili_social._may_message("yui", 2222) == "follower"

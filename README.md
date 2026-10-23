@@ -123,6 +123,13 @@
 > 修复：新增 `_dynamic_in_feed_verified` 动态流验证（发布后确认 id_str 命中且 visible=True，
 > tries=3 间隔 1.5s）；未进流抛 `DYN_INVISIBLE`（严禁声称已发布/连续盲发）；
 > `bili_yui_dynamic` description 加 `DYN_INVISIBLE` 处理铁律。
+> v0.9.10 修复私信自动回复失效（"看到私信仍然不会自动回复"）：实测发现 main_cookie.txt 被误写成
+> YUI 小号的 Cookie（DedeUserID 与 yui_cookie.txt 相同）——owner 别名解析成 YUI 自己，
+> 导致 `bili_dm_send(uid=owner)` 抛 SELF_DM，YUI 无法回复任何私信。修复：
+> (1) `_main_uid` 加自指检测（main cookie 与小号相同时抛 `MAIN_COOKIE_WRONG`，明确报错不静默返回）；
+> (2) 私信注入带真实会话 uid（不依赖 owner 别名），YUI 直接对真实 uid 回复；
+> (3) 私信白名单扩展支持**全部粉丝**（对方关注了 YUI，attribute & 2 含互关，即可发私信），
+> 不再局限于主账号/已对话/互关；主账号 Cookie 配错时不阻断粉丝/互关/已对话判定。
 
 ## 使用示例（对 YUI 说）
 

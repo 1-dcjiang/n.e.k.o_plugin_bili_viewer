@@ -1327,13 +1327,26 @@ _OWNER_ALIASES = ("owner", "main", "主人", "主账号", "大号")
 
 
 def _main_uid() -> int:
-    """主账号（main）uid；未配置主账号时抛 NEED_MAIN_LOGIN（绝不回落昵称搜索）。"""
+    """主账号（main）uid；未配置主账号时抛 NEED_MAIN_LOGIN（绝不回落昵称搜索）。
+
+    v0.9.10：新增自指检测——main_cookie.txt 被误写成小号 Cookie（实测 DedeUserID 与
+    yui 相同）时，owner 别名会解析成 YUI 自己，导致私信回复 SELF_DM、白名单误判。
+    检测到后抛 MAIN_COOKIE_WRONG 明确报错，绝不静默返回小号 uid。
+    """
     uid = cookie_uid(_cookie("main"))
     if not uid:
         raise BiliError(
             "还没有配置主账号（main）登录态，无法把 owner/main/主人 解析为主账号；"
             "请先绑定主账号，或改用对方 UID/完整昵称",
             "NEED_MAIN_LOGIN",
+        )
+    yui_uid = cookie_uid(_cookie("yui"))
+    if yui_uid and uid == yui_uid:
+        raise BiliError(
+            "主账号 Cookie 配置错误：main_cookie.txt 里存的是 YUI 小号的 Cookie（uid 相同），"
+            "无法把 owner/主账号 解析为真正的主账号。请重新登录主账号并绑定"
+            "（在浏览器登录主账号后重载插件/重新绑定），或用主账号的纯数字 uid 指定目标。",
+            "MAIN_COOKIE_WRONG",
         )
     return uid
 

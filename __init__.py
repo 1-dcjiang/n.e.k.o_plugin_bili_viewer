@@ -443,9 +443,7 @@ class BiliViewerPlugin(NekoPluginBase):
         if dm_content:
             text = (
                 f"你的B站小号收到新私信（{detail}），以下是最新私信内容，请立即阅读并回复：\n"
-                f"{dm_content}\n"
-                f"回复方式：用 bili_dm_send（uid=owner, account=yui, text=你的回复内容）；"
-                f"若需要看更多上下文用 bili_dm_read（uid=owner）。"
+                f"{dm_content}"
             )
             behavior = "respond"  # v0.9.4：私信必须触发回复
         else:
@@ -512,8 +510,14 @@ class BiliViewerPlugin(NekoPluginBase):
                             bili_social.record_dm_seen(account, int(talker), int(last_seqno))
                         except Exception:
                             pass
-                    header = f"与 {name or uid} 的私信（最近 {len(lines)} 条）："
-                    return header + "\n" + "\n".join(lines)
+                    # v0.9.10：注入带真实会话 uid 与昵称——不依赖 owner 别名（主账号 Cookie
+                    # 配错时 owner 会解析成 YUI 自己导致 SELF_DM，YUI 无法回复粉丝私信）
+                    header = f"与 {name or uid}（uid {uid}）的私信（最近 {len(lines)} 条）："
+                    guide = (
+                        f"\n回复该私信：用 bili_dm_send(uid={uid}, account={account}, text=你的回复内容)；"
+                        f"看更多上下文：bili_dm_read(uid={uid})"
+                    )
+                    return header + "\n" + "\n".join(lines) + guide
             except Exception:
                 continue
         return ""
@@ -2614,13 +2618,15 @@ class BiliViewerPlugin(NekoPluginBase):
             "【真实发送铁律】'私信已发送。'只能出现在你实际调用本工具且收到成功结果（is_error=False）之后；"
             "严禁在未调用工具、调用失败时声称已发送。发送成功后你的对外回复必须逐字原样只有一句话：'私信已发送。'"
             "严禁添加任何其它文字（严禁'搞定啦/任务完成/喵'等话术、表情、复述内容与 uid）。"
-            "【发送对象白名单·最高优先】默认只能发给：主账号（主人）/ 对方先给你发过私信 / 互关好友；"
-            "主动私信陌生人必须 allow_new=true（易被判骚扰，慎用），且每次都要向用户说明这是主动私信陌生人。"
+            "【发送对象白名单·最高优先】默认只能发给：主账号（主人）/ 关注本账号的粉丝"
+            "（对方关注了 YUI，含互关）/ 对方先给你发过私信 / 互关好友；"
+            "主动私信陌生人（对方没关注你也没联系过）必须 allow_new=true（易被判骚扰，慎用），且每次都要向用户说明这是主动私信陌生人。"
             "内容最长 500 字；不能给自己发；发送后回读验证，未确认到一律报错、严禁声称已发送。"
             "【DM_UNVERIFIED 处理·v0.9.2】如果工具返回 DM_UNVERIFIED 错误（'接口已接受但回读未确认'），"
             "说明私信**很可能已经发出去了**（B站接口同步延迟），严禁再次调用本工具重试——重复发送会导致对方收到多条相同私信。"
             "此时应回复用户'私信可能已发出，请在 B站 私信页面确认'，不要说'发不出去'也不要重试。"
-            "参数 uid：对方 UID 或昵称或 owner（主账号）；text：消息内容；allow_new：是否允许私信陌生人；account：yui（默认）/ main。"
+            "参数 uid：对方 UID、昵称或 owner（主账号）；私信注入中的 uid 是纯数字（真实对方 uid），直接使用即可；"
+            "text：消息内容；allow_new：是否允许私信陌生人；account：yui（默认）/ main。"
         ),
         parameters={
             "type": "object",

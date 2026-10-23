@@ -572,9 +572,16 @@ def _resolve_dm_uid(target: str, account: str) -> int:
 
 
 def _may_message(account: str, talker: int) -> str | None:
-    """为什么允许给这个人发私信（白名单）；陌生人冷启动返回 None（dm.py 精华）。"""
-    if talker == _main_uid():
-        return "owner"
+    """为什么允许给这个人发私信（白名单）；陌生人冷启动返回 None（dm.py 精华）。
+
+    v0.9.10：新增粉丝判定——对方关注了本账号（attribute & 2，含互关 6）即视为粉丝，允许发送；
+    主账号 Cookie 未配置/配错（MAIN_COOKIE_WRONG）时跳过 owner 判定，不阻断粉丝/互关/已对话判定。
+    """
+    try:
+        if talker == _main_uid():
+            return "owner"
+    except bili.BiliError:
+        pass  # 主账号未配置/配错时继续走其他白名单
     try:
         msgs = (bili._http_get(_FETCH_MSGS_URL, _wbi_params({"talker_id": talker, "session_type": 1, "size": 30, "begin_seqno": 0}), account=account).get("data") or {}).get("messages") or []
     except bili.BiliError:
@@ -586,8 +593,9 @@ def _may_message(account: str, talker: int) -> str | None:
         rel = (bili._http_get(_RELATION_URL, {"fid": talker}, account=account)).get("data") or {}
     except bili.BiliError:
         rel = {}
-    if rel.get("attribute") == 6:
-        return "mutual_follow"
+    attr = int(rel.get("attribute") or 0)
+    if attr & 2:  # TA 关注了我（2=TA→我，6=互关）→ 粉丝
+        return "mutual_follow" if attr == 6 else "follower"
     return None
 
 
