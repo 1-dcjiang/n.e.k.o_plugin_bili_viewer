@@ -2056,6 +2056,7 @@ class BiliViewerPlugin(NekoPluginBase):
             "任何口语化完成话术、表情、开场白与后缀；严禁复述动态内容。"
             "用 YUI 独立小号发一条 B站文字动态（账号日常运营）。何时用：YUI 自主运营任务中想表达观点/"
             "分享内容时，或用户要求'发条动态'时。参数 text：动态内容（最长 2000 字）。"
+            "发布成功后 result 中包含 dynamic_id（数字），如需删除该动态可传 dynamic_id 给 bili_dynamic_delete。"
             "节流：每天最多 6 条（插件强制，超限返回 RATE_LIMITED）。"
             "纪律：内容自然、不刷屏、不攻击。"
         ),
@@ -2577,6 +2578,8 @@ class BiliViewerPlugin(NekoPluginBase):
                 who = "对方" if m.get("from") == "them" else "我"
                 lines.append(f"[{m.get('time','')}] {who}：{m.get('text','')}")
             readable = f"与对方的私信（共 {len(msgs)} 条，按时间顺序）：\n" + "\n".join(lines)
+        # v0.9.3 复查优化：YUI 主动读私信后重置未读注入冷却，避免 3 分钟后重复提醒
+        self._unread_inject_ts = time.time()
         return {"output": readable, "is_error": False, "result": data}
 
     @llm_tool(
@@ -2620,6 +2623,8 @@ class BiliViewerPlugin(NekoPluginBase):
                 _logger.info("dm send result: ok=False error=%s account=%s uid=%s", exc.code, account, uid)
             return self._wrap_auth(exc, "发送私信")
         _logger.info("dm send result: ok=True account=%s uid=%s allowed=%s", account, uid, result.get("allowed_because"))
+        # v0.9.3 复查优化：YUI 主动发私信后重置未读注入冷却，避免重复提醒
+        self._unread_inject_ts = time.time()
         return {"output": "私信已发送。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": {"ok": True, "uid": uid, "allowed_because": result.get("allowed_because")}}
 
     @llm_tool(

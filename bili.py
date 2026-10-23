@@ -1965,25 +1965,33 @@ def post_dynamic(text: str, account: str = "yui") -> dict:
     data = resp.get("data") or {}
     dyn_id = str(data.get("dynamic_id_str") or data.get("dynamic_id") or "")
     # v0.9.3 回读验证：发布后调动态详情接口确认内容正确（防假成功）
-    if dyn_id and not _dynamic_verified(account, dyn_id, text):
-        # 内容不匹配（如被包成 JSON），删除误发的动态并报错
-        try:
-            delete_dynamic(dyn_id, account=account)
-        except BiliError:
-            pass
-        raise BiliError(
-            "动态发布后回读验证失败（内容与预期不符，已自动删除误发动态）；"
-            "请勿声称已发布，请重试。",
-            "DYN_UNVERIFIED",
-        )
+    if dyn_id:
+        verified, actual_content = _dynamic_verified(account, dyn_id, text)
+        if not verified:
+            # v0.9.3 复查优化：只在内容明显是 JSON 编码错误（以 {"content": 开头）时自动删除，
+            # 否则只报错不删除——避免 B站 接口格式变化导致误删正确动态
+            looks_like_json_err = isinstance(actual_content, str) and actual_content.lstrip().startswith("{") and '"content"' in actual_content
+            if looks_like_json_err:
+                try:
+                    delete_dynamic(dyn_id, account=account)
+                except BiliError:
+                    pass
+            raise BiliError(
+                "动态发布后回读验证失败（内容与预期不符"
+                + ("，已自动删除误发动态" if looks_like_json_err else "，请在 B站 动态页面确认后手动处理")
+                + "）；请勿声称已发布，请重试。",
+                "DYN_UNVERIFIED",
+            )
     return {"ok": True, "text": text[:100], "dynamic_id": dyn_id}
 
 
-def _dynamic_verified(account: str, dynamic_id: str, text: str, tries: int = 2) -> bool:
+def _dynamic_verified(account: str, dynamic_id: str, text: str, tries: int = 2) -> tuple[bool, str | None]:
     """发布后回读验证：调动态详情接口，确认动态内容与发送的 text 一致。
 
     v0.9.3 新增：防假成功（接口返回 code=0 但内容被错误编码，如包成 JSON 字符串）。
-    B站 动态详情接口同步有延迟，重试 2 次间隔 1 秒。
+    v0.9.3 复查优化：同时检查 card.item.content 和 card.item.description（不同动态类型字段不同）；
+    返回 (verified, actual_content)——actual_content 用于判断是否为 JSON 编码错误以决定是否自动删除。
+    B站 动态详情接口同步有延迟，card 为空时重试 2 次间隔 1 秒；内容不匹配时直接返回（不是延迟问题）。
     """
     for i in range(tries):
         try:
@@ -1993,7 +2001,7 @@ def _dynamic_verified(account: str, dynamic_id: str, text: str, tries: int = 2) 
                 account=account,
             )
         except BiliError:
-            return False
+            return False, None
         card_raw = ((data.get("data") or {}).get("card")) or ""
         if not card_raw:
             if i < tries - 1:
@@ -2002,15 +2010,15 @@ def _dynamic_verified(account: str, dynamic_id: str, text: str, tries: int = 2) 
         try:
             card = json.loads(card_raw) if isinstance(card_raw, str) else card_raw
         except (json.JSONDecodeError, TypeError):
-            return False
-        # type=4 文字动态：card.item.content 是动态文本
+            return False, str(card_raw)[:200]
+        # v0.9.3 复查优化：同时检查 content（文字动态）和 description（图片/视频动态）
         item = card.get("item") or {}
-        content = (item.get("content") or "").strip()
-        if content == text.strip():
-            return True
-        # 内容不匹配，不再重试（不是延迟问题，是编码错误）
-        return False
-    return False
+        actual = (item.get("content") or item.get("description") or "").strip()
+        if actual == text.strip():
+            return True, actual
+        # 内容不匹配，不再重试（不是延迟问题，是编码错误或字段差异）
+        return False, actual
+    return False, None
 
 
 def delete_dynamic(dynamic_id, account: str = "yui") -> dict:
