@@ -1703,6 +1703,9 @@ class BiliViewerPlugin(NekoPluginBase):
             "严禁主动询问'要不要发弹幕/要不要回复弹幕'。"
             "本工具已包含发送全流程：调用一次即完成，禁止再次调用本工具或 run/bili_danmaku 等任何发送入口"
             "重复发送同一弹幕（同目标同内容 60 秒内会被自动去重，只发一次）。"
+            "【DANMAKU_UNVERIFIED 处理·v0.9.11】若工具返回 DANMAKU_UNVERIFIED（接口接受但未返回 dmid，"
+            "可能被风控拦截）——不能声称已发出；可等 60 秒后重试一次（单条弹幕重试不会造成重复刷屏，安全）；"
+            "连续两次仍无 dmid 即停止，如实告知用户'弹幕被B站拦截了，发不出去'，严禁反复盲试刷屏。"
         ),
         parameters={
             "type": "object",
@@ -2658,6 +2661,37 @@ class BiliViewerPlugin(NekoPluginBase):
         # v0.9.3 复查优化：YUI 主动发私信后重置未读注入冷却，避免重复提醒
         self._unread_inject_ts = time.time()
         return {"output": "私信已发送。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": {"ok": True, "uid": uid, "allowed_because": result.get("allowed_because")}}
+
+    @llm_tool(
+        name="bili_fans_list",
+        description=(
+            "查看本账号的粉丝列表（关注了本账号的用户）：每个粉丝的 uid、昵称、是否互关（v0.9.11）。"
+            "何时用：用户要求'给粉丝发私信/问候粉丝/看看粉丝'等自主运营场景，先列粉丝再挑选对象发私信——"
+            "私信白名单已放行全部粉丝，用 bili_dm_send(uid=<粉丝uid>, text=内容) 即可发送。"
+            "参数 limit：最多返回条数（默认 20，最多 50）；account：yui（默认）/ main。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "最多返回粉丝条数，默认 20，最大 50"},
+                "account": {"type": "string", "description": "yui=YUI 小号（默认）/ main=主账号"},
+            },
+            "required": [],
+        },
+        timeout=20.0,
+    )
+    async def bili_fans_list(self, *, limit: int = 0, account: str = "", **_):
+        params = _.get("parameters") or {}
+        limit = int(limit or params.get("limit") or 20)
+        account = self._resolve_account(account or params.get("account") or "")
+        try:
+            data = bili_social.fans_list(account, limit)
+        except bili.BiliError as exc:
+            return _wrap_err(exc)
+        items = data.get("items") or []
+        lines = [f"  {i['name']}（uid {i['uid']}）{'互关' if i['mutual'] else '粉丝'}" for i in items]
+        out = f"{data['account']} 的粉丝共 {data['total']} 人，以下是最新 {len(items)} 人：\n" + "\n".join(lines)
+        return {"output": out, "is_error": False, "result": data}
 
     @llm_tool(
         name="bili_video_relation",

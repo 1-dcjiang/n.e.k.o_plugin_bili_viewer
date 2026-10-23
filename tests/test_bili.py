@@ -1519,3 +1519,31 @@ def test_may_message_survives_main_cookie_wrong(monkeypatch) -> None:
 
     monkeypatch.setattr(bili, "_http_get", fake_http_get)
     assert bili_social._may_message("yui", 2222) == "follower"
+
+
+def test_fans_list(monkeypatch) -> None:
+    """粉丝列表：返回 uid/昵称/互关标记（v0.9.11）。"""
+    from plugin.plugins.bili_viewer import bili, bili_social
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj; DedeUserID=3494363678116792")
+
+    def fake_http_get(url, params=None, account="yui", timeout=12.0):
+        if "x/relation/fans" in str(url):
+            return {
+                "code": 0,
+                "data": {
+                    "total": 2,
+                    "list": [
+                        {"mid": 1426057300, "uname": "直到她按下快门", "attribute": 6},
+                        {"mid": 555, "uname": "新粉丝", "attribute": 1},
+                    ],
+                },
+            }
+        return {"code": 0, "data": {}}
+
+    monkeypatch.setattr(bili, "_http_get", fake_http_get)
+    data = bili_social.fans_list("yui", 5)
+    items = data["items"]
+    assert items[0] == {"uid": 1426057300, "name": "直到她按下快门", "mutual": True, "relation": "mutual_follow"}
+    assert items[1]["uid"] == 555
+    assert data["total"] == 2

@@ -599,11 +599,39 @@ def _may_message(account: str, talker: int) -> str | None:
     return None
 
 
+def fans_list(account: str = "yui", limit: int = 20) -> dict[str, Any]:
+    """本账号的粉丝列表（关注了本账号的用户）：uid + 昵称 + 是否互关（v0.9.11）。
+
+    用途：自主运营时让 YUI 知道有哪些粉丝可以互动/发私信（私信白名单已放行全部粉丝），
+    用 `bili_dm_send(uid=<粉丝uid>)` 即可发送。
+    """
+    bili._require_login(account)
+    me = bili.cookie_uid(bili._cookie(account)) or 0
+    if not me:
+        raise bili.BiliError("无法读取账号 uid（登录态缺失）", "NO_UID")
+    data = (
+        bili._http_get(_API + "/x/relation/fans", {"vmid": me, "pn": 1, "ps": min(max(int(limit), 1), 50), "order": "desc"}, account=account).get("data") or {}
+    )
+    items = []
+    for f in (data.get("list") or [])[: int(limit)]:
+        attr = int(f.get("attribute") or 0)
+        items.append(
+            {
+                "uid": f.get("mid"),
+                "name": f.get("uname"),
+                "mutual": attr in (2, 6),  # 互关则对方也关注了本账号
+                "relation": "mutual_follow" if attr == 6 else ("follower" if attr & 2 else "follower"),
+            }
+        )
+    total = data.get("total") or len(items)
+    return {"account": account, "total": total, "items": items, "note": "这些都是关注了本账号的粉丝，可用 bili_dm_send 发私信"}
+
+
 def dm_send(account: str = "yui", uid: str = "", text: str = "", allow_new: bool = False) -> dict[str, Any]:
     """发私信 / 回复私信（白名单护栏 + 回读验证，dm.py send 精华）。
 
-    - 默认只能发给：主账号（主人）/ 对方先发过私信 / 互关好友；
-    - 主动私信陌生人需 allow_new=true（易被判骚扰，慎用）；
+    - 默认只能发给：主账号（主人）/ 关注本账号的粉丝（含互关）/ 对方先发过私信 / 互关好友（v0.9.10）；
+    - 主动私信陌生人（对方没关注你也没联系过）需 allow_new=true（易被判骚扰，慎用）；
     - 内容 ≤500 字；不能给自己发；被拒绝不自动重发；
     - 发送后回读最近会话验证已收到（DM_UNVERIFIED 算失败，严禁假成功）。
     """
