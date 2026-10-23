@@ -39,7 +39,7 @@ _dm_last_sends: dict[tuple[str, int, str], float] = {}
 
 # ══════════════ 护栏：本地限流 + 审计 ══════════════
 
-# action -> (最小间隔秒, 每小时上限)
+# action -> (最小间隔秒, 每小时上限)（对齐 bili-cli guard.py LIMITS）
 LIMITS: dict[str, tuple[int, int]] = {
     "comment": (10, 30),
     "danmaku": (10, 30),
@@ -47,6 +47,9 @@ LIMITS: dict[str, tuple[int, int]] = {
     "favorite": (5, 60),
     "coin": (10, 5),
     "dm": (10, 20),
+    # v0.9.25 对照 bili-cli：动态发布 60 秒/次（10/时）、删除 3 秒/次（60/时）
+    "dynamic": (60, 10),
+    "delete": (3, 60),
 }
 # action -> 24 小时上限（硬币是真实花费，投了收不回）
 DAILY_LIMITS: dict[str, int] = {"coin": 5}

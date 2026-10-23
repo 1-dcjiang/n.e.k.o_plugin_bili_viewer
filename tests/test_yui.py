@@ -427,10 +427,13 @@ def test_reply_comment_main_account_resolution(monkeypatch) -> None:
 
 
 def test_yui_dynamic_daily_cap(monkeypatch) -> None:
-    from plugin.plugins.bili_viewer import bili
+    from plugin.plugins.bili_viewer import bili, bili_social
 
     monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
     monkeypatch.setattr(bili, "post_dynamic", lambda text, account="yui": {"ok": True})
+    # v0.9.25 对照 bili-cli guard.py 新增 dynamic 60s 限流：本测试聚焦每日 6 条上限，绕开间隔限流
+    monkeypatch.setattr(bili_social, "check_limit", lambda *a, **k: None)
+    monkeypatch.setattr(bili_social, "record_limit", lambda *a, **k: None)
     inst = _make_inst(monkeypatch)
     ok_count = 0
     for i in range(7):
@@ -444,9 +447,11 @@ def test_yui_dynamic_daily_cap(monkeypatch) -> None:
 
 def test_yui_dynamic_failure_releases_daily_quota(monkeypatch) -> None:
     """v0.7.8 复查优化：动态发布失败回退天级占用，稍后可重试。"""
-    from plugin.plugins.bili_viewer import bili
+    from plugin.plugins.bili_viewer import bili, bili_social
 
     monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setattr(bili_social, "check_limit", lambda *a, **k: None)
+    monkeypatch.setattr(bili_social, "record_limit", lambda *a, **k: None)
     state = {"fail": True}
 
     def fake_dyn(text, account="yui"):

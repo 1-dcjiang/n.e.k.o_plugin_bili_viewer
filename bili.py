@@ -1863,7 +1863,9 @@ def send_video_danmaku(bvid: str, text: str, progress_ms: int = 0, account: str 
     except BiliError as exc:
         raise BiliError("视频弹幕发送失败：" + exc.message, "SEND_FAILED:" + exc.code) from exc
     dm = data.get("data") or {}
-    dmid = str(dm.get("dmid") or "")
+    # v0.9.25 对照 bili-cli danmaku.py：send_danmaku 返回的弹幕 ID 字段名是 dmid_str（大数以字符串返回）
+    # 或 dmid，两者都取；原只取 dmid 会导致接口返回 dmid_str 时误判"没拿到 ID"假失败。
+    dmid = str(dm.get("dmid_str") or dm.get("dmid") or "")
     if not dmid:
         raise BiliError(
             "弹幕接口已接受（code=0）但未返回弹幕 ID（dmid），可能被风控拦截——不能确认已发送，请勿声称已发出。",
@@ -1950,6 +1952,11 @@ def add_reply(oid: int, type_id: int, text: str, account: str = "yui", verify: b
         "csrf": csrf,
         "csrf_token": csrf,
         "jsonp": "jsonp",
+        # v0.9.25 对照 bilibili-api comment.send 定义：plat/statistics/gaia_source 是 B站 新版评论
+        # 接口的必带字段，缺失时新号评论更易被风控/折叠（bili-cli comment.py 同款 payload）。
+        "plat": 1,
+        "statistics": {"appId": 100, "platform": 5},
+        "gaia_source": "main_web",
     }
     try:
         _http_post(_API + "/x/v2/reply/add", form, account=account)
@@ -1960,18 +1967,36 @@ def add_reply(oid: int, type_id: int, text: str, account: str = "yui", verify: b
             uid = str((my_info(account) or {}).get("mid") or "")
         except BiliError:
             uid = ""
-        if uid and not _reply_visible(int(oid), int(type_id), uid, text, account=account):
-            raise BiliError(
-                "评论接口已接受（code=0），但未在评论区回读到这条评论——可能被风控/审核拦截、"
-                "目标无效或入池延迟。不能确认已发送，请勿向用户声称'已发送'；可稍后自行到评论区核实。",
-                "REPLY_UNVERIFIED",
-            )
-    return {"ok": True, "oid": int(oid), "type": int(type_id), "text": text}
+        if uid:
+            visible, folded, hidden = _reply_visible(int(oid), int(type_id), uid, text, account=account)
+            if not visible:
+                raise BiliError(
+                    "评论接口已接受（code=0），但未在评论区回读到这条评论——可能被风控/审核拦截、"
+                    "目标无效或入池延迟。不能确认已发送，请勿向用户声称'已发送'；可稍后自行到评论区核实。",
+                    "REPLY_UNVERIFIED",
+                )
+            if folded or hidden:
+                # v0.9.25 对照 bili-cli comment check：评论发送成功但被折叠/审核（别人通常看不到，
+                # @ 也可能不发提醒）——如实上报，让 YUI 告知用户"已发出但可能不可见"，严禁自称正常发出
+                return {
+                    "ok": True,
+                    "oid": int(oid),
+                    "type": int(type_id),
+                    "text": text,
+                    "folded": True,
+                    "note": "评论已发出，但回读检测到该评论被折叠/隐藏（新号或敏感内容常被折叠，"
+                    "别人可能看不到，@ 也可能不会发提醒）。如实告知用户，严禁声称评论正常可见。",
+                }
+    return {"ok": True, "oid": int(oid), "type": int(type_id), "text": text, "folded": False}
 
 
-def _reply_visible(oid: int, type_id: int, uid: str, text: str, tries: int = 2, account: str = "main") -> bool:
+def _reply_visible(oid: int, type_id: int, uid: str, text: str, tries: int = 2, account: str = "main") -> tuple[bool, bool, bool]:
     """回读评论区（最新一页）确认 uid 的评论真实可见（v0.7.50）。
 
+    返回 (visible, folded, hidden)：visible=是否命中；命中后按 B站 附加的
+    folder.is_folded / invisible / state 字段判断是否被折叠/隐藏（v0.9.25，
+    对照 bili-cli comment check——折叠的评论在发布者视角仍"正常显示"，
+    必须读这些状态字段才能识别"发出去了但别人看不到"）。
     评论入池有秒级时滞，未命中时短等重试一次；内容用包含匹配容忍格式差异。
     v0.9.6 复查：加 account 参数，回读用发评论的账号 cookie（原默认 main，main 失效会假失败）。
     """
@@ -1992,10 +2017,13 @@ def _reply_visible(oid: int, type_id: int, uid: str, text: str, tries: int = 2, 
             if str(member.get("mid")) == str(uid) and message and (
                 text in message or message in text
             ):
-                return True
+                folder = reply.get("folder") or {}
+                folded = bool(folder.get("is_folded"))
+                hidden = bool(reply.get("invisible")) or reply.get("state") not in (0, None)
+                return True, folded, hidden
         if attempt < max(1, tries) - 1:
             time.sleep(1.5)
-    return False
+    return False, False, False
 
 
 def post_dynamic(text: str, account: str = "yui") -> dict:

@@ -1298,20 +1298,48 @@ def test_reply_visible_hit(monkeypatch) -> None:
                         "member": {"mid": 3494363678116792, "uname": "yui"},
                         "content": {"message": "天梯T0卡组，美澳跳很强"},
                         "rpid": 1,
+                        "folder": {"is_folded": False},
+                        "invisible": False,
+                        "state": 0,
                     }
                 ]
             },
         }
 
     monkeypatch.setattr(bili, "_wbi_get", fake_wbi_get)
-    assert bili._reply_visible(123, 1, "3494363678116792", "美澳跳很强") is True
+    assert bili._reply_visible(123, 1, "3494363678116792", "美澳跳很强") == (True, False, False)
 
 
 def test_reply_visible_miss(monkeypatch) -> None:
     from plugin.plugins.bili_viewer import bili
 
     monkeypatch.setattr(bili, "_wbi_get", lambda url, params, timeout=12.0, account="main": {"code": 0, "data": {"replies": []}})
-    assert bili._reply_visible(123, 1, "3494363678116792", "不存在的内容") is False
+    assert bili._reply_visible(123, 1, "3494363678116792", "不存在的内容") == (False, False, False)
+
+
+def test_reply_visible_folded_detected(monkeypatch) -> None:
+    """v0.9.25 对照 bili-cli comment check：命中但 folder.is_folded=True → 识别为折叠。"""
+    from plugin.plugins.bili_viewer import bili
+
+    def fake_wbi_get(url, params, timeout=12.0, account="main"):
+        return {
+            "code": 0,
+            "data": {
+                "replies": [
+                    {
+                        "member": {"mid": 3494363678116792, "uname": "yui"},
+                        "content": {"message": "新号评论易折叠"},
+                        "rpid": 2,
+                        "folder": {"is_folded": True},
+                        "invisible": False,
+                        "state": 0,
+                    }
+                ]
+            },
+        }
+
+    monkeypatch.setattr(bili, "_wbi_get", fake_wbi_get)
+    assert bili._reply_visible(123, 1, "3494363678116792", "新号评论易折叠") == (True, True, False)
 
 
 def test_add_reply_unverified_when_not_visible(monkeypatch) -> None:
@@ -1322,12 +1350,27 @@ def test_add_reply_unverified_when_not_visible(monkeypatch) -> None:
     monkeypatch.setattr(bili, "_csrf", lambda account: "tok")
     monkeypatch.setattr(bili, "_http_post", lambda url, form, timeout=12.0, account="main", query=None: {"code": 0})
     monkeypatch.setattr(bili, "my_info", lambda account: {"mid": 3494363678116792})
-    monkeypatch.setattr(bili, "_reply_visible", lambda oid, type_id, uid, text, tries=2, account="main": False)
+    monkeypatch.setattr(bili, "_reply_visible", lambda oid, type_id, uid, text, tries=2, account="main": (False, False, False))
     try:
         bili.add_reply(999999999999, 1, "测试评论")
         raise AssertionError("应当抛 REPLAY_UNVERIFIED")
     except bili.BiliError as exc:
         assert exc.code == "REPLY_UNVERIFIED"
+
+
+def test_add_reply_folded_reported_not_failure(monkeypatch) -> None:
+    """v0.9.25：评论已发出但回读检测到被折叠 → 返回 ok=True + folded=True 警告，不抛错不假成功。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setattr(bili, "_csrf", lambda account: "tok")
+    monkeypatch.setattr(bili, "_http_post", lambda url, form, timeout=12.0, account="main", query=None: {"code": 0})
+    monkeypatch.setattr(bili, "my_info", lambda account: {"mid": 3494363678116792})
+    monkeypatch.setattr(bili, "_reply_visible", lambda oid, type_id, uid, text, tries=2, account="main": (True, True, False))
+    r = bili.add_reply(123, 1, "折叠测试评论")
+    assert r["ok"] is True
+    assert r["folded"] is True
+    assert "折叠" in r["note"]
 
 
 def test_add_reply_verify_false_skips_check(monkeypatch) -> None:
