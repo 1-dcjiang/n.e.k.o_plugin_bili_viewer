@@ -111,6 +111,21 @@ def get_recent_danmaku(limit: int = 40) -> list:
     return [(s, t, a) for s, t, a, _r in list(_DANMAKU_BUF)[-limit:]]
 
 
+def get_recent_room(max_age: float = _EXT_ONLINE_WINDOW) -> str:
+    """弹幕 WS 流最近的房间号（v0.8.6：页面真实直播房间的权威来源）。
+
+    WS 弹幕连接绑定页面实际直播间，每来一条弹幕就刷新一条带 room 的记录——
+    比"扩展标签页事件"可靠（后者只在切换/加载标签时推送一次，长时间停留会过期，
+    感知回退窗口标题搜索就可能定位错房间）。返回 '' 表示没有新鲜弹幕房间。
+    """
+    now = time.time()
+    for _s, _t, at, room in reversed(_DANMAKU_BUF):
+        r = str(room or "").strip()
+        if r and now - float(at or 0) <= max_age:
+            return r
+    return ""
+
+
 def get_recent_viewers(room: str = "", limit: int = 50) -> list[str]:
     """最近弹幕发言者昵称去重（v0.8.6：直播间活跃观众近似来源）。
 

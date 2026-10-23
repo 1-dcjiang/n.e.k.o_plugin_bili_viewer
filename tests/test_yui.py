@@ -727,6 +727,68 @@ def test_mention_notify_room_roundtrip(monkeypatch) -> None:
 # ══════════ 直播间活跃观众（v0.8.6）：弹幕发言者 → 可关注对象 ══════════
 
 
+def test_get_recent_room_prefers_fresh_ws_room(monkeypatch) -> None:
+    """弹幕 WS 房间提取：取最新带 room 的记录、过滤空、超龄返回空（v0.8.6 定位权威源）。"""
+    import time
+
+    import web_ui
+
+    old = web_ui._DANMAKU_BUF
+    try:
+        web_ui._DANMAKU_BUF.clear()
+        now = time.time()
+        web_ui._DANMAKU_BUF.extend([
+            ("旧人", "x", now - 300, "111"),       # 超龄 → 忽略
+            ("系统提示", "公告", now - 5, ""),      # 无房间号 → 忽略
+            ("新人", "y", now - 1, "22996016"),     # 最新有效
+        ])
+        assert web_ui.get_recent_room(max_age=120) == "22996016"
+        assert web_ui.get_recent_room(max_age=0.5) == ""  # 全部超龄 → 空
+    finally:
+        web_ui._DANMAKU_BUF = old
+
+
+def test_ext_tab_danmaku_room_fallback(monkeypatch) -> None:
+    """_ext_tab 定位纠偏：标签页过期时用弹幕 WS 房间兜底；冲突时以弹幕房间为准（v0.8.6）。"""
+    import time
+
+    from plugin.plugins.bili_viewer import BiliViewerPlugin, web_ui
+
+    fake_ctx = _FakeCtx()
+    inst = BiliViewerPlugin(ctx=fake_ctx)
+    old = web_ui._DANMAKU_BUF
+    try:
+        web_ui._DANMAKU_BUF.clear()
+        now = time.time()
+        # 1) 标签页过期 + 弹幕房间新鲜 → 弹幕房间兜底
+        inst._ext_tab_data = {"url": "https://www.bilibili.com/", "title": "首页", "source": "chrome", "at": now - 300}
+        web_ui._DANMAKU_BUF.append(("A", "hi", now - 1, "22996016"))
+        tab = inst._ext_tab()
+        assert tab is not None and tab["source"] == "danmaku-ws"
+        assert "22996016" in tab["url"]
+        # 2) 标签页新鲜但解析出的直播房间与弹幕 WS 不一致 → 以弹幕房间为准
+        inst._ext_tab_data = {"url": "https://live.bilibili.com/888", "title": "别的直播", "source": "chrome", "at": now}
+        tab2 = inst._ext_tab()
+        assert "22996016" in tab2["url"]
+        # 3) 标签页新鲜且与弹幕房间一致 → 保持标签页
+        inst._ext_tab_data = {"url": "https://live.bilibili.com/22996016", "title": "直播", "source": "chrome", "at": now}
+        tab3 = inst._ext_tab()
+        assert tab3["source"] == "chrome"
+        # 4) 无弹幕房间且标签页过期 → None
+        web_ui._DANMAKU_BUF.clear()
+        inst._ext_tab_data = {"url": "https://www.bilibili.com/", "title": "首页", "source": "chrome", "at": now - 300}
+        assert inst._ext_tab() is None
+        # 5) 标签页新鲜为视频页（弹幕房间来自刚关掉的直播）→ 尊重标签页，不覆盖
+        inst._ext_tab_data = {"url": "https://www.bilibili.com/video/BV1xx411c7mD", "title": "视频", "source": "chrome", "at": now}
+        web_ui._DANMAKU_BUF.append(("B", "hi", now - 1, "22996016"))
+        tab5 = inst._ext_tab()
+        assert tab5["source"] == "chrome" and "BV1xx411c7mD" in tab5["url"]
+    finally:
+        web_ui._DANMAKU_BUF = old
+        inst._ext_tab_data = None
+
+
+
 def test_get_recent_viewers_filters_and_dedups(monkeypatch) -> None:
     """viewers 提取：按房间过滤、去重、排除系统消息与空昵称。"""
     import web_ui

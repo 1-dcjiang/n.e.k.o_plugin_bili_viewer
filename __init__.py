@@ -3166,6 +3166,9 @@ class BiliViewerPlugin(NekoPluginBase):
             "source": str(source or "").strip(),
             "at": ts,
         }
+        # v0.8.6：tab 接收写本地日志（仅 URL/标题，无 cookie），供"直播间定位错误"排查
+        _logger.info("ext tab received: url=%s title=%s at=%s source=%s",
+                     str(url or "")[:120], str(title or "")[:60], int(ts), str(source or ""))
         return {"ok": True, "detail": "已记录当前活动标签页"}
 
     def _receive_ext_dom(self, body: dict) -> dict:
@@ -3574,16 +3577,35 @@ class BiliViewerPlugin(NekoPluginBase):
         return asr
 
     def _ext_tab(self) -> dict | None:
-        """返回新鲜（120s 内）的扩展标签页数据；无或过期返回 None。
+        """返回当前"页面定位"：扩展标签页（120s 新鲜）优先，弹幕 WS 房间兜底/纠偏。
 
-        v0.7.21：tab 推送带 source 后，优先返回与最近一次 cookie 来源（绑定浏览器）
-        一致的标签页（避免 Chrome/Edge 多扩展并存时互相覆盖）；cookie 来源未知时
-        返回最新 tab。
+        v0.8.6 定位纠偏（修复"直播间定位错误"）：弹幕 WS 流绑定的房间号=页面真实
+        直播间（弹幕一来就刷新，一直新鲜），而标签页事件只在切换/加载时推送一次——
+        长时间停留会过期，过期后感知回退窗口标题搜索（标题无房间号，按主播名搜索
+        可能定位到该主播的旧房间/同名主播）。规则：
+          1) 弹幕房间新鲜（≤120s）且标签页过期 → 用弹幕房间（构造 tab）；
+          2) 标签页新鲜且解析为直播房间、弹幕房间新鲜且不一致 → 以弹幕房间为准
+             （标签页事件可能陈旧）；
+          3) 其余情况维持原逻辑（source 过滤 + 新鲜窗口）。
         """
+        now = time.time()
         tab = getattr(self, "_ext_tab_data", None)
-        if not isinstance(tab, dict):
-            return None
-        if time.time() - float(tab.get("at") or 0) > web_ui._EXT_ONLINE_WINDOW:
+        tab_fresh = isinstance(tab, dict) and (now - float(tab.get("at") or 0) <= web_ui._EXT_ONLINE_WINDOW)
+        dm_room = web_ui.get_recent_room(max_age=web_ui._EXT_ONLINE_WINDOW)
+        if dm_room:
+            if not tab_fresh:
+                return {"url": f"https://live.bilibili.com/{dm_room}", "title": "直播", "source": "danmaku-ws", "at": now}
+            tab_room = ""
+            try:
+                _p = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
+                if isinstance(_p, dict) and _p.get("kind") == "live":
+                    tab_room = str(_p.get("room_id") or "")
+            except Exception:
+                tab_room = ""
+            if tab_room and tab_room != dm_room:
+                _logger.info("ext tab room %s overridden by danmaku ws room %s (tab event stale)", tab_room, dm_room)
+                return {"url": f"https://live.bilibili.com/{dm_room}", "title": "直播", "source": "danmaku-ws", "at": now}
+        if not tab_fresh:
             return None
         src = getattr(self, "_ext_source", "") or ""
         tab_src = str(tab.get("source") or "")
