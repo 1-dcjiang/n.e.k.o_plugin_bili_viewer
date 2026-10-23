@@ -31,6 +31,12 @@ _RATELIMIT_FILE = "ratelimit.json"       # 限流状态
 _AUDIT_FILE = "audit.log"                # 审计日志（JSONL）
 _DM_SEEN_FILE = "dm_seen.json"           # 私信已读游标：{account: {talker_id: 已读最大 msg_seqno}}
 
+# 私信发送短窗去重（v0.9.22 全盘复盘）：同账号同对象同内容 _DM_DUP_WINDOW 秒内重复调用直接拒绝。
+# 防"回复了但对方收到多条相同私信"（用户实证：DM_UNVERIFIED 后误重试导致重复发送）；
+# 接口接受即记录（无论回读结果），重试一律被挡，与 DM_UNVERIFIED"严禁重复发送"铁律一致。
+_DM_DUP_WINDOW = 60.0
+_dm_last_sends: dict[tuple[str, int, str], float] = {}
+
 # ══════════════ 护栏：本地限流 + 审计 ══════════════
 
 # action -> (最小间隔秒, 每小时上限)
@@ -653,6 +659,16 @@ def dm_send(account: str = "yui", uid: str = "", text: str = "", allow_new: bool
         )
     params = {"uid": talker, "text_len": len(text), "allowed_because": reason or "allow_new"}
     check_limit("dm", account=account)
+    # v0.9.22 复盘：同内容短窗去重——接口接受即算已发送，重试一律被挡
+    _dup_key = (account, int(talker), text)
+    _now_ts = time.time()
+    _last_ts = _dm_last_sends.get(_dup_key)
+    if _last_ts and _now_ts - _last_ts < _DM_DUP_WINDOW:
+        raise bili.BiliError(
+            f"同一内容 {int(_DM_DUP_WINDOW)} 秒内已给该对象发送过（疑似重复触发），严禁重复发送；"
+            "如需再次发送请换新内容或稍后重试。",
+            "DM_DUP",
+        )
     payload = {
         "msg[sender_uid]": me,
         "msg[receiver_id]": talker,
@@ -677,6 +693,8 @@ def dm_send(account: str = "yui", uid: str = "", text: str = "", allow_new: bool
         )
     except bili.BiliError as exc:
         raise _guard_exc(exc) from exc
+    # 接口接受=已发送，立即记录（无论后续回读结果，60s 内重试都被挡）
+    _dm_last_sends[_dup_key] = time.time()
     # 回读验证：最近一条应为我们的内容（真实发送铁律）
     if not _dm_verified(account, talker, text):
         raise bili.BiliError(

@@ -44,6 +44,12 @@ _MIXIN_TABLE = [
 _BVID_RE = re.compile(r"(BV[0-9A-Za-z]{10})")
 _ROOM_RE = re.compile(r"live\.bilibili\.com/(\d+)")
 
+# 动态发布短窗去重（v0.9.22 全盘复盘）：同账号同内容 _DYN_DUP_WINDOW 秒内重复调用直接拒绝。
+# 防"发一次变3条"（用户实证 v0.9.5：YUI 因回读延迟/误判重试导致重复动态）；
+# 接口接受即记录（无论回读结果），重试一律被挡，杜绝连续盲发。
+_DYN_DUP_WINDOW = 60.0
+_dyn_last_posts: dict[tuple[str, str], float] = {}
+
 
 class BiliError(Exception):
     """B站接口错误：message 为用户可读描述，code 为 B站/本地错误码。"""
@@ -2006,6 +2012,16 @@ def post_dynamic(text: str, account: str = "yui") -> dict:
         raise BiliError("动态内容为空", "EMPTY_MSG")
     if len(text) > 2000:
         raise BiliError("动态最长 2000 个字符", "MSG_TOO_LONG")
+    # v0.9.22 复盘：同内容短窗去重——接口接受即算已发布，重试一律被挡
+    _dup_key = (account, text)
+    _now_ts = time.time()
+    _last_ts = _dyn_last_posts.get(_dup_key)
+    if _last_ts and _now_ts - _last_ts < _DYN_DUP_WINDOW:
+        raise BiliError(
+            f"同一内容 {int(_DYN_DUP_WINDOW)} 秒内已发布过（疑似重复触发），严禁重复发布；"
+            "如需再次发布请换新内容或稍后重试。",
+            "DYN_DUP",
+        )
     csrf = _csrf(account)
     if not csrf:
         raise BiliError("Cookie 缺少 bili_jct（CSRF token），无法发布动态", "NO_CSRF")
@@ -2024,6 +2040,8 @@ def post_dynamic(text: str, account: str = "yui") -> dict:
         )
     except BiliError as exc:
         raise BiliError("动态发布失败：" + exc.message, "DYN_FAILED:" + exc.code) from exc
+    # 接口接受=已发布过，立即记录（无论后续回读结果，60s 内重试都被挡）
+    _dyn_last_posts[_dup_key] = time.time()
     data = resp.get("data") or {}
     dyn_id = str(data.get("dynamic_id_str") or data.get("dynamic_id") or "")
     # v0.9.3 回读验证：发布后调动态详情接口确认内容正确（防假成功）

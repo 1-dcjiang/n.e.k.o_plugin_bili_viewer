@@ -1673,3 +1673,83 @@ def test_danmaku_loop_tick_stop_on_fail(monkeypatch) -> None:
     assert st["active"] is False
     assert st["stopped_reason"] == "连续 3 次发送失败"
     assert st["sent"] == 0
+
+
+def test_post_dynamic_short_window_dedup(monkeypatch) -> None:
+    """同账号同内容 60s 内重复发布 → DYN_DUP 拒绝（v0.9.22 防'发一次变3条'）。"""
+    import json as _json
+
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj; DedeUserID=3494363678116792")
+    monkeypatch.setattr(bili, "_csrf", lambda account: "tok")
+    bili._dyn_last_posts.clear()
+    sent_text: dict[str, str] = {"text": "去重测试"}
+
+    def fake_post_json(url, body, csrf, account="yui", timeout=12.0, query=None):
+        return {"code": 0, "data": {"dynamic_id": 333, "dynamic_id_str": "333"}}
+
+    def fake_http_get(url, params=None, account="yui", timeout=12.0):
+        if "get_dynamic_detail" in str(url):
+            return {"code": 0, "data": {"card": _json.dumps({"item": {"content": sent_text["text"]}})}}
+        if "nav" in str(url):
+            return {"code": 0, "data": {"mid": 3494363678116792}}
+        if "feed/space" in str(url):
+            return {"code": 0, "data": {"items": [{"id_str": "333", "visible": True}]}}
+        return {"code": 0, "data": {}}
+
+    monkeypatch.setattr(bili, "_http_post_json", fake_post_json)
+    monkeypatch.setattr(bili, "_http_get", fake_http_get)
+    r = bili.post_dynamic("去重测试", account="yui")
+    assert r["ok"] is True
+    # 接口接受后立即记录：60s 内同内容重复 → DYN_DUP
+    try:
+        bili.post_dynamic("去重测试", account="yui")
+        raise AssertionError("应当抛 DYN_DUP")
+    except bili.BiliError as exc:
+        assert exc.code == "DYN_DUP"
+    # 不同内容不受影响
+    bili._dyn_last_posts.clear()
+    sent_text["text"] = "另一条内容"
+    assert bili.post_dynamic("另一条内容", account="yui")["ok"] is True
+
+
+def test_dm_send_short_window_dedup(monkeypatch) -> None:
+    """同对象同内容 60s 内重复发送 → DM_DUP 拒绝（v0.9.22 防私信重复）。"""
+    from plugin.plugins.bili_viewer import bili, bili_social
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj; DedeUserID=3494363678116792")
+    monkeypatch.setenv("BILI_COOKIE", "SESSDATA=m; bili_jct=mj; DedeUserID=1426057300")
+    bili_social._dm_last_sends.clear()
+
+    def fake_cookie(account="yui"):
+        return {"yui": "SESSDATA=y; bili_jct=yj; DedeUserID=3494363678116792", "main": "SESSDATA=m; bili_jct=mj; DedeUserID=1426057300"}[account]
+
+    monkeypatch.setattr(bili, "_cookie", fake_cookie)
+    monkeypatch.setattr(bili, "_require_login", lambda account: None)
+    monkeypatch.setattr(bili, "_csrf", lambda account: "tok")
+    monkeypatch.setattr(bili_social, "_resolve_dm_uid", lambda uid, account: int(uid))
+    monkeypatch.setattr(bili_social, "_may_message", lambda account, talker: "follower")
+    monkeypatch.setattr(bili_social, "check_limit", lambda action, units=1, account="yui": None)
+    monkeypatch.setattr(bili_social, "record_limit", lambda *a, **k: None)
+    monkeypatch.setattr(bili_social, "_device_id", lambda: "devtest")
+
+    def fake_post(url, payload, account="yui", query=None, timeout=12.0):
+        return {"code": 0, "data": {}}
+
+    monkeypatch.setattr(bili, "_http_post", fake_post)
+    monkeypatch.setattr(bili_social, "_dm_verified", lambda account, talker, text: True)
+    r = bili_social.dm_send("yui", uid="2222", text="你好喵", allow_new=True)
+    assert r["sent"] is True
+    # 接口接受后立即记录：60s 内同内容 → DM_DUP
+    try:
+        bili_social.dm_send("yui", uid="2222", text="你好喵", allow_new=True)
+        raise AssertionError("应当抛 DM_DUP")
+    except bili.BiliError as exc:
+        assert exc.code == "DM_DUP"
+    # 同一对象不同内容可发
+    bili_social._dm_last_sends.clear()
+    assert bili_social.dm_send("yui", uid="2222", text="换一句话", allow_new=True)["sent"] is True
+    # 不同对象同内容可发
+    bili_social._dm_last_sends.clear()
+    assert bili_social.dm_send("yui", uid="3333", text="你好喵", allow_new=True)["sent"] is True
