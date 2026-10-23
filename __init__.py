@@ -324,12 +324,13 @@ class BiliViewerPlugin(NekoPluginBase):
                 pass
             # v0.2.17 + v0.8.5：直播弹幕 @小号——静默注入感知；带房间号时可自主回弹幕
             # （同一直播间冷却 _MENTION_REPLY_COOLDOWN 内不重复唤醒，防刷屏）
+            # v0.8.6：统一用包内 web_ui（顶层 `import web_ui` 会加载出第二个模块实例，
+            # 与扩展 POST 写入的缓冲分裂——这就是此前弹幕/观众读不到的隐藏根因）
             try:
-                import web_ui as _web3
-                mention = _web3.get_mention_notify(clear=False)
+                mention = web_ui.get_mention_notify(clear=False)
                 if mention.get("text"):
                     self._handle_mention(mention)
-                    _web3.get_mention_notify(clear=True)
+                    web_ui.get_mention_notify(clear=True)
             except Exception:
                 pass
             fingerprint = _window_fingerprint(parsed)
@@ -614,7 +615,9 @@ class BiliViewerPlugin(NekoPluginBase):
             "1）发一条贴合内容的弹幕（bili_live_send_danmaku / bili_video_send_danmaku，account=yui）；"
             "2）给这个内容写一条评论（bili_reply_comment，account=yui）；"
             "3）发一条动态（bili_yui_dynamic）；"
-            "4）若插件目录 yui_uploads 有新视频文件可投稿（bili_yui_upload）。"
+            "4）若插件目录 yui_uploads 有新视频文件可投稿（bili_yui_upload）；"
+            "5）想和直播间观众互动时，可先用 bili_live_viewers 看活跃观众，"
+            "再用 bili_follow_user 关注（uid 必须来自工具返回，严禁猜 uid 或按昵称盲搜关注）。"
             f"{refs[:300]}"
             "内容纪律：内容自然、基于内容本身；不刷屏、不攻击、不复制已有弹幕/评论；"
             "所有写操作必须 account=yui（独立小号），严禁使用用户主账号；"
@@ -1089,18 +1092,17 @@ class BiliViewerPlugin(NekoPluginBase):
         if not room:
             return {"output": "请提供直播房间号或直播间链接。", "is_error": True, "error": "NO_ROOM"}
         # v0.2.17：优先读浏览器扩展采集的实时弹幕（含@检测），扩展离线时回退匿名采集
+        # v0.8.6：统一包内 web_ui（顶层 import 会加载第二份模块实例，读不到扩展写入的缓冲）
         ext_items = []
         try:
-            import web_ui as _web
-            ext_items = _web.get_recent_danmaku(limit=40)
+            ext_items = web_ui.get_recent_danmaku(limit=40)
         except Exception:
             ext_items = []
         if ext_items:
             lines = [f"{i}. {s or '观众'}：{t}" for i, (s, t, _a) in enumerate(ext_items, 1)]
             note = ""
             try:
-                import web_ui as _web2
-                mention = _web2.get_mention_notify(clear=True)
+                mention = web_ui.get_mention_notify(clear=True)
                 if mention.get("text"):
                     note = f"\n（有人@了小号：{mention['sender']}说『{mention['text']}』——应当主动回应对方）"
             except Exception:
@@ -1112,6 +1114,67 @@ class BiliViewerPlugin(NekoPluginBase):
             return _wrap_err(exc)
         lines = [f"{i}. {d['user']}：{d['text']}" for i, d in enumerate(items, 1)]
         return {"output": f"直播间实时弹幕（采集 {duration} 秒，{len(items)} 条）：\n" + "\n".join(lines), "is_error": False, "danmakus": items}
+
+    # ══════════ 直播间活跃观众（v0.8.6） ══════════
+
+    @llm_tool(
+        name="bili_live_viewers",
+        description=(
+            "查看直播间当前活跃观众（最近弹幕发言者，按房间过滤，尽力解析 uid）。"
+            "何时用：用户问'直播间有哪些人/帮我关注直播间的观众'、或想和直播间观众互动时。"
+            "注意：B站 无公开 HTTP 接口返回精确在线人数（页面数字来自实时流，且与人气值口径不同），"
+            "这里返回的是最近在该房间发言过的真实观众——这是最可靠、可关注的对象。"
+            "纪律：解析不出 uid 的观众（同名/已注销）一律不关注，严禁猜 uid 或按昵称盲搜关注（防关注错人）；"
+            "关注请用 bili_follow_user（传返回的 uid）。"
+            "参数 room：直播间房间号或链接（必填）；limit：最多返回人数（默认 10，上限 20）；"
+            "account：yui（默认）/ main。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "room": {"type": "string", "description": "直播间房间号或链接（必填）"},
+                "limit": {"type": "integer", "description": "最多返回人数（默认 10）"},
+                "account": {"type": "string", "description": "yui=YUI 小号（默认）/ main=主账号"},
+            },
+            "required": ["room"],
+        },
+        timeout=30.0,
+    )
+    async def bili_live_viewers(self, *, room: str = "", limit: int = 10, account: str = "", **_):
+        params = _.get("parameters") or {}
+        room = (room or params.get("room") or "").strip()
+        try:
+            limit = int(limit or params.get("limit") or 10)
+        except (TypeError, ValueError):
+            limit = 10
+        limit = max(1, min(limit, 20))
+        account = self._resolve_account(account or params.get("account") or "")
+        if not room:
+            return {"output": "请提供直播房间号或直播间链接。", "is_error": True, "error": "NO_ROOM"}
+        try:
+            names = web_ui.get_recent_viewers(room, limit=50)
+        except Exception:
+            names = []
+        if not names:
+            return {"output": "最近没有采集到该房间的弹幕发言者（可能浏览器弹幕采集未开启、或暂时没人发言）。可稍后再查，或先用 bili_live_danmaku 看弹幕。", "is_error": False, "result": {"viewers": []}}
+        viewers = []
+        unresolved: list[str] = []
+        for name in names[:limit]:
+            try:
+                uid = bili._resolve_uid(name, account)
+                viewers.append({"uid": uid, "name": name})
+            except bili.BiliError:
+                unresolved.append(name)
+        lines = [f"{i + 1}. {v['name']}（uid={v['uid']}）" for i, v in enumerate(viewers)]
+        if unresolved:
+            lines.append("（未能解析 uid：" + "、".join(unresolved) + "——不要猜 uid 关注，避免关注错人）")
+        if not viewers:
+            return {"output": "采集到发言者但都未能解析出 uid（可能同名或已注销），为避免关注错人请核对后重试。", "is_error": False, "result": {"viewers": [], "unresolved": unresolved}}
+        return {
+            "output": f"直播间活跃观众（最近发言 {len(viewers)} 人）：\n" + "\n".join(lines) + "\n需要关注时用 bili_follow_user（传 uid，account=yui）。",
+            "is_error": False,
+            "result": {"viewers": viewers, "unresolved": unresolved},
+        }
 
     # ══════════ UP主 ══════════
 

@@ -775,6 +775,19 @@ def _resolve_room(room: str) -> dict:
     return {"room_id": room_id, "live_status": data.get("live_status", 0)}
 
 
+def _room_online_fallback(room_id: int) -> int:
+    """直播中但旧接口 online=0 时，用 getInfoByRoom 的人气值兜底（v0.8.6）。
+
+    B站 页面显示的"在线观众"来自 WS 实时流（无公开 HTTP 接口），接口 online
+    是人气值口径——数值会与页面小数字不一致，语义按"人气"对待。
+    """
+    try:
+        data = (_wbi_get(_LIVE_API + "/xlive/web-room/v1/index/getInfoByRoom", {"room_id": room_id})).get("data") or {}
+        return int((data.get("room_info") or {}).get("online") or 0)
+    except BiliError:
+        return 0
+
+
 def live_info(room: str) -> dict:
     """直播间信息：主播/标题/分区/在线/状态/封面/简介。
 
@@ -820,6 +833,9 @@ def live_info(room: str) -> dict:
             uname = udata.get("name") or ""
         except BiliError:
             uname = ""
+    online = data.get("online", 0)
+    if not online and live_status == 1:
+        online = _room_online_fallback(room_id)  # v0.8.6：直播中在线=0 属接口异常，兜底人气值
     return {
         "room_id": data.get("room_id") or room_id,
         "short_id": data.get("short_id"),
@@ -829,7 +845,7 @@ def live_info(room: str) -> dict:
         "cover": data.get("cover", ""),
         "live_status": live_status,
         "status_text": status_text,
-        "online": data.get("online", 0),
+        "online": online,
         "area": data.get("area_name", ""),
         "parent_area": data.get("parent_area_name", ""),
         "description": (data.get("description") or "").strip(),
@@ -840,7 +856,7 @@ def format_live_info(info: dict) -> str:
     lines = [
         f"直播间：{info['title']}",
         f"主播：{info['uname']}（uid {info['uid']}）",
-        f"状态：{info['status_text']} ｜ 在线：{info['online']} 人",
+        f"状态：{info['status_text']} ｜ 人气：{info['online']}",
         f"分区：{info['parent_area']} / {info['area']}",
         f"房间号：{info['room_id']}（短号 {info['short_id'] or '无'}）",
     ]
@@ -1108,7 +1124,7 @@ def render_see(see: dict) -> str:
         lines = [
             f"直播间实况：{see.get('title') or '（无标题）'}",
             f"房间号：{see.get('room_id') or '未知'}",
-            f"主播：{see.get('uname') or '未知'}｜状态：{see.get('status') or '未知'}｜在线：{see.get('online') or 0}人",
+            f"主播：{see.get('uname') or '未知'}｜状态：{see.get('status') or '未知'}｜人气：{see.get('online') or 0}",
             f"分区：{see.get('parent_area') or ''}{see.get('area') or ''}",
             "最近弹幕：",
         ]
@@ -2480,7 +2496,7 @@ def format_now_watching(info: dict) -> str:
             li = info["live"]
             lines = [
                 head + f"「{li['title'] or info.get('subject') or '未知直播间'}」",
-                f"主播：{li.get('uname') or '未知'} ｜ 状态：{li.get('status_text')} ｜ 在线：{li.get('online')} 人",
+                f"主播：{li.get('uname') or '未知'} ｜ 状态：{li.get('status_text')} ｜ 人气：{li.get('online')}",
                 f"分区：{li.get('parent_area') or ''} / {li.get('area') or ''} ｜ 房间号 {li.get('room_id')}",
             ]
             return "\n".join(lines)

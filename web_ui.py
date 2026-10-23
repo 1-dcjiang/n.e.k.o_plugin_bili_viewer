@@ -32,7 +32,8 @@ _EXT_AUDIO_MAX_BYTES = 8 * 1024 * 1024  # 扩展声音分段（wav base64）上�
 _EXT_DOM_MAX_BYTES = 2 * 1024 * 1024
 
 # v0.2.17：扩展采集的直播弹幕缓冲 + @小号通知（YUI 实时看到弹幕、被@时提醒）
-_DANMAKU_BUF: collections.deque = collections.deque(maxlen=120)  # (sender, text, at)
+# v0.8.6：缓冲条目带房间号 (sender, text, at, room)——供"直播间活跃观众"提取
+_DANMAKU_BUF: collections.deque = collections.deque(maxlen=120)  # (sender, text, at, room)
 _MENTION_NOTIFY: dict = {"at": 0.0, "text": "", "sender": "", "room": ""}
 _YUI_NICKNAMES = ("yui小猫娘", "小猫娘", "yui")  # 弹幕 @ 匹配昵称（小号默认昵称）
 
@@ -107,7 +108,32 @@ def _refresh_ext_cookie(cookie: str) -> dict:
 
 def get_recent_danmaku(limit: int = 40) -> list:
     """最近弹幕（供 __init__.py 实时读取）：[(sender, text, at), ...]"""
-    return list(_DANMAKU_BUF)[-limit:]
+    return [(s, t, a) for s, t, a, _r in list(_DANMAKU_BUF)[-limit:]]
+
+
+def get_recent_viewers(room: str = "", limit: int = 50) -> list[str]:
+    """最近弹幕发言者昵称去重（v0.8.6：直播间活跃观众近似来源）。
+
+    B站 无公开 HTTP 接口返回"当前在线观众"（页面数字来自 WS），
+    弹幕发言者是最可靠的可关注对象。room 非空时只统计该房间；
+    排除空昵称与系统提示。按最近发言顺序（新→旧）去重。
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    room = (room or "").strip()
+    for sender, _t, _a, r in reversed(_DANMAKU_BUF):
+        s = str(sender or "").strip()
+        if not s or s == "系统提示" or s == "系统":
+            continue
+        if room and str(r or "").strip() != room:
+            continue
+        if s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def get_mention_notify(clear: bool = True) -> dict:
@@ -385,7 +411,7 @@ class _PanelHandler(BaseHTTPRequestHandler):
                 sender = str(body.get("sender", "") or "")[:40]
                 room = str(body.get("room", "") or "")[:20]
                 if text:
-                    _DANMAKU_BUF.append((sender, text, int(body.get("at") or 0) or time.time()))
+                    _DANMAKU_BUF.append((sender, text, int(body.get("at") or 0) or time.time(), room))
                     low = text.lower()
                     if any(n in low for n in _YUI_NICKNAMES):
                         _MENTION_NOTIFY["at"] = time.time()

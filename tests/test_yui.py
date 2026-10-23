@@ -724,6 +724,81 @@ def test_mention_notify_room_roundtrip(monkeypatch) -> None:
         web_ui._MENTION_NOTIFY = old
 
 
+# ══════════ 直播间活跃观众（v0.8.6）：弹幕发言者 → 可关注对象 ══════════
+
+
+def test_get_recent_viewers_filters_and_dedups(monkeypatch) -> None:
+    """viewers 提取：按房间过滤、去重、排除系统消息与空昵称。"""
+    import web_ui
+
+    old = web_ui._DANMAKU_BUF
+    try:
+        web_ui._DANMAKU_BUF.clear()
+        web_ui._DANMAKU_BUF.extend([
+            ("卡比梦", "x", 1, "22996016"),
+            ("夜半烟未散", "y", 2, "22996016"),
+            ("卡比梦", "z", 3, "22996016"),          # 同人重复
+            ("系统提示", "公告", 4, "22996016"),       # 系统消息排除
+            ("", "空", 5, "22996016"),                # 空昵称排除
+            ("范海鸽", "w", 6, "999"),                # 别的房间
+        ])
+        v = web_ui.get_recent_viewers("22996016", limit=10)
+        assert v == ["卡比梦", "夜半烟未散"]  # 新→旧去重，排除系统/空/异房间（卡比梦最新发言）
+        # 不指定房间：全部发言者（仍去重、排除系统/空）
+        all_v = web_ui.get_recent_viewers("", limit=10)
+        assert "范海鸽" in all_v and "卡比梦" in all_v and "系统提示" not in all_v
+    finally:
+        web_ui._DANMAKU_BUF = old
+
+
+def test_live_viewers_tool_resolves_uid_and_skips_ambiguous(monkeypatch) -> None:
+    """bili_live_viewers：昵称→uid；解析失败的用户绝不返回 uid（防关注错人）。"""
+    import asyncio
+
+    from plugin.plugins.bili_viewer import BiliViewerPlugin, bili, web_ui
+
+    fake_ctx = _FakeCtx()
+    inst = BiliViewerPlugin(ctx=fake_ctx)
+    old = web_ui._DANMAKU_BUF
+    try:
+        web_ui._DANMAKU_BUF.clear()
+        web_ui._DANMAKU_BUF.extend([
+            ("卡比梦", "x", 1, "12345"),
+            ("同名路人", "y", 2, "12345"),
+        ])
+        def fake_resolve(name, account="yui"):
+            if name == "卡比梦":
+                return 10001
+            raise bili.BiliError("USER_AMBIGUOUS 未找到昵称「同名路人」完全匹配的用户", "USER_AMBIGUOUS")
+        monkeypatch.setattr(bili, "_resolve_uid", fake_resolve)
+        out = asyncio.run(inst.bili_live_viewers(room="12345"))
+        assert out["is_error"] is False
+        assert out["result"]["viewers"] == [{"uid": 10001, "name": "卡比梦"}]
+        assert "同名路人" in out["result"]["unresolved"]
+        assert "不要猜 uid" in out["output"]
+        assert "bili_follow_user" in out["output"]
+    finally:
+        web_ui._DANMAKU_BUF = old
+
+
+def test_live_info_online_fallback(monkeypatch) -> None:
+    """直播中但旧接口 online=0：兜底 getInfoByRoom 人气值（v0.8.6 修'在线人数0'误报）。"""
+    from plugin.plugins.bili_viewer import bili
+
+    http_seq = iter([
+        {"code": 0, "data": {"room_id": 888, "live_status": 1, "online": 0, "uid": 7, "title": "t"}},
+        {"code": 0, "data": {"name": "主播A"}},  # acc/info 反查昵称
+    ])
+    wbi_seq = iter([
+        {"code": 0, "data": {"room_info": {"online": 123}, "anchor_info": {}}},
+    ])
+    monkeypatch.setattr(bili, "_resolve_room", lambda room: {"room_id": 888, "live_status": 1})
+    monkeypatch.setattr(bili, "_http_get", lambda *a, **k: next(http_seq))
+    monkeypatch.setattr(bili, "_wbi_get", lambda *a, **k: next(wbi_seq))
+    info = bili.live_info("888")
+    assert info["online"] == 123  # 0 → 兜底成功
+
+
 def test_yui_cookie_file_mtime_cache(monkeypatch, tmp_path) -> None:
     """v0.7.3 优化：小号 Cookie 文件 mtime 缓存，内容未变不重复读盘。"""
     from plugin.plugins.bili_viewer import bili
