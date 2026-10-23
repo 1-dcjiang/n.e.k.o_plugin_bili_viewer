@@ -73,7 +73,6 @@ _BROWSER_MONITOR_EVERY = 24  # 浏览器接入监控刷新频率：约每 24 次
 # 自主查看私信（v0.8.2）：低频轮询小号未读 + 注入冷却，防止刷屏打扰
 _UNREAD_POLL_INTERVAL = 180.0       # 每 3 分钟轮询一次小号未读数（轻量接口）
 _UNREAD_INJECT_COOLDOWN = 300.0     # 同一轮未读注入后 5 分钟内不再重复提醒（v0.9.4：私信需及时回复，从20分钟缩短）
-_UNREAD_DM_COOLDOWN = 300.0         # 私信未读注入冷却 5 分钟（与通用冷却一致，私信优先）
 # 自主回复弹幕@（v0.8.5）：同一直播间 10 分钟内最多唤醒一次自主回复
 _MENTION_REPLY_COOLDOWN = 600.0
 
@@ -495,6 +494,10 @@ class BiliViewerPlugin(NekoPluginBase):
                 data = bili_social.dm_messages(account, uid, limit=5, mark_read=False)
                 msgs = data.get("messages") or []
                 if not msgs:
+                    continue
+                # v0.9.4 复查优化：最后一条必须是对方发的才注入——如果最后一条是 YUI 自己发的，
+                # 说明对方没有新消息或 YUI 已回复，不需要再提醒（防重复注入历史消息）
+                if msgs[-1].get("from") != "them":
                     continue
                 lines = []
                 for m in msgs[-5:]:
