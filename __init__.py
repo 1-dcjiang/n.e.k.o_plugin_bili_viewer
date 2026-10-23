@@ -2083,6 +2083,33 @@ class BiliViewerPlugin(NekoPluginBase):
         return {"output": "动态已发布。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": result}
 
     @llm_tool(
+        name="bili_dynamic_delete",
+        description=(
+            "删除 YUI 小号的一条动态。何时用：用户说'删掉刚才那条动态/撤回动态/删除动态'，"
+            "或发布后回读验证失败需要撤回时。参数 dynamic_id：要删除的动态 ID（数字，发布动态时返回）。"
+            "【真实删除铁律】删除成功后只回复'动态已删除。'，禁止'搞定/任务完成'等话术。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "dynamic_id": {"type": "string", "description": "要删除的动态 ID（数字）"},
+            },
+            "required": ["dynamic_id"],
+        },
+    )
+    async def bili_dynamic_delete(self, *, dynamic_id: str = "", **_):
+        params = _.get("parameters") or {}
+        dynamic_id = str(dynamic_id or params.get("dynamic_id") or "").strip()
+        if not dynamic_id:
+            return {"output": "请提供要删除的动态 ID。", "is_error": True, "error": "EMPTY_ID"}
+        try:
+            bili.delete_dynamic(dynamic_id, account="yui")
+        except bili.BiliError as exc:
+            return self._wrap_auth(exc, "删除动态")
+        _logger.info("yui dynamic deleted: dynamic_id=%s", dynamic_id)
+        return {"output": "动态已删除。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}}
+
+    @llm_tool(
         name="bili_yui_upload",
         description=(
             "【发送纪律·最高优先】投稿提交后，你的对外回复必须逐字原样只有一句话：'稿件已提交审核。'"

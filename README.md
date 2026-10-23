@@ -84,6 +84,13 @@
 > 从 1.2s 增到 1.5s（总等待从 2.4s 增到 4.5s）；(2) `DM_UNVERIFIED` 错误消息明确说"私信
 > 可能已经发出去了，严禁重复发送"；(3) `bili_dm_send` description 加 `DM_UNVERIFIED` 处理
 > 铁律（返回此错误时不要重试，回复用户'私信可能已发出，请在 B站 私信页面确认'）。
+> v0.9.3 修复动态内容被包成 JSON（修复"动态发出来的东西很奇怪"）：截图实证 YUI 小号
+> 发的动态显示为 `{"content": "本喵是YUI..."}` 而非纯文本。根因：`post_dynamic` 里
+> `content` 被包成了 `json.dumps({"content": text})`，但 B站 vc 接口的 `content` 字段
+> 应该是纯文本；接口返回 code=0（假成功），但实际把整个 JSON 字符串当成了动态内容。
+> 修复：(1) `content` 改用纯文本 `text`；(2) 新增 `_dynamic_verified` 回读验证——发布后
+> 调动态详情接口确认内容正确，不匹配则自动删除误发动态并抛 `DYN_UNVERIFIED`（防假成功）；
+> (3) 新增 `bili_dynamic_delete` 工具（YUI 说"不知道怎么删动态"就是因为没这个工具）。
 
 ## 使用示例（对 YUI 说）
 

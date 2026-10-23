@@ -1949,7 +1949,9 @@ def post_dynamic(text: str, account: str = "yui") -> dict:
         raise BiliError("Cookie 缺少 bili_jct（CSRF token），无法发布动态", "NO_CSRF")
     body = {
         "type": 4,
-        "content": json.dumps({"content": text}, ensure_ascii=False),
+        # v0.9.3 修复：content 必须是纯文本，不能包成 json.dumps({"content": text})
+        # 原写法会导致动态显示为 {"content": "..."} 而非纯文本（接口返回 code=0 但内容错误=假成功）
+        "content": text,
         "from": "create.client.web",
         "api": "req",
     }
@@ -1962,7 +1964,53 @@ def post_dynamic(text: str, account: str = "yui") -> dict:
         raise BiliError("动态发布失败：" + exc.message, "DYN_FAILED:" + exc.code) from exc
     data = resp.get("data") or {}
     dyn_id = str(data.get("dynamic_id_str") or data.get("dynamic_id") or "")
+    # v0.9.3 回读验证：发布后调动态详情接口确认内容正确（防假成功）
+    if dyn_id and not _dynamic_verified(account, dyn_id, text):
+        # 内容不匹配（如被包成 JSON），删除误发的动态并报错
+        try:
+            delete_dynamic(dyn_id, account=account)
+        except BiliError:
+            pass
+        raise BiliError(
+            "动态发布后回读验证失败（内容与预期不符，已自动删除误发动态）；"
+            "请勿声称已发布，请重试。",
+            "DYN_UNVERIFIED",
+        )
     return {"ok": True, "text": text[:100], "dynamic_id": dyn_id}
+
+
+def _dynamic_verified(account: str, dynamic_id: str, text: str, tries: int = 2) -> bool:
+    """发布后回读验证：调动态详情接口，确认动态内容与发送的 text 一致。
+
+    v0.9.3 新增：防假成功（接口返回 code=0 但内容被错误编码，如包成 JSON 字符串）。
+    B站 动态详情接口同步有延迟，重试 2 次间隔 1 秒。
+    """
+    for i in range(tries):
+        try:
+            data = _http_get(
+                "https://api.vc.bilibili.com/dynamic_svr/v1/dynamic_svr/get_dynamic_detail",
+                {"dynamic_id": dynamic_id},
+                account=account,
+            )
+        except BiliError:
+            return False
+        card_raw = ((data.get("data") or {}).get("card")) or ""
+        if not card_raw:
+            if i < tries - 1:
+                time.sleep(1.0)
+            continue
+        try:
+            card = json.loads(card_raw) if isinstance(card_raw, str) else card_raw
+        except (json.JSONDecodeError, TypeError):
+            return False
+        # type=4 文字动态：card.item.content 是动态文本
+        item = card.get("item") or {}
+        content = (item.get("content") or "").strip()
+        if content == text.strip():
+            return True
+        # 内容不匹配，不再重试（不是延迟问题，是编码错误）
+        return False
+    return False
 
 
 def delete_dynamic(dynamic_id, account: str = "yui") -> dict:

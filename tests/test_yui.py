@@ -573,7 +573,9 @@ def test_bili_post_dynamic_requires_login(monkeypatch) -> None:
 
 def test_bili_post_dynamic_vc_stable_endpoint(monkeypatch) -> None:
     """v0.8.8 接口修复：原 /x/dynamic/web/create/v1/dyn 已 404，改用旧版稳定接口
-    api.vc.bilibili.com/dynamic_svr/v1/dynamic_svr/create（content 为 JSON 字符串）。"""
+    api.vc.bilibili.com/dynamic_svr/v1/dynamic_svr/create。
+    v0.9.3 修复：content 必须是纯文本（原 json.dumps({"content": text}) 会导致动态显示为
+    {"content": "..."} 而非纯文本）；新增回读验证（_dynamic_verified）。"""
     import json as _json
 
     from plugin.plugins.bili_viewer import bili
@@ -585,7 +587,12 @@ def test_bili_post_dynamic_vc_stable_endpoint(monkeypatch) -> None:
         calls.append((url, dict(body or {})))
         return {"code": 0, "data": {"dynamic_id": 1262306092504842241, "dynamic_id_str": "1262306092504842241"}}
 
+    def fake_http_get(url, params=None, account="yui", timeout=12.0):
+        # 动态详情接口回读验证：返回正确的内容
+        return {"code": 0, "data": {"card": _json.dumps({"item": {"content": "测试动态"}})}}
+
     monkeypatch.setattr(bili, "_http_post_json", fake_post_json)
+    monkeypatch.setattr(bili, "_http_get", fake_http_get)
     r = bili.post_dynamic("测试动态", account="yui")
     assert r["ok"] is True
     assert r["dynamic_id"] == "1262306092504842241"
@@ -594,8 +601,8 @@ def test_bili_post_dynamic_vc_stable_endpoint(monkeypatch) -> None:
     assert "api.vc.bilibili.com/dynamic_svr/v1/dynamic_svr/create" in url
     assert body["type"] == 4
     assert body["from"] == "create.client.web"
-    # content 必须是 JSON 字符串（旧接口格式）
-    assert _json.loads(body["content"])["content"] == "测试动态"
+    # v0.9.3：content 必须是纯文本（不能是 JSON 字符串）
+    assert body["content"] == "测试动态"
 
 
 def test_bili_delete_dynamic(monkeypatch) -> None:
