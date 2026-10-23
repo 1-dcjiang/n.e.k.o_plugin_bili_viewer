@@ -676,7 +676,7 @@ _FAV_LIST_URL = _API + "/x/v3/fav/folder/created/list-all"
 
 def _bvid_aid(bvid: str, account: str) -> tuple[str, int]:
     bvid = bili._parse_bvid(bvid)
-    info = bili.video_info(bvid)
+    info = bili.video_info(bvid, account=account)
     aid = info.get("aid")
     if not aid:
         raise bili.BiliError("视频不存在或已被删除", "NOT_FOUND")

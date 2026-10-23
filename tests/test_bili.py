@@ -415,7 +415,7 @@ def test_video_send_danmaku_posts_with_cid(monkeypatch) -> None:
     monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=abc; bili_jct=tok")  # 默认 yui
     posted: dict = {}
 
-    def _fake_video_info(bvid):
+    def _fake_video_info(bvid, account="main"):
         assert bvid == "BV1xx411c7mD"
         return {"title": "测试", "pages": [{"cid": 10086}, {"cid": 20086}]}
 

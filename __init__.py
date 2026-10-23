@@ -593,7 +593,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 refs = "；近期弹幕：" + "、".join(f"{d['user']}：{d['text']}" for d in (see.get("recent_danmaku") or [])[-4:])
                 title = f"{see.get('title') or info.get('title') or target}（直播 by {see.get('uname') or info.get('uname') or ''}）"
             else:
-                vinfo = bili.video_info(target)
+                vinfo = bili.video_info(target, account="yui")
                 title = f"{vinfo.get('title') or info.get('title') or target}（视频 by {vinfo.get('uname') or info.get('uname') or ''}）"
                 try:
                     cmts = bili.video_comments(target, mode="hot", limit=4)
@@ -782,25 +782,27 @@ class BiliViewerPlugin(NekoPluginBase):
         name="bili_video_info",
         description=(
             "查看哔哩哔哩视频详情。何时用：用户说'看看这个视频/这视频什么内容'或给出 BV 号/链接时。"
-            "参数 bvid：BV 号或完整视频链接。返回标题、UP主、时长、分区、播放/弹幕/点赞/投币/收藏、"
-            "分P信息、字幕可用性与标签。"
+            "参数 bvid：BV 号或完整视频链接；account：yui=小号（默认）/ main=主账号（v0.8.9 起用操作账号 cookie 查详情，防主账号失效导致 -403）。"
+            "返回标题、UP主、时长、分区、播放/弹幕/点赞/投币/收藏、分P信息、字幕可用性与标签。"
         ),
         parameters={
             "type": "object",
             "properties": {
                 "bvid": {"type": "string", "description": "BV 号或视频链接"},
+                "account": {"type": "string", "description": "yui=YUI 小号（默认）/ main=用户主账号"},
             },
             "required": ["bvid"],
         },
         timeout=20.0,
     )
-    async def bili_video_info(self, *, bvid: str = "", **_):
+    async def bili_video_info(self, *, bvid: str = "", account: str = "", **_):
         params = _.get("parameters") or {}
         bvid = (bvid or params.get("bvid") or "").strip()
+        account = self._resolve_account(account or params.get("account") or "")
         if not bvid:
             return {"output": "请提供视频的 BV 号或链接。", "is_error": True, "error": "NO_BVID"}
         try:
-            info = bili.video_info(bvid)
+            info = bili.video_info(bvid, account=account)
         except bili.BiliError as exc:
             return _wrap_err(exc)
         return {"output": bili.format_video_info(info), "is_error": False, "video": info}
@@ -1830,7 +1832,7 @@ class BiliViewerPlugin(NekoPluginBase):
                     parsed = {"kind": "live", "room_id": target} if target.isdigit() and len(target) >= 5 else None
             if isinstance(parsed, dict) and parsed.get("kind") == "video" and parsed.get("bvid"):
                 try:
-                    aid = bili.video_info(parsed["bvid"]).get("aid")
+                    aid = bili.video_info(parsed["bvid"], account="yui").get("aid")
                     if aid:
                         oid, type_id = int(aid), 1
                 except bili.BiliError:
@@ -1843,7 +1845,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
                 if isinstance(parsed, dict) and parsed.get("kind") == "video" and parsed.get("bvid"):
                     try:
-                        aid = bili.video_info(parsed["bvid"]).get("aid")
+                        aid = bili.video_info(parsed["bvid"], account="yui").get("aid")
                         if aid:
                             oid, type_id = int(aid), 1
                     except bili.BiliError:

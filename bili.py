@@ -370,10 +370,14 @@ def _fmt_time(ts: int) -> str:
 # ══════════════ 视频 ══════════════
 
 
-def video_info(bvid: str) -> dict:
-    """视频详情：标题/UP主/时长/分区/互动数据/分P/字幕/标签。"""
+def video_info(bvid: str, account: str = "main") -> dict:
+    """视频详情：标题/UP主/时长/分区/互动数据/分P/字幕/标签。
+
+    v0.8.9：支持 account 参数——点赞/投币/收藏等操作链路用当前操作账号的 cookie
+    查详情（避免主账号 cookie 失效时整条操作链路报 -403 无权限访问）。
+    """
     bvid = _parse_bvid(bvid)
-    data = (_http_get(_API + "/x/web-interface/view", {"bvid": bvid})).get("data") or {}
+    data = (_http_get(_API + "/x/web-interface/view", {"bvid": bvid}, account=account)).get("data") or {}
     if not data:
         raise BiliError("视频不存在或已被删除", "NOT_FOUND")
     owner = data.get("owner") or {}

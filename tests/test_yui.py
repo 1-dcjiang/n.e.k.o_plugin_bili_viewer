@@ -292,14 +292,14 @@ def test_yui_comment_rate_limit(monkeypatch) -> None:
 
     monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
     monkeypatch.setattr(bili, "add_reply", lambda oid, t, text, account="yui": {"ok": True})
-    monkeypatch.setattr(bili, "video_info", lambda bvid: {"aid": 123456, "title": "t"})
+    monkeypatch.setattr(bili, "video_info", lambda bvid, account="main": {"aid": 123456, "title": "t"})
     inst = _make_inst(monkeypatch)
     r1 = asyncio.run(inst.bili_reply_comment(target="BV1xx411c7mD", text="写得好", account="yui"))
     assert r1.get("is_error") is False
     r2 = asyncio.run(inst.bili_reply_comment(target="BV1xx411c7mD", text="再来一条", account="yui"))
     assert r2.get("error") == "RATE_LIMITED"
     # 不同视频不受限
-    monkeypatch.setattr(bili, "video_info", lambda bvid: {"aid": 999, "title": "t2"})
+    monkeypatch.setattr(bili, "video_info", lambda bvid, account="main": {"aid": 999, "title": "t2"})
     r3 = asyncio.run(inst.bili_reply_comment(target="BV1xx411c7mE", text="另一个", account="yui"))
     assert r3.get("is_error") is False
 
@@ -390,7 +390,7 @@ def test_reply_comment_video_aid_resolution(monkeypatch) -> None:
         return {"ok": True}
 
     monkeypatch.setattr(bili, "add_reply", fake_add)
-    monkeypatch.setattr(bili, "video_info", lambda bvid: {"aid": 7777, "title": "t"})
+    monkeypatch.setattr(bili, "video_info", lambda bvid, account="main": {"aid": 7777, "title": "t"})
     inst = _make_inst(monkeypatch)
     out = asyncio.run(inst.bili_reply_comment(target="https://www.bilibili.com/video/BV1xx411c7mD", text="顶一个", account="yui"))
     assert out.get("is_error") is False

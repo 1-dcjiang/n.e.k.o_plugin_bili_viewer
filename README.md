@@ -58,6 +58,11 @@
 > （body: type=4, content=JSON字符串, from=create.client.web, api=req），返回 dynamic_id；
 > 新增 `delete_dynamic()`（rm_dynamic 接口，供误发撤回/回读验证）；工具层补错误码日志，
 > 以后动态失败可直接查日志对线。实测：cookie 有效、wbi 正常、旧接口发+删均 code=0。
+> v0.8.9 视频详情支持操作账号 cookie（修复"查询视频并点赞显示无权限访问"）：`video_info`
+> 写死用主账号 cookie，主账号失效时 `/x/web-interface/view` 返回 -403，而点赞/投币/收藏/
+> 评论都先经 `_bvid_aid` → `video_info`，导致整条操作链路挂。现在 `video_info(bvid, account=...)`
+> 支持账号参数，操作链路用当前操作账号（默认 yui 小号）的 cookie 查详情；`bili_video_info`
+> 工具也加 account 参数（默认 yui）。
 
 ## 使用示例（对 YUI 说）
 
