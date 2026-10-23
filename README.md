@@ -198,6 +198,13 @@
 > 私信白名单（owner/粉丝/对方先发/互关，粉丝全放行满足"适用于所有关注她的粉丝"）、私信 payload（嵌套
 > msg[sender_uid]/msg[dev_id] per-install + wbi query）、动态发布/删除双回读、直播弹幕回读、5 秒风控间隔、
 > 弹幕连发任务（danmaku_loop.json）。
+> v0.9.29 视频素材自给自足编排：
+> 用户实证：YUI 在直播间向玩家要'豆包生成视频的 http/https 直链'——需要视频素材却不知道自取。
+> 自主运营注入（_yui_autonomy_text 动作 5）与三个桥工具描述现统一注入编排：
+> 需要发布视频且 yui_uploads 无现成素材时 → ① bili_yui_command_doubao 向豆包下达
+> '生成XX主题视频并给出可下载直链'指令 → ② bili_yui_read_doubao_reply 每隔几分钟轮询
+> 回执（豆包处理需几分钟到一小时，轮询即可，严禁催玩家/重复下发同一指令）→
+> ③ bili_yui_upload_video_url 下载并投稿。严禁向玩家索要视频链接/文件、严禁把直链转手丢给玩家。
 > v0.9.28 弹幕指令原文防呆：
 > 用户实证：YUI 收到'用弹幕自我介绍一下'后把整句指令当弹幕文本发进直播间。
 > bili_live_send_danmaku / bili_video_send_danmaku 的 text 参数现做启发式检测

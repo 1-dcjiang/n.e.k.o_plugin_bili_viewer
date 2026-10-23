@@ -1284,3 +1284,30 @@ def test_live_danmaku_normal_text_passes_guard(monkeypatch) -> None:
     monkeypatch.setattr(inst, "_danmaku_recently_sent", lambda *a, **k: False)
     r = asyncio.run(inst.bili_live_send_danmaku(room="12345", text="我是YUI小猫娘，很高兴认识大家", account="yui"))
     assert r["is_error"] is False and "已发送" in r["output"]
+
+
+# ══════════ 视频素材自给自足编排（v0.9.29） ══════════
+
+
+def test_yui_autonomy_text_video_pipeline(monkeypatch) -> None:
+    """v0.9.29：自主运营注入含'视频素材自给自足'编排，严禁向玩家索要链接。"""
+    inst = _make_inst(monkeypatch)
+    text = inst._yui_autonomy_text("live", "12345", {"title": "测试直播间", "source": "autonomy"})
+    assert "严禁向玩家索要视频链接" in text
+    assert "bili_yui_command_doubao" in text
+    assert "bili_yui_read_doubao_reply" in text
+    assert "bili_yui_upload_video_url" in text
+
+
+def test_command_doubao_desc_has_video_pipeline(monkeypatch) -> None:
+    """v0.9.29：三个桥工具的描述含视频素材自给自足编排与'严禁向玩家索要'。"""
+    from plugin.sdk.plugin.llm_tool import collect_llm_tool_methods
+
+    inst = _make_inst(monkeypatch)
+    metas = {m.name: m for m, _ in collect_llm_tool_methods(inst)}
+    desc1 = metas["bili_yui_command_doubao"].description
+    assert "严禁" in desc1 and "bili_yui_read_doubao_reply" in desc1 and "bili_yui_upload_video_url" in desc1
+    desc2 = metas["bili_yui_read_doubao_reply"].description
+    assert "严禁把直链转手丢给玩家" in desc2
+    desc3 = metas["bili_yui_upload_video_url"].description
+    assert "严禁因为拿不到链接就向玩家索要" in desc3
