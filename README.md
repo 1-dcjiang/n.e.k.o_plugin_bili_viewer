@@ -113,6 +113,10 @@
 > v0.9.7 再次复查：修复直播弹幕假成功——`live_send_danmaku` 缺少 dmid 验证（与 `send_video_danmaku` 不一致），
 > 接口返回 code=0 但不返回 dmid 时仍返回 ok=True（假成功）。修复：dmid 为空时抛 `DANMAKU_UNVERIFIED`，
 > 错误消息与 `send_video_danmaku` 一致。同步更新测试 mock 返回加上 dmid。
+> v0.9.8 修复动态删除假成功：`delete_dynamic` 无回读验证——rm_dynamic 接口返回 code=0 但动态未实际删除
+> （风控延迟/接口假成功）时仍返回 ok=True，YUI 说"已删除"但动态还在。修复：新增 `_dynamic_deleted_verified`
+> 回读验证（详情查不到即确认删除，tries=3 间隔 1.5s），未删除抛 `DYN_DEL_UNVERIFIED`；
+> `bili_dynamic_delete` description 加 `DYN_DEL_UNVERIFIED` 处理铁律（严禁声称已删除/重复盲删）。
 
 ## 使用示例（对 YUI 说）
 

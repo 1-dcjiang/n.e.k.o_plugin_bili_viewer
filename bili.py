@@ -2036,10 +2036,37 @@ def _dynamic_verified(account: str, dynamic_id: str, text: str, tries: int = 3) 
     return False, last_actual
 
 
+def _dynamic_deleted_verified(account: str, dynamic_id: str, tries: int = 3) -> bool:
+    """删除后回读验证（v0.9.8）：动态详情查不到（code=-2 或 data.card 为空）即确认删除生效。
+
+    与 _dynamic_verified 同模式：B站动态详情接口同步有延迟，tries=3 间隔 1.5s；
+    防假成功——rm_dynamic 接口返回 code=0 但动态未实际删除（风控延迟/接口假成功）。
+    """
+    for i in range(tries):
+        try:
+            data = _http_get(
+                "https://api.vc.bilibili.com/dynamic_svr/v1/dynamic_svr/get_dynamic_detail",
+                {"dynamic_id": dynamic_id},
+                account=account,
+            )
+        except BiliError:
+            if i < tries - 1:
+                time.sleep(1.5)
+            continue
+        code = data.get("code", 0)
+        card_raw = ((data.get("data") or {}).get("card")) or ""
+        if code == -2 or not card_raw:
+            return True  # 动态已不存在，删除生效
+        if i < tries - 1:
+            time.sleep(1.5)
+    return False
+
+
 def delete_dynamic(dynamic_id, account: str = "yui") -> dict:
     """删除指定动态（v0.8.8 新增，供发布后回读验证/误发撤回）。
 
     接口 POST api.vc.bilibili.com/dynamic_svr/v1/dynamic_svr/rm_dynamic。
+    v0.9.8 加删除后回读验证：详情查不到才确认删除（防假成功，与 post_dynamic 一致）。
     """
     _require_login(account)
     csrf = _csrf(account)
@@ -2056,6 +2083,12 @@ def delete_dynamic(dynamic_id, account: str = "yui") -> dict:
         )
     except BiliError as exc:
         raise BiliError("动态删除失败：" + exc.message, "DYN_DEL_FAILED:" + exc.code) from exc
+    if not _dynamic_deleted_verified(account, str(did)):
+        raise BiliError(
+            "动态删除接口已接受（code=0）但回读仍能查到该动态——不能确认已删除，请勿声称已删除；"
+            "若重试需先确认动态是否已删（避免重复删除他人新动态）。",
+            "DYN_DEL_UNVERIFIED",
+        )
     return {"ok": True, "dynamic_id": str(did)}
 
 

@@ -617,6 +617,7 @@ def test_bili_delete_dynamic(monkeypatch) -> None:
         return {"code": 0, "data": {}}
 
     monkeypatch.setattr(bili, "_http_post_json", fake_post_json)
+    monkeypatch.setattr(bili, "_dynamic_deleted_verified", lambda account, dynamic_id, tries=3: True)
     r = bili.delete_dynamic(1262306092504842241, account="yui")
     assert r["ok"] is True
     assert len(calls) == 1

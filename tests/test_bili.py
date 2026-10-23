@@ -1357,3 +1357,46 @@ def test_send_video_danmaku_ok_with_dmid(monkeypatch) -> None:
     r = bili.send_video_danmaku("BV1xx411c7mD", "测试弹幕")
     assert r["ok"] is True
     assert r["dmid"] == "8888"
+
+
+def test_live_send_danmaku_unverified_without_dmid(monkeypatch) -> None:
+    """直播弹幕接口 code=0 但不返回 dmid → 抛 DANMAKU_UNVERIFIED（v0.9.7 修复假成功）。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setattr(bili, "_csrf", lambda account: "tok")
+    monkeypatch.setattr(bili, "_http_post", lambda url, form, timeout=12.0, account="main": {"code": 0, "data": {}})
+    try:
+        bili.live_send_danmaku("1025219", "测试弹幕")
+        raise AssertionError("应当抛 DANMAKU_UNVERIFIED")
+    except bili.BiliError as exc:
+        assert exc.code == "DANMAKU_UNVERIFIED"
+
+
+def test_delete_dynamic_verified_ok(monkeypatch) -> None:
+    """删除后回读确认动态已不存在 → ok=True（v0.9.8 防假成功）。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setattr(bili, "_csrf", lambda account: "tok")
+    called: list[bool] = []
+    monkeypatch.setattr(bili, "_http_post_json", lambda *a, **k: called.append(True) or {"code": 0})
+    monkeypatch.setattr(bili, "_dynamic_deleted_verified", lambda account, dynamic_id, tries=3: True)
+    r = bili.delete_dynamic("123456", account="yui")
+    assert r["ok"] is True
+    assert called  # 删除接口真实调用
+
+
+def test_delete_dynamic_unverified_still_exists(monkeypatch) -> None:
+    """删除后回读仍能查到动态 → 抛 DYN_DEL_UNVERIFIED，严禁声称已删除（v0.9.8）。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setattr(bili, "_csrf", lambda account: "tok")
+    monkeypatch.setattr(bili, "_http_post_json", lambda *a, **k: {"code": 0})
+    monkeypatch.setattr(bili, "_dynamic_deleted_verified", lambda account, dynamic_id, tries=3: False)
+    try:
+        bili.delete_dynamic("123456", account="yui")
+        raise AssertionError("应当抛 DYN_DEL_UNVERIFIED")
+    except bili.BiliError as exc:
+        assert exc.code == "DYN_DEL_UNVERIFIED"
