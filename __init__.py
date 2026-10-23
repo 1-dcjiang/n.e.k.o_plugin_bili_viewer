@@ -2160,7 +2160,7 @@ class BiliViewerPlugin(NekoPluginBase):
                     parsed = {"kind": "live", "room_id": target} if target.isdigit() and len(target) >= 5 else None
             if isinstance(parsed, dict) and parsed.get("kind") == "video" and parsed.get("bvid"):
                 try:
-                    aid = bili.video_info(parsed["bvid"], account="yui").get("aid")
+                    aid = bili.video_info(parsed["bvid"], account=account).get("aid")
                     if aid:
                         oid, type_id = int(aid), 1
                 except bili.BiliError:
@@ -2173,7 +2173,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
                 if isinstance(parsed, dict) and parsed.get("kind") == "video" and parsed.get("bvid"):
                     try:
-                        aid = bili.video_info(parsed["bvid"], account="yui").get("aid")
+                        aid = bili.video_info(parsed["bvid"], account=account).get("aid")
                         if aid:
                             oid, type_id = int(aid), 1
                     except bili.BiliError:

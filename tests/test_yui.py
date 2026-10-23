@@ -397,6 +397,32 @@ def test_reply_comment_video_aid_resolution(monkeypatch) -> None:
     assert seen == [(7777, 1, "顶一个")]  # 视频评论：oid=aid, type=1
 
 
+def test_reply_comment_main_account_resolution(monkeypatch) -> None:
+    """评论目标解析使用实际账号（v0.9.23 修复：原硬编码 account=yui，只有主账号时评论会解析失败）。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_COOKIE", "SESSDATA=m; bili_jct=mj")
+    got: list = []
+    seen: list[tuple] = []
+
+    def fake_vinfo(bvid, account="main"):
+        got.append(account)
+        return {"aid": 8888, "title": "t"}
+
+    def fake_add(oid, t, text, account="yui"):
+        seen.append((oid, t, text))
+        return {"ok": True}
+
+    monkeypatch.setattr(bili, "video_info", fake_vinfo)
+    monkeypatch.setattr(bili, "add_reply", fake_add)
+    inst = _make_inst(monkeypatch)
+    out = asyncio.run(inst.bili_reply_comment(target="BV1xx411c7mD", text="好", account="main"))
+    assert out.get("is_error") is False
+    assert got and got[-1] == "main"  # 解析目标用的是实际账号 main
+    assert seen == [(8888, 1, "好")]
+
+
 # ══════════ 动态日上限 ══════════
 
 
