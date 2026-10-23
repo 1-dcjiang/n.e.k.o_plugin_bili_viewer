@@ -153,6 +153,29 @@ def test_limit_table_complete():
         assert action in bili_social.LIMITS
 
 
+def test_wbi_sign_shape():
+    """wbi 签名结果必须带 wts + w_rid（fetch_session_msgs/send_msg 依赖）。"""
+    bili = _bili()
+    mixin = "0" * 32
+    signed = bili._wbi_sign({"talker_id": 123, "session_type": 1}, mixin)
+    assert "wts" in signed and "w_rid" in signed
+    assert signed["w_rid"] == bili._wbi_sign({"talker_id": 123, "session_type": 1}, mixin)["w_rid"]
+    # 参数顺序不影响签名结果（内部排序）
+    signed2 = bili._wbi_sign({"session_type": 1, "talker_id": 123}, mixin)
+    assert signed["w_rid"] == signed2["w_rid"]
+
+
+def test_wbi_only_endpoints_use_signing():
+    """wbi:true 端点（fetch_session_msgs/send_msg）必须走 _wbi_params 签名，不能裸调。"""
+    bili_social = _social()
+    with open(bili_social.__file__, encoding="utf-8") as f:
+        src = f.read()
+    assert "_FETCH_MSGS_URL,\n        _wbi_params(" in src or "_FETCH_MSGS_URL, _wbi_params(" in src
+    assert "_SEND_MSG_URL," in src and "_wbi_params({" in src.split("_SEND_MSG_URL")[-1][:400]
+    # 创作中心接口 verify-only：不得 wbi 签名
+    assert "_OVERVIEW_URL" in src and "_wbi_get_account(_OVERVIEW_URL" not in src
+
+
 # ══════════ 工具注册（__init__.py） ══════════
 
 
