@@ -1360,17 +1360,15 @@ def test_send_video_danmaku_ok_with_dmid(monkeypatch) -> None:
 
 
 def test_live_send_danmaku_unverified_without_dmid(monkeypatch) -> None:
-    """直播弹幕接口 code=0 但不返回 dmid → 抛 DANMAKU_UNVERIFIED（v0.9.7 修复假成功）。"""
+    """直播弹幕接口 code=0 但不返回 dmid → 视为已发出（unverified=True），不抛错（v0.9.16）。"""
     from plugin.plugins.bili_viewer import bili
 
     monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
     monkeypatch.setattr(bili, "_csrf", lambda account: "tok")
     monkeypatch.setattr(bili, "_http_post", lambda url, form, timeout=12.0, account="main": {"code": 0, "data": {}})
-    try:
-        bili.live_send_danmaku("1025219", "测试弹幕")
-        raise AssertionError("应当抛 DANMAKU_UNVERIFIED")
-    except bili.BiliError as exc:
-        assert exc.code == "DANMAKU_UNVERIFIED"
+    result = bili.live_send_danmaku("1025219", "测试弹幕")
+    assert result["ok"] is True
+    assert result["unverified"] is True
 
 
 def test_delete_dynamic_verified_ok(monkeypatch) -> None:
@@ -1550,7 +1548,7 @@ def test_fans_list(monkeypatch) -> None:
 
 
 def test_danmaku_loop_tick_send_and_finish(monkeypatch) -> None:
-    """弹幕连发任务：到点发送、DANMAKU_UNVERIFIED 计入未确认、发满自动停止（v0.9.15）。"""
+    """弹幕连发任务：到点发送、发满自动停止（v0.9.15，无 dmid 视为已发出 v0.9.16）。"""
     from plugin.plugins.bili_viewer import BiliViewerPlugin, bili
 
     inst = object.__new__(BiliViewerPlugin)
@@ -1559,7 +1557,7 @@ def test_danmaku_loop_tick_send_and_finish(monkeypatch) -> None:
 
     def fake_send(room, text, account="yui"):
         calls.append((room, text, account))
-        raise bili.BiliError("无 dmid", "DANMAKU_UNVERIFIED")
+        return {"ok": True, "dmid": "", "unverified": True}  # 无 dmid 但已发出（v0.9.16）
 
     monkeypatch.setattr(bili, "live_send_danmaku", fake_send)
     st = {
@@ -1570,7 +1568,7 @@ def test_danmaku_loop_tick_send_and_finish(monkeypatch) -> None:
     monkeypatch.setattr(inst, "_loop_load", lambda: st)
     monkeypatch.setattr(inst, "_loop_save", lambda s: st.update(s))
     inst._danmaku_loop_tick()
-    assert st["sent"] == 1 and st["unconfirmed"] == 1 and st["active"] is True
+    assert st["sent"] == 1 and st["active"] is True
     st["next_due"] = 0
     inst._danmaku_loop_tick()
     assert st["sent"] == 2

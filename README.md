@@ -144,6 +144,10 @@
 > 新增后台连发机制——`bili_live_danmaku_loop` 调用一次即按 interval（默认 5 秒，最小 3）自动发送，
 > 直到发满 times / 连续 3 次发送失败 / `bili_live_danmaku_stop` 停止；进度用 `bili_live_danmaku_status` 查询；
 > 逐条真实验证（DANMAKU_UNVERIFIED 计"很可能已发出"不重试不视为失败）。
+> v0.9.16 直播弹幕无 dmid=已发出（用户实测：接口已常态不返回回流ID，但弹幕直播间全可见）：
+> `live_send_danmaku` 无 dmid 不再抛 DANMAKU_UNVERIFIED，返回 ok=True + unverified 标记；
+> `bili_live_send_danmaku` 收到成功结果即逐字回复"弹幕已发送。"，严禁因无 dmid 声称失败/纠结确认/重复重试；
+> 连发任务失败分支只处理真 SEND_FAILED。
 
 ## 使用示例（对 YUI 说）
 

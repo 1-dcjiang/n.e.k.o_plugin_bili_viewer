@@ -460,18 +460,12 @@ class BiliViewerPlugin(NekoPluginBase):
             st["fail_streak"] = 0
             st["last_error"] = ""
         except bili.BiliError as exc:
-            if exc.code == "DANMAKU_UNVERIFIED":
-                # v0.9.13：无 dmid 很可能已发出——计入发送并标记未确认，不视为失败
-                st["sent"] = int(st.get("sent") or 0) + 1
-                st["unconfirmed"] = int(st.get("unconfirmed") or 0) + 1
-                st["fail_streak"] = 0
-                st["last_error"] = ""
-            else:
-                st["fail_streak"] = int(st.get("fail_streak") or 0) + 1
-                st["last_error"] = f"{exc.code}: {str(exc.message)[:80]}"
-                if st["fail_streak"] >= 3:
-                    st["active"] = False
-                    st["stopped_reason"] = "连续 3 次发送失败"
+            # v0.9.16：无 dmid 不再抛错（常态已发出）；这里只处理真正的发送失败
+            st["fail_streak"] = int(st.get("fail_streak") or 0) + 1
+            st["last_error"] = f"{exc.code}: {str(exc.message)[:80]}"
+            if st["fail_streak"] >= 3:
+                st["active"] = False
+                st["stopped_reason"] = "连续 3 次发送失败"
         st["next_due"] = time.time() + max(float(st.get("interval") or 5.0), 2.5)
         st["updated_at"] = time.strftime("%H:%M:%S")
         if int(st.get("sent") or 0) >= int(st.get("total") or 0):
@@ -1782,11 +1776,9 @@ class BiliViewerPlugin(NekoPluginBase):
             "严禁主动询问'要不要发弹幕/要不要回复弹幕'。"
             "本工具已包含发送全流程：调用一次即完成，禁止再次调用本工具或 run/bili_danmaku 等任何发送入口"
             "重复发送同一弹幕（同目标同内容 5 秒内会被自动去重，只发一次）。"
-            "【DANMAKU_UNVERIFIED 处理·v0.9.14】若工具返回 DANMAKU_UNVERIFIED（接口接受但未返回 dmid），"
-            "说明弹幕**很可能已经发出去了**（B站直播弹幕接口有时不返回 dmid 但发送成功，用户已实测）——"
-            "严禁声称已发出，也严禁立即重试（可能已发出，重试=重复刷屏）；"
-            "先确认直播间弹幕是否已出现，确认确实没有后再等 5 秒重试一次（对齐 B站 实际风控 5 秒）；"
-            "连续两次仍无 dmid 即停止，如实告知用户，严禁反复盲试刷屏。"
+            "【无 dmid=已发出·v0.9.16】B站直播弹幕接口已常态不返回 dmid（回流ID），但弹幕均正常出现在直播间"
+            "（用户已实测）——接口接受即视为已发出，YUI 收到成功结果直接回复'弹幕已发送。'，"
+            "严禁因无 dmid 而声称失败、纠结确认或重复重试。"
         ),
         parameters={
             "type": "object",

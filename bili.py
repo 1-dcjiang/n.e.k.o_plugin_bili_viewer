@@ -1747,17 +1747,9 @@ def live_send_danmaku(room: str, text: str, account: str = "yui") -> dict:
     dmid = ""
     if isinstance(resp_data, dict):
         dmid = str(resp_data.get("dmid") or resp_data.get("dmid_str") or "")
-    # v0.9.7 复查：与 send_video_danmaku 一致，dmid 为空时抛 DANMAKU_UNVERIFIED（防假成功）
-    # v0.9.13 用户实测：接口不返回 dmid 时弹幕很可能已实际发出（直播弹幕接口有时不回 dmid 但发送成功）
-    # v0.9.14：重试等待对齐 B站 实际风控 5 秒
-    if not dmid:
-        raise BiliError(
-            "直播弹幕接口已接受（code=0）但未返回弹幕 ID（dmid）——弹幕**很可能已经发出去了**"
-            "（B站直播弹幕接口有时不返回 dmid 但发送成功）。请勿声称已发出，也严禁立即重试"
-            "（可能已发出，重试会造成重复刷屏）；请先确认直播间弹幕是否已出现，"
-            "确认确实没有后再等 5 秒重试一次，连续两次仍无则停止并如实告知用户。",
-            "DANMAKU_UNVERIFIED",
-        )
+    # v0.9.16 用户实测确认：B站直播弹幕接口已常态不返回 dmid（回流ID），但弹幕均正常出现在直播间
+    # （截图实证"发出去了，但拿不到回流ID，直播间全看到了"）。无 dmid 视为已发出（unverified 标记），
+    # 不再抛 DANMAKU_UNVERIFIED 错误让 YUI 纠结确认/重试。
     return {
         "ok": True,
         "room_id": int(page_room),
@@ -1765,6 +1757,7 @@ def live_send_danmaku(room: str, text: str, account: str = "yui") -> dict:
         "server": data.get("message") or "",
         "resp_code": data.get("code"),
         "dmid": dmid,
+        "unverified": not dmid,
     }
 
 
