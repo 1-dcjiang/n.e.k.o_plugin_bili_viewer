@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 
 
@@ -1170,3 +1171,71 @@ def test_assign_cookie_refresh_syncs_uid(monkeypatch, tmp_path) -> None:
     assert r2["bound"] is False
     acc = pkg._read_accounts()
     assert acc["main"]["uid"] == 111 and acc["yui"]["uid"] == 222
+
+
+# ══════════ 指令桥（v0.9.27）：YUI 命令豆包 ══════════
+
+
+def test_command_doubao_writes_inbox(monkeypatch, tmp_path) -> None:
+    """v0.9.27：bili_yui_command_doubao 写入 inbox JSON 并返回请求号。"""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    inst = _make_inst(monkeypatch)
+    r = asyncio.run(inst.bili_yui_command_doubao(instruction="生成一个关于猫娘的10秒视频并投稿"))
+    assert r["is_error"] is False
+    rid = r["result"]["request_id"]
+    assert rid.startswith("cmd_")
+    inbox = tmp_path / "N.E.K.O" / "doubao_bridge" / "inbox"
+    assert (inbox / f"{rid}.json").is_file()
+    data = json.loads((inbox / f"{rid}.json").read_text(encoding="utf-8"))
+    assert data["request_id"] == rid
+    assert "猫娘" in data["instruction"]
+    assert data["from"] == "yui"
+
+
+def test_command_doubao_empty_instruction(monkeypatch) -> None:
+    """v0.9.27：空指令 → NO_INSTRUCTION。"""
+    inst = _make_inst(monkeypatch)
+    r = asyncio.run(inst.bili_yui_command_doubao(instruction=""))
+    assert r["is_error"] is True and r["error"] == "NO_INSTRUCTION"
+
+
+def test_read_doubao_reply_processing(monkeypatch, tmp_path) -> None:
+    """v0.9.27：inbox 有指令、outbox 无回执 → status=processing。"""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    inst = _make_inst(monkeypatch)
+    rid = "cmd_test_1"
+    inbox = tmp_path / "N.E.K.O" / "doubao_bridge" / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    (inbox / f"{rid}.json").write_text('{"request_id":"cmd_test_1"}', encoding="utf-8")
+    r = asyncio.run(inst.bili_yui_read_doubao_reply(request_id=rid))
+    assert r["is_error"] is False and r["result"]["status"] == "processing"
+    assert "还在处理" in r["output"]
+
+
+def test_read_doubao_reply_done(monkeypatch, tmp_path) -> None:
+    """v0.9.27：outbox 有回执 → 返回豆包答复原文。"""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    inst = _make_inst(monkeypatch)
+    rid = "cmd_done_1"
+    outbox = tmp_path / "N.E.K.O" / "doubao_bridge" / "outbox"
+    outbox.mkdir(parents=True, exist_ok=True)
+    payload = {"request_id": rid, "reply": "视频已生成并投稿，稿件标题《猫娘的一天》。", "done_at": "2026-10-23 20:00:00"}
+    (outbox / f"{rid}.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    r = asyncio.run(inst.bili_yui_read_doubao_reply(request_id=rid))
+    assert r["is_error"] is False and r["result"]["status"] == "done"
+    assert "猫娘的一天" in r["output"]
+
+
+def test_read_doubao_reply_bad_request_id(monkeypatch) -> None:
+    """v0.9.27：路径穿越等非法请求号 → BAD_REQUEST_ID。"""
+    inst = _make_inst(monkeypatch)
+    r = asyncio.run(inst.bili_yui_read_doubao_reply(request_id="../../etc/passwd"))
+    assert r["is_error"] is True and r["error"] == "BAD_REQUEST_ID"
+
+
+def test_read_doubao_reply_not_found(monkeypatch, tmp_path) -> None:
+    """v0.9.27：inbox/outbox 都没有 → NOT_FOUND。"""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    inst = _make_inst(monkeypatch)
+    r = asyncio.run(inst.bili_yui_read_doubao_reply(request_id="cmd_ghost_9"))
+    assert r["is_error"] is True and r["error"] == "NOT_FOUND"

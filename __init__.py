@@ -2588,6 +2588,129 @@ class BiliViewerPlugin(NekoPluginBase):
         # 复用 bili_yui_upload 的投稿链路（日限额/互斥/路径安全/失败回退额度全部沿用）
         return await self.bili_yui_upload(file=base, title=title, desc=desc, tags=tags, tid=tid)
 
+    def _doubao_bridge_dir(self) -> str:
+        """豆包指令桥目录：%LOCALAPPDATA%/N.E.K.O/doubao_bridge（inbox=YUI 发指令，outbox=豆包回执）。"""
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home())
+        bridge = os.path.join(base, "N.E.K.O", "doubao_bridge")
+        try:
+            os.makedirs(os.path.join(bridge, "inbox"), exist_ok=True)
+            os.makedirs(os.path.join(bridge, "outbox"), exist_ok=True)
+        except OSError:
+            pass
+        return bridge
+
+    @llm_tool(
+        name="bili_yui_command_doubao",
+        description=(
+            "【指令桥·YUI 命令豆包】把你的一个任务/问题/创作需求交给豆包（本工作台 AI）处理，"
+            "豆包会在数分钟内处理完毕并写好回执。何时用：遇到你（YUI）自己不会做、做不了、"
+            "或需要更强大 AI 能力的事——例如'生成一个关于XX的视频并投稿''帮我想一句XX文案'"
+            "'回答粉丝问的XX问题'等，把任务完整写进 instruction 交给豆包执行（v0.9.27 指令桥）。"
+            "参数 instruction：你希望豆包完成的完整任务描述（必填，写清主题/要求/期望结果，最长 4000 字）。"
+            "返回请求号。稍后调用 bili_yui_read_doubao_reply(request_id=请求号) 获取豆包的处理结果。"
+            "注意：豆包处理需要时间（通常几分钟）；不要用相同内容反复重复下发，"
+            "拿到回执前不要重发同一请求，回执完成后按豆包答复执行即可。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "instruction": {"type": "string", "description": "希望豆包完成的完整任务描述（必填）"},
+            },
+            "required": ["instruction"],
+        },
+        timeout=20.0,
+    )
+    async def bili_yui_command_doubao(self, *, instruction: str = "", **_):
+        params = _.get("parameters") or {}
+        instruction = (instruction or params.get("instruction") or "").strip()
+        if not instruction:
+            return {"output": "请写下要交给豆包的指令内容。", "is_error": True, "error": "NO_INSTRUCTION"}
+        if len(instruction) > 4000:
+            return {"output": "指令太长了（超过 4000 字），请精简后再发。", "is_error": True, "error": "INSTRUCTION_TOO_LONG"}
+        bridge = self._doubao_bridge_dir()
+        inbox = os.path.join(bridge, "inbox")
+        request_id = f"cmd_{int(time.time() * 1000)}"
+        payload = {
+            "request_id": request_id,
+            "instruction": instruction,
+            "from": "yui",
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        path = os.path.join(inbox, f"{request_id}.json")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+        except OSError as exc:
+            return {"output": f"指令送达失败：{exc}", "is_error": True, "error": "BRIDGE_WRITE_FAILED"}
+        _logger.info("yui command doubao: request_id=%s len=%d", request_id, len(instruction))
+        return {
+            "output": (
+                f"已把你的指令送达豆包（请求号 {request_id}）。豆包处理完成后，"
+                f"用 bili_yui_read_doubao_reply(request_id={request_id}) 获取结果。"
+            ),
+            "is_error": False,
+            "result": {"request_id": request_id},
+        }
+
+    @llm_tool(
+        name="bili_yui_read_doubao_reply",
+        description=(
+            "【指令桥·读取豆包回执】读取豆包对某条指令的处理结果。何时用：你之前用 "
+            "bili_yui_command_doubao 向豆包下达过指令，现在要拿结果时（也可每隔几分钟查一次）。"
+            "参数 request_id：当时豆包返回的请求号（必填）。"
+            "结果三种：处理完成（返回豆包的完整答复）、处理中（豆包还没做完，稍后再查）、无此请求（请求号不对或已被清理）。"
+            "拿到完成结果后，按豆包答复内容正常对用户/B站执行即可，严禁把豆包答复说成自己的功劳或编造细节。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "request_id": {"type": "string", "description": "豆包返回的请求号，必填"},
+            },
+            "required": ["request_id"],
+        },
+        timeout=15.0,
+    )
+    async def bili_yui_read_doubao_reply(self, *, request_id: str = "", **_):
+        params = _.get("parameters") or {}
+        request_id = (request_id or params.get("request_id") or "").strip()
+        if not request_id:
+            return {"output": "请提供豆包返回的请求号（request_id）。", "is_error": True, "error": "NO_REQUEST_ID"}
+        # 防路径穿越：只允许安全字符
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", request_id):
+            return {"output": "请求号格式不正确。", "is_error": True, "error": "BAD_REQUEST_ID"}
+        bridge = self._doubao_bridge_dir()
+        outbox = os.path.join(bridge, "outbox")
+        path = os.path.join(outbox, f"{request_id}.json")
+        if not os.path.isfile(path):
+            # 区分"从未下发/已清理"与"仍在处理"：看 inbox 是否还有对应指令文件
+            inbox = os.path.join(bridge, "inbox")
+            if os.path.isfile(os.path.join(inbox, f"{request_id}.json")):
+                return {
+                    "output": f"豆包还在处理你的指令（请求号 {request_id}），请稍后再查。",
+                    "is_error": False,
+                    "result": {"request_id": request_id, "status": "processing"},
+                }
+            return {
+                "output": (
+                    f"没有找到请求号 {request_id} 的回执：要么请求号不对，要么该请求已被清理。"
+                    "请确认你用的是 bili_yui_command_doubao 返回的请求号。"
+                ),
+                "is_error": True,
+                "error": "NOT_FOUND",
+            }
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError) as exc:
+            return {"output": f"读取回执失败：{exc}", "is_error": True, "error": "BRIDGE_READ_FAILED"}
+        reply = data.get("reply", "")
+        done_at = data.get("done_at", "")
+        return {
+            "output": f"豆包处理完成（请求号 {request_id}，完成时间 {done_at}）。答复：\n{reply}",
+            "is_error": False,
+            "result": {"request_id": request_id, "status": "done", "reply": reply},
+        }
+
     @llm_tool(
         name="bili_yui_status",
         description=(

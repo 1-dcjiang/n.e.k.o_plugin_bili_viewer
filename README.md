@@ -198,6 +198,11 @@
 > 私信白名单（owner/粉丝/对方先发/互关，粉丝全放行满足"适用于所有关注她的粉丝"）、私信 payload（嵌套
 > msg[sender_uid]/msg[dev_id] per-install + wbi query）、动态发布/删除双回读、直播弹幕回读、5 秒风控间隔、
 > 弹幕连发任务（danmaku_loop.json）。
+> v0.9.27 YUI 可命令豆包（指令桥）：
+> 新增 bili_yui_command_doubao（把任务/问题/创作需求写入本机指令箱 %LOCALAPPDATA%/N.E.K.O/doubao_bridge/inbox，
+> 返回请求号）与 bili_yui_read_doubao_reply（读取豆包处理回执：处理完成/处理中/无此请求）——
+> 生成视频、写文案、答粉丝提问等强 AI 任务可委托豆包完成；指令最长 4000 字、请求号防路径穿越、
+> 防重复下发、回执内容严禁 YUI 说成自己的功劳或编造细节。
 > v0.9.26 接入视频制作系统（生成→下载→投稿一条链路）：
 > 新增 bili_yui_upload_video_url 工具——接受媒体生成器（media_generator 的 generate_video，豆包 Seedance/可灵）
 > 产出的视频直链或其他可下载视频 URL → 下载到 yui_uploads（限 http/https、2GB 上限、失败删除半成品）→
