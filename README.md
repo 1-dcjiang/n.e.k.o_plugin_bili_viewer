@@ -21,6 +21,17 @@
 | `bili_my_videos` | 自己账号的稿件列表（状态/播放/时长） |
 | `bili_edit_video` | 修改自己稿件的标题/简介/标签（需登录态，写操作） |
 | `bili_live_send_danmaku` | 向直播间发送弹幕（直播时回复观众，需登录态，写操作） |
+| `bili_inbox` | **收件箱**：未读数 + 新的回复/@/赞/系统通知/未读私信一次看完（读取后 B站 自动标已读） |
+| `bili_unread` / `bili_feed_replies` / `bili_feed_mentions` / `bili_feed_likes` / `bili_feed_system` | 未读数 / 评论回复 / @我的 / 收到的赞 / 系统通知 |
+| `bili_dm_list` / `bili_dm_read` / `bili_dm_send` | 私信会话列表 / 读私信（可标记已读）/ 发私信（白名单：主账号、对方先发过、互关；≤500 字；回读验证） |
+| `bili_video_relation` / `bili_video_like` / `bili_video_coin` / `bili_video_fav` / `bili_video_triple` | 我与视频关系 / 点赞 / 投币（每视频≤2、每日≤5）/ 收藏 / 一键三连——全部回读验证防假成功 |
+| `bili_my_favs` | 我的收藏夹列表 |
+| `bili_rank` | 热门榜单：分区榜 / 每周必看 / 入站必刷 |
+| `bili_my_stats` | 创作数据：累计播放/互动/粉丝 + 最近稿件概览 |
+
+> v0.8.0 融合开源项目 bili-cli（github.com/kukemc/bili-cli）精华：收件箱、私信白名单护栏、
+> 表态类操作（点赞/投币/收藏/三连，投币每日 5 币上限）、本地限流 + 审计日志 + B站 错误码分类提示。
+> 纯同步 urllib 实现，不引入 bilibili-api 等重依赖，完全兼容既有架构。
 
 ## 使用示例（对 YUI 说）
 
