@@ -401,11 +401,12 @@ class BiliViewerPlugin(NekoPluginBase):
             return self._yui_daily.get(f"{op}:{day}", 0) < cap
 
     def _unread_tick(self) -> None:
-        """自主查看私信（v0.8.2）：小号未读轮询。
+        """自主查看私信（v0.8.2 + v0.9.0 内容直读）：小号未读轮询。
 
         - 每 _UNREAD_POLL_INTERVAL 秒查一次小号未读数（轻量 x/msgfeed/unread）；
-        - 有未读且距上次注入超过 _UNREAD_INJECT_COOLDOWN 时，静默注入 read 消息，
-          YUI 在下次自然对话中自主查看/回复（bili_inbox / bili_dm_read / bili_dm_send 已就绪）；
+        - 有未读且距上次注入超过 _UNREAD_INJECT_COOLDOWN 时，静默注入 read 消息；
+        - v0.9.0：私信未读时**直接读取最新私信内容注入**（不再只提醒"有未读"让 YUI 自己去调工具），
+          YUI 一眼就能看到对方说了什么、什么时候发的，可直接回复；读取失败时降级为原提醒；
         - 只轮询小号（yui）：主账号是用户的，YUI 不自主处理其私信；
         - 小号未配置/风控/网络失败一律静默跳过（调用方兜底捕获）。
         """
@@ -432,11 +433,23 @@ class BiliViewerPlugin(NekoPluginBase):
             )
             if n
         )
-        text = (
-            f"你的B站小号有 {total} 条未读消息（{detail}），可以自主查看并酌情处理："
-            "先 bili_inbox 看详情，私信用 bili_dm_read 读、bili_dm_send 回复；"
-            "评论/弹幕按既有纪律执行。"
-        )
+        # v0.9.0：私信未读时直接读取内容注入（优先主账号会话，用户私信基本来自主账号）
+        dm_content = ""
+        if int(counts.get("private_messages") or 0) > 0:
+            dm_content = self._read_latest_dm_for_inject("yui")
+        if dm_content:
+            text = (
+                f"你的B站小号收到新私信（{detail}），以下是最新私信内容，请直接阅读并酌情回复：\n"
+                f"{dm_content}\n"
+                f"回复方式：用 bili_dm_send（uid=owner, account=yui, text=你的回复内容）；"
+                f"若需要看更多上下文用 bili_dm_read（uid=owner）。全程静默，不向玩家汇报。"
+            )
+        else:
+            text = (
+                f"你的B站小号有 {total} 条未读消息（{detail}），可以自主查看并酌情处理："
+                "先 bili_inbox 看详情，私信用 bili_dm_read 读、bili_dm_send 回复；"
+                "评论/弹幕按既有纪律执行。"
+            )
         self.ctx.push_message(
             visibility=[],
             ai_behavior="read",
@@ -446,6 +459,51 @@ class BiliViewerPlugin(NekoPluginBase):
             priority=0,
             metadata={"bili_unread": True},
         )
+
+    def _read_latest_dm_for_inject(self, account: str) -> str:
+        """v0.9.0：读取最新私信内容用于自主注入（优先主账号会话，失败返回空串）。
+
+        只读最近 5 条、不标记已读（不影响用户在 B站 网页的未读红点）；
+        格式化输出：「时间」对方/我：内容。
+        """
+        try:
+            owner_uid = str(bili_social._main_uid() or "")
+        except Exception:
+            owner_uid = ""
+        candidates = []
+        if owner_uid:
+            candidates.append(owner_uid)
+        # 兜底：遍历会话列表找最近活跃的（非主账号）
+        try:
+            convs = bili_social.dm_conversations(account, unread_only=False, limit=5)
+            for c in convs:
+                uid = str(c.get("uid") or "")
+                if uid and uid not in candidates:
+                    candidates.append(uid)
+        except Exception:
+            pass
+        for uid in candidates[:3]:  # 最多试 3 个会话
+            try:
+                data = bili_social.dm_messages(account, uid, limit=5, mark_read=False)
+                msgs = data.get("messages") or []
+                if not msgs:
+                    continue
+                lines = []
+                for m in msgs[-5:]:
+                    who = "对方" if m.get("from") == "them" else "我"
+                    lines.append(f"  「{m.get('time','')}」{who}：{str(m.get('text') or '')[:100]}")
+                if lines:
+                    name = ""
+                    try:
+                        uinfo = bili.user_info(int(uid))
+                        name = str(uinfo.get("name") or "")
+                    except Exception:
+                        pass
+                    header = f"与 {name or uid} 的私信（最近 {len(lines)} 条）："
+                    return header + "\n" + "\n".join(lines)
+            except Exception:
+                continue
+        return ""
 
     def _handle_mention(self, mention: dict) -> None:
         """处理直播间弹幕@（v0.2.17 注入 + v0.8.5 自主回复升级）。
@@ -2484,7 +2542,17 @@ class BiliViewerPlugin(NekoPluginBase):
             data = bili_social.dm_messages(account, uid, max(1, min(limit, 30)), bool(mark_read or params.get("mark_read", False)))
         except bili.BiliError as exc:
             return _wrap_err(exc)
-        return {"output": json.dumps(data, ensure_ascii=False), "is_error": False, "result": data}
+        msgs = data.get("messages") or []
+        # v0.9.0：易读文本格式（LLM 友好），不再只返回原始 JSON
+        if not msgs:
+            readable = "（暂无私信记录）"
+        else:
+            lines = []
+            for m in msgs:
+                who = "对方" if m.get("from") == "them" else "我"
+                lines.append(f"[{m.get('time','')}] {who}：{m.get('text','')}")
+            readable = f"与对方的私信（共 {len(msgs)} 条，按时间顺序）：\n" + "\n".join(lines)
+        return {"output": readable, "is_error": False, "result": data}
 
     @llm_tool(
         name="bili_dm_send",
