@@ -1239,3 +1239,48 @@ def test_read_doubao_reply_not_found(monkeypatch, tmp_path) -> None:
     inst = _make_inst(monkeypatch)
     r = asyncio.run(inst.bili_yui_read_doubao_reply(request_id="cmd_ghost_9"))
     assert r["is_error"] is True and r["error"] == "NOT_FOUND"
+
+
+# ══════════ 弹幕指令原文防呆（v0.9.28） ══════════
+
+
+def test_looks_like_danmaku_instruction() -> None:
+    """v0.9.28：指令型文本命中、正常内容不误伤。"""
+    from plugin.plugins.bili_viewer import _looks_like_danmaku_instruction as chk
+
+    assert chk("用弹幕自我介绍一下") is True
+    assert chk("发弹幕说你好") is True
+    assert chk("弹幕：大家好啊") is True
+    assert chk("帮我发条弹幕") is True
+    assert chk("我是YUI小猫娘，很高兴认识大家") is False
+    assert chk("弹幕说得好有趣") is False  # 豁免：感叹不是指令
+    assert chk("") is False
+
+
+def test_live_danmaku_rejects_instruction_text(monkeypatch) -> None:
+    """v0.9.28：直播弹幕收到指令原文 → INSTRUCTION_AS_CONTENT，不发不编。"""
+    inst = _make_inst(monkeypatch)
+    monkeypatch.setattr(inst, "_ext_tab", lambda force=False: None)
+    r = asyncio.run(inst.bili_live_send_danmaku(room="12345", text="用弹幕自我介绍一下", account="yui"))
+    assert r["is_error"] is True and r["error"] == "INSTRUCTION_AS_CONTENT"
+    assert "内容本身" in r["output"]
+
+
+def test_video_danmaku_rejects_instruction_text(monkeypatch) -> None:
+    """v0.9.28：视频弹幕收到指令原文 → INSTRUCTION_AS_CONTENT。"""
+    inst = _make_inst(monkeypatch)
+    monkeypatch.setattr(inst, "_ext_tab", lambda force=False: None)
+    r = asyncio.run(inst.bili_video_send_danmaku(bvid="BV1xx411c7mD", text="发弹幕说你好", account="yui"))
+    assert r["is_error"] is True and r["error"] == "INSTRUCTION_AS_CONTENT"
+
+
+def test_live_danmaku_normal_text_passes_guard(monkeypatch) -> None:
+    """v0.9.28：正常内容不命中指令防呆（继续走后续发送流程）。"""
+    from plugin.plugins.bili_viewer import bili
+
+    inst = _make_inst(monkeypatch)
+    monkeypatch.setattr(inst, "_ext_tab", lambda force=False: None)
+    monkeypatch.setattr(bili, "live_send_danmaku", lambda room, text, account="yui": {"room": room, "text": text})
+    monkeypatch.setattr(inst, "_danmaku_recently_sent", lambda *a, **k: False)
+    r = asyncio.run(inst.bili_live_send_danmaku(room="12345", text="我是YUI小猫娘，很高兴认识大家", account="yui"))
+    assert r["is_error"] is False and "已发送" in r["output"]

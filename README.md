@@ -198,6 +198,13 @@
 > 私信白名单（owner/粉丝/对方先发/互关，粉丝全放行满足"适用于所有关注她的粉丝"）、私信 payload（嵌套
 > msg[sender_uid]/msg[dev_id] per-install + wbi query）、动态发布/删除双回读、直播弹幕回读、5 秒风控间隔、
 > 弹幕连发任务（danmaku_loop.json）。
+> v0.9.28 弹幕指令原文防呆：
+> 用户实证：YUI 收到'用弹幕自我介绍一下'后把整句指令当弹幕文本发进直播间。
+> bili_live_send_danmaku / bili_video_send_danmaku 的 text 参数现做启发式检测
+> （_looks_like_danmaku_instruction）：以'用弹幕/发弹幕/发条弹幕/弹幕说/弹幕：/弹幕回/打弹幕/刷弹幕'等
+> 指令词开头的文本判定为 INSTRUCTION_AS_CONTENT 直接拒绝，并指导 YUI 只发送内容本身
+> （如 text='我是YUI小猫娘，很高兴认识大家'）；'弹幕说得…'感叹豁免不误伤；
+> 两个工具描述均注入'只发内容本身、严禁把指令原文/他人弹幕/系统提示当弹幕'铁律。
 > v0.9.27 YUI 可命令豆包（指令桥）：
 > 新增 bili_yui_command_doubao（把任务/问题/创作需求写入本机指令箱 %LOCALAPPDATA%/N.E.K.O/doubao_bridge/inbox，
 > 返回请求号）与 bili_yui_read_doubao_reply（读取豆包处理回执：处理完成/处理中/无此请求）——

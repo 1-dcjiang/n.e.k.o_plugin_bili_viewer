@@ -113,6 +113,28 @@ _YUI_DYNAMIC_DAILY_MAX = 6               # 每日动态上限
 _YUI_UPLOAD_DAILY_MAX = 2                # 每日投稿上限
 _YUI_UPLOAD_DIR = "yui_uploads"          # 插件目录下，YUI 投稿视频文件放置目录
 
+
+def _looks_like_danmaku_instruction(text: str) -> bool:
+    """启发式防呆（v0.9.28）：弹幕 text 参数是否其实是'指令原文'而非'要发送的内容'。
+
+    用户实证：YUI 收到'用弹幕自我介绍一下'后把整句指令当弹幕文本发进直播间。
+    仅当指令词出现在文本开头（前 8 字符）才判定，避免误伤内容中自然提及弹幕的正常弹幕。
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    head = t[:8]
+    # 豁免：'弹幕说得…'是正常感叹不是指令（如'弹幕说得好有趣'）
+    if t.startswith("弹幕说得"):
+        return False
+    hints = (
+        "用弹幕", "发弹幕", "发条弹幕", "发个弹幕", "弹幕说", "弹幕：", "弹幕:",
+        "弹幕回", "打弹幕", "刷弹幕", "弹幕里", "发弹幕说", "帮我发弹幕",
+        "帮我发条弹幕", "请发弹幕", "用弹幕回复", "弹幕打",
+    )
+    return any(head.startswith(h) for h in hints)
+
+
 # 插件配置段与 Cookie 配置键
 _CONFIG_SECTION = "settings"
 _CONFIG_COOKIE_KEY = "bili_cookie"
@@ -1835,6 +1857,10 @@ class BiliViewerPlugin(NekoPluginBase):
         name="bili_live_send_danmaku",
         description=(
             "【弹幕≠评论铁律】弹幕=直播画面飘字（本工具）；直播评论区评论走 bili_reply_comment（type=11）。"
+            "【内容铁律·v0.9.28】text 必须是你自己组织好的内容本身（如'我是YUI小猫娘，大家好'）；"
+            "严禁把用户指令原文（如'用弹幕自我介绍一下'）、他人弹幕原文、系统提示或任务描述当弹幕文本发送——"
+            "收到'用弹幕做XX/发弹幕说XX'类指令时，只发送 XX 的结果内容本身，不发送指令句。"
+            "插件会拒绝'指令型'弹幕文本（INSTRUCTION_AS_CONTENT），被拒后重新组织内容再发，严禁原样重发。"
             "用户说'发弹幕/弹幕说XX'时只能调用本工具，严禁调 bili_reply_comment；用户说'评论/写评论'时改用 bili_reply_comment。二者严禁混用。"
             "【真实发送铁律·最高优先】'弹幕已发送。'只能出现在你实际调用本工具且收到成功结果（is_error=False）之后；"
             "绝不允许在未调用工具、调用失败或没有房间号时声称已发送或编造发送成功——"
@@ -1896,6 +1922,18 @@ class BiliViewerPlugin(NekoPluginBase):
         if not text:
             self._record_send_result("live", False, "EMPTY_MSG", "弹幕内容为空", room)
             return {"output": "请提供要发送的弹幕内容。", "is_error": True, "error": "EMPTY_MSG"}
+        if _looks_like_danmaku_instruction(text):
+            # v0.9.28 防呆：LLM 把'用弹幕自我介绍一下'这类指令原文整句当弹幕文本发送
+            self._record_send_result("live", False, "INSTRUCTION_AS_CONTENT", "弹幕文本疑似指令原文", room)
+            return {
+                "output": (
+                    "弹幕内容看起来是'指令原文'而不是'要发送的内容'——例如把'用弹幕自我介绍一下'"
+                    "整句当成了弹幕文本。请只发送你自己组织好的内容本身，"
+                    "比如 text='我是YUI小猫娘，很高兴认识大家'，而不是把'用弹幕…'这句指令发出去。"
+                ),
+                "is_error": True,
+                "error": "INSTRUCTION_AS_CONTENT",
+            }
         if account == "yui":
             # 原子占用（v0.7.8）：并发双发防护；后续失败/去重命中必须回退
             # v0.9.12：直播节流对齐 B站 实际风控 5 秒（用户实测反馈 60 秒过严）
@@ -2048,6 +2086,10 @@ class BiliViewerPlugin(NekoPluginBase):
         name="bili_video_send_danmaku",
         description=(
             "【弹幕≠评论铁律】弹幕=视频播放时画面中飘过的文字（本工具投到视频时间轴）；评论=视频下方评论区（走 bili_reply_comment）。"
+            "【内容铁律·v0.9.28】text 必须是你自己组织好的内容本身；"
+            "严禁把用户指令原文（如'用弹幕自我介绍一下'）、他人弹幕原文、系统提示或任务描述当弹幕文本发送——"
+            "收到'用弹幕做XX/发弹幕说XX'类指令时，只发送 XX 的结果内容本身，不发送指令句。"
+            "插件会拒绝'指令型'弹幕文本（INSTRUCTION_AS_CONTENT），被拒后重新组织内容再发，严禁原样重发。"
             "用户说'发弹幕/弹幕说XX/发条弹幕/弹幕XX'时只能调用本工具，严禁调 bili_reply_comment；用户说'评论/写评论/评论区说'时改用 bili_reply_comment。二者严禁混用。"
             "【真实发送铁律·最高优先】'弹幕已发送。'只能出现在你实际调用本工具且收到成功结果（is_error=False）之后；"
             "绝不允许在未调用工具、调用失败或没有目标编号时声称已发送或编造发送成功——"
@@ -2105,6 +2147,17 @@ class BiliViewerPlugin(NekoPluginBase):
         if not text:
             self._record_send_result("video", False, "EMPTY_MSG", "弹幕内容为空", bvid)
             return {"output": "请提供要发送的弹幕内容。", "is_error": True, "error": "EMPTY_MSG"}
+        if _looks_like_danmaku_instruction(text):
+            # v0.9.28 防呆：LLM 把指令原文整句当弹幕文本发送
+            self._record_send_result("video", False, "INSTRUCTION_AS_CONTENT", "弹幕文本疑似指令原文", bvid)
+            return {
+                "output": (
+                    "弹幕内容看起来是'指令原文'而不是'要发送的内容'——请只发送你自己组织好的内容本身，"
+                    "不要发送'用弹幕/发弹幕…'这类指令句。"
+                ),
+                "is_error": True,
+                "error": "INSTRUCTION_AS_CONTENT",
+            }
         if account == "yui":
             # 原子占用（v0.7.8）：并发双发防护；后续失败/去重命中必须回退
             if not self._yui_rate_reserve("danmaku", f"video:{bvid}", _YUI_DANMAKU_WINDOW):
