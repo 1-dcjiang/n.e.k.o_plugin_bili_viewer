@@ -367,7 +367,7 @@ def test_live_send_danmaku_uses_msg_send(monkeypatch) -> None:
     def _fake_post(url, form, timeout=12.0, account="main"):
         assert url.endswith("/msg/send")
         posted.update(url=url, form=form, account=account)
-        return {"code": 0, "message": "0"}
+        return {"code": 0, "message": "0", "data": {"dmid": "99999"}}
 
     monkeypatch.setattr(bili, "_http_post", _fake_post)
     try:

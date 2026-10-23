@@ -110,6 +110,9 @@
 > (2) `_reply_visible` 加 account 参数，回读评论用发评论的账号 cookie；
 > (3) `send_video_danmaku` 里 `video_info` 传 account；(4) `edit_video` 里 `video_info` 传 account。
 > 同步更新 8 个测试 mock 函数签名。
+> v0.9.7 再次复查：修复直播弹幕假成功——`live_send_danmaku` 缺少 dmid 验证（与 `send_video_danmaku` 不一致），
+> 接口返回 code=0 但不返回 dmid 时仍返回 ok=True（假成功）。修复：dmid 为空时抛 `DANMAKU_UNVERIFIED`，
+> 错误消息与 `send_video_danmaku` 一致。同步更新测试 mock 返回加上 dmid。
 
 ## 使用示例（对 YUI 说）
 
