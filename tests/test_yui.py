@@ -374,7 +374,7 @@ def test_reply_comment_no_target(monkeypatch) -> None:
     monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
     inst = _make_inst(monkeypatch)
     # 无 target 且感知不到内容
-    monkeypatch.setattr(inst, "_ext_tab", lambda: None)
+    monkeypatch.setattr(inst, "_ext_tab", lambda **kw: None)
     out = asyncio.run(inst.bili_reply_comment(text="评论", account="yui"))
     assert out.get("error") == "NO_TARGET"
 

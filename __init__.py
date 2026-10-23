@@ -1195,7 +1195,7 @@ class BiliViewerPlugin(NekoPluginBase):
             _domd = getattr(self, "_ext_dom_data", None)
             _candidates = [str(_domd.get("url") or "") if isinstance(_domd, dict) else ""]
             try:
-                _tab = self._ext_tab()
+                _tab = self._ext_tab(force=True)  # v0.9.20：每次询问强制重新检测
                 if _tab:
                     _candidates.append(str(_tab.get("url") or ""))
             except Exception:
@@ -1439,6 +1439,8 @@ class BiliViewerPlugin(NekoPluginBase):
         description=(
             "感知用户当前正在看/用的内容（读取前台窗口标题与进程，通用感知，不限于 B站）。何时用：用户说"
             "'我现在在看XX/我切视频了/跟着我看/看看我现在在干嘛/我正开着什么'时。"
+            "【v0.9.20 每次询问自动重新检测】每次调用本工具都会强制重新检测当前浏览器页面并实时查询接口，"
+            "不依赖任何历史缓存——用户每次询问都能得到最新状态，严禁拿旧结果复述。"
             "返回 app（进程）、window（窗口标题）、site（站点：bilibili/zhihu/weibo/youtube/steam 等）、"
             "subject（页面/窗口主题）、kind（video/live/web/app）；若在 B站视频/直播页会自动匹配视频详情"
             "（标题/UP主/播放/弹幕/BV号/简介）。注意：BV号/房间号等编号仅供发弹幕/查详情等内部操作使用，"
@@ -1453,7 +1455,8 @@ class BiliViewerPlugin(NekoPluginBase):
     )
     async def bili_now_watching(self, **_):
         try:
-            tab = self._ext_tab()
+            # v0.9.20：每次调用强制重新检测当前浏览器页面（实时查询接口，不依赖缓存）
+            tab = self._ext_tab(force=True)
             info = bili.now_watching(tab=tab)
         except bili.BiliError as exc:
             return _wrap_err(exc)
@@ -1731,6 +1734,8 @@ class BiliViewerPlugin(NekoPluginBase):
         name="bili_see_video",
         description=(
             "获取当前视频实况：标题/UP主/时长/分区 + 近期弹幕 + CC字幕开头。"
+            "【v0.9.20 每次询问自动重新检测】每次调用本工具都会强制重新检测当前浏览器页面并实时查询接口，"
+            "不依赖任何历史缓存——用户每次询问都能得到最新视频状态，严禁拿旧结果复述。"
             "何时用：用户问'你看得到这个视频吗''视频在讲什么'，"
             "或 YUI 需要理解视频内容后回复用户时。参数 bvid：BV号（可省略，省略时自动感知当前正在看的视频）。"
             "回复纪律：只陈述实况本身（标题/UP主/进度/近期弹幕），"
@@ -1755,7 +1760,8 @@ class BiliViewerPlugin(NekoPluginBase):
         dom = self._ext_dom()
         dom_video = dom if (dom and dom.get("kind") == "video") else None
         if not bvid:
-            tab = self._ext_tab()
+            # v0.9.20：每次调用强制重新检测当前视频页（实时查询接口）
+            tab = self._ext_tab(force=True)
             if tab:
                 parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
                 if isinstance(parsed, dict) and parsed.get("kind") == "video" and parsed.get("bvid"):
@@ -1833,7 +1839,7 @@ class BiliViewerPlugin(NekoPluginBase):
         room = (room or params.get("room") or "").strip()
         text = (text or params.get("text") or "").strip()
         account = self._resolve_account(account or params.get("account") or "")
-        tab = self._ext_tab()
+        tab = self._ext_tab(force=True)  # v0.9.20：每次询问强制重新检测当前页面
         page_room = None
         if tab:
             parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
@@ -2050,8 +2056,8 @@ class BiliViewerPlugin(NekoPluginBase):
             progress = 0
         progress = max(0, progress)
         if not bvid:
-            # 兜底：LLM 直接函数调用未给 bvid 时，感知当前正在看的视频自动补齐
-            tab = self._ext_tab()
+            # 兜底：LLM 直接函数调用未给 bvid 时，感知当前正在看的视频自动补齐（v0.9.20：每次询问强制重新检测）
+            tab = self._ext_tab(force=True)
             if tab:
                 parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
                 if isinstance(parsed, dict) and parsed.get("kind") == "video" and parsed.get("bvid"):
@@ -2155,7 +2161,7 @@ class BiliViewerPlugin(NekoPluginBase):
             elif isinstance(parsed, dict) and parsed.get("kind") == "live" and parsed.get("room_id"):
                 oid, type_id = int(parsed["room_id"]), 11
         if oid is None:
-            tab = self._ext_tab()
+            tab = self._ext_tab(force=True)  # v0.9.20：每次询问强制重新检测目标页面
             if tab:
                 parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
                 if isinstance(parsed, dict) and parsed.get("kind") == "video" and parsed.get("bvid"):
@@ -3384,7 +3390,7 @@ class BiliViewerPlugin(NekoPluginBase):
         if action == "query":
             # v0.9.1：query 只做当前页面感知（用户正在看什么），不做私信/收件箱查询
             # 私信查询必须走 bili_dm_read / bili_dm_list / bili_inbox 专用工具
-            tab = self._ext_tab()
+            tab = self._ext_tab(force=True)  # v0.9.20：每次询问强制重新检测
             if tab:
                 parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
                 if isinstance(parsed, dict):
@@ -3424,7 +3430,7 @@ class BiliViewerPlugin(NekoPluginBase):
             return await self.bili_live_send_danmaku(room=room, text=text, account=account)
         # 兜底②：感知当前正在看的视频/直播 → 有弹幕内容时自动发送
         # （parse_bili_url 键名为 kind/room_id/bvid，无 'type' 键，v0.6.23 KeyError 教训）
-        tab = self._ext_tab()
+        tab = self._ext_tab(force=True)  # v0.9.20：每次询问强制重新检测
         if tab:
             parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
             if isinstance(parsed, dict):
@@ -3494,7 +3500,7 @@ class BiliViewerPlugin(NekoPluginBase):
             return await self.bili_live_send_danmaku(room=room, text=text, account=account)
         # 感知兜底（v0.7.49）：未给编号但有内容时，自动感知当前正在看的视频/直播
         if text:
-            tab = self._ext_tab()
+            tab = self._ext_tab(force=True)  # v0.9.20：每次询问强制重新检测
             if tab:
                 parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
                 if isinstance(parsed, dict) and parsed.get("kind") == "video" and parsed.get("bvid"):
@@ -4008,7 +4014,7 @@ class BiliViewerPlugin(NekoPluginBase):
             return None
         return asr
 
-    def _ext_tab(self) -> dict | None:
+    def _ext_tab(self, force: bool = False) -> dict | None:
         """返回当前"页面定位"：扩展标签页（120s 新鲜）优先，弹幕 WS 房间兜底/纠偏。
 
         v0.8.6 定位纠偏（修复"直播间定位错误"）：弹幕 WS 流绑定的房间号=页面真实
@@ -4019,6 +4025,10 @@ class BiliViewerPlugin(NekoPluginBase):
           2) 标签页新鲜且解析为直播房间、弹幕房间新鲜且不一致 → 以弹幕房间为准
              （标签页事件可能陈旧）；
           3) 其余情况维持原逻辑（source 过滤 + 新鲜窗口）。
+
+        v0.9.20 force：感知工具每次询问强制重新检测——扩展 pushTab 每 30s 自动推送一次，
+        标签页数据天然新鲜；force=True 时放宽 at 过期窗口（数据存在即使用，防短暂失联/
+        事件丢失导致感知失败），弹幕 WS 房间仍优先纠偏，接口信息由调用方每次实时查询。
         """
         now = time.time()
         tab = getattr(self, "_ext_tab_data", None)
@@ -4037,7 +4047,9 @@ class BiliViewerPlugin(NekoPluginBase):
             if tab_room and tab_room != dm_room:
                 _logger.info("ext tab room %s overridden by danmaku ws room %s (tab event stale)", tab_room, dm_room)
                 return {"url": f"https://live.bilibili.com/{dm_room}", "title": "直播", "source": "danmaku-ws", "at": now}
-        if not tab_fresh:
+        if not isinstance(tab, dict):
+            return None
+        if not tab_fresh and not force:
             return None
         src = getattr(self, "_ext_source", "") or ""
         tab_src = str(tab.get("source") or "")

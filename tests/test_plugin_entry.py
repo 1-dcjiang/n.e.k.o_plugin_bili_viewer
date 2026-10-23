@@ -159,7 +159,7 @@ def test_entry_run_fallback_no_action_with_bvid() -> None:
         return {"output": f"ok {bvid}", "is_error": False}
 
     plugin.bili_video_send_danmaku = fake_video
-    plugin._ext_tab = lambda: None
+    plugin._ext_tab = lambda **kw: None
 
     result = asyncio.run(plugin.entry_run(bvid="BV1yy", text="mft"))
     assert calls == [("video", "BV1yy", "mft", 0)]
@@ -178,7 +178,7 @@ def test_entry_run_fallback_senses_current_video() -> None:
         return {"output": f"ok {bvid}", "is_error": False}
 
     plugin.bili_video_send_danmaku = fake_video
-    plugin._ext_tab = lambda: {
+    plugin._ext_tab = lambda **kw: {
         "url": "https://www.bilibili.com/video/BV1cur",
         "title": "当前视频标题",
         "at": 9999999999.0,
@@ -201,7 +201,7 @@ def test_entry_run_fallback_senses_current_live() -> None:
         return {"output": f"ok {room}", "is_error": False}
 
     plugin.bili_live_send_danmaku = fake_live
-    plugin._ext_tab = lambda: {
+    plugin._ext_tab = lambda **kw: {
         "url": "https://live.bilibili.com/88888",
         "title": "直播间",
         "at": 9999999999.0,
@@ -217,7 +217,7 @@ def test_entry_run_fallback_no_target_no_crash() -> None:
     import asyncio
 
     plugin = object.__new__(_plugin_cls())
-    plugin._ext_tab = lambda: None
+    plugin._ext_tab = lambda **kw: None
 
     result = asyncio.run(plugin.entry_run(text="mft"))
     assert result["is_error"] is True
@@ -239,7 +239,7 @@ def test_llm_tool_video_send_senses_current_video() -> None:
 
     orig = bili.send_video_danmaku
     bili.send_video_danmaku = fake_send
-    plugin._ext_tab = lambda: {
+    plugin._ext_tab = lambda **kw: {
         "url": "https://www.bilibili.com/video/BV1llm",
         "title": "Kards 视频",
         "at": 9999999999.0,
@@ -257,7 +257,7 @@ def test_llm_tool_video_send_no_sense_keeps_error() -> None:
     import asyncio
 
     plugin = object.__new__(_plugin_cls())
-    plugin._ext_tab = lambda: None
+    plugin._ext_tab = lambda **kw: None
 
     result = asyncio.run(plugin.bili_video_send_danmaku(text="mft"))
     assert result["is_error"] is True
@@ -279,7 +279,7 @@ def test_llm_tool_live_send_senses_current_live() -> None:
 
     orig = bili.live_send_danmaku
     bili.live_send_danmaku = fake_send
-    plugin._ext_tab = lambda: {
+    plugin._ext_tab = lambda **kw: {
         "url": "https://live.bilibili.com/66666",
         "title": "直播间",
         "at": 9999999999.0,
@@ -297,7 +297,7 @@ def test_llm_tool_live_send_no_sense_keeps_error() -> None:
     import asyncio
 
     plugin = object.__new__(_plugin_cls())
-    plugin._ext_tab = lambda: None
+    plugin._ext_tab = lambda **kw: None
 
     result = asyncio.run(plugin.bili_live_send_danmaku(text="mft"))
     assert result["is_error"] is True
@@ -317,7 +317,7 @@ def test_send_result_recorded_on_success() -> None:
         return {"ok": True, "bvid": bvid, "cid": 1, "text": text, "progress_ms": progress_ms, "server": ""}
 
     bili.send_video_danmaku = fake_send
-    plugin._ext_tab = lambda: None
+    plugin._ext_tab = lambda **kw: None
     try:
         result = asyncio.run(plugin.bili_video_send_danmaku(bvid="BV1ok", text="hi"))
     finally:
@@ -334,7 +334,7 @@ def test_send_result_recorded_on_no_bvid() -> None:
     import asyncio
 
     plugin = object.__new__(_plugin_cls())
-    plugin._ext_tab = lambda: None
+    plugin._ext_tab = lambda **kw: None
 
     result = asyncio.run(plugin.bili_video_send_danmaku(text="mft"))
     assert result["error"] == "NO_BVID"

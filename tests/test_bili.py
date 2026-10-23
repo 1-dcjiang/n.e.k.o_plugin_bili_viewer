@@ -968,6 +968,21 @@ def test_ext_tab_expires_after_window(monkeypatch) -> None:
     assert inst._ext_tab() is None
 
 
+def test_ext_tab_force_bypasses_window(monkeypatch) -> None:
+    """v0.9.20：force=True 时每次询问强制重新检测——标签页数据即使超过新鲜窗口仍使用。"""
+    import time as _t
+
+    from plugin.plugins.bili_viewer import BiliViewerPlugin
+
+    monkeypatch.delenv("BILLI_SYNC_DISABLE", raising=False)
+    inst = BiliViewerPlugin(ctx=None)
+    inst._receive_ext_tab("https://www.bilibili.com/video/BV1GJ411x7h7", "测试", int(_t.time()) - 200)
+    assert inst._ext_tab() is None          # 默认：过期丢弃
+    tab = inst._ext_tab(force=True)          # 感知工具：强制重新检测
+    assert tab is not None
+    assert tab["url"].endswith("BV1GJ411x7h7")
+
+
 def test_watcher_not_started_when_disabled(monkeypatch) -> None:
     from plugin.plugins.bili_viewer import BiliViewerPlugin
 
@@ -1208,7 +1223,7 @@ def test_live_send_danmaku_dedup_once(monkeypatch) -> None:
     monkeypatch.setattr(bili, "live_send_danmaku", lambda room, text, account="main": (sent.append((room, text)), {"dmid": "D1", "server": "ok"})[1])
     monkeypatch.delenv("BILLI_SYNC_DISABLE", raising=False)
     inst = object.__new__(BiliViewerPlugin)
-    inst._ext_tab = lambda: None
+    inst._ext_tab = lambda **kw: None
 
     r1 = asyncio.run(inst.bili_live_send_danmaku(room="1025219", text="主播好帅"))
     assert r1["is_error"] is False and r1["output"] == "弹幕已发送。"
@@ -1233,7 +1248,7 @@ def test_live_send_danmaku_dedup_expires(monkeypatch) -> None:
     monkeypatch.setattr(bili, "live_send_danmaku", lambda room, text, account="main": (sent.append((room, text)), {"dmid": "D1", "server": "ok"})[1])
     monkeypatch.delenv("BILLI_SYNC_DISABLE", raising=False)
     inst = object.__new__(BiliViewerPlugin)
-    inst._ext_tab = lambda: None
+    inst._ext_tab = lambda **kw: None
 
     asyncio.run(inst.bili_live_send_danmaku(room="1025219", text="过期测试"))
     inst._danmaku_sent.clear()  # 模拟窗口已过（property 只读，clear 内部 dict 即可）
@@ -1256,7 +1271,7 @@ def test_video_send_danmaku_dedup_once(monkeypatch) -> None:
     )
     monkeypatch.delenv("BILLI_SYNC_DISABLE", raising=False)
     inst = object.__new__(BiliViewerPlugin)
-    inst._ext_tab = lambda: None
+    inst._ext_tab = lambda **kw: None
 
     r1 = asyncio.run(inst.bili_video_send_danmaku(bvid="BV1GJ411x7h7", text="镇站之宝", progress=5))
     assert r1["is_error"] is False
