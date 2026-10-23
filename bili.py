@@ -1929,7 +1929,10 @@ def _reply_visible(oid: int, type_id: int, uid: str, text: str, tries: int = 2) 
 def post_dynamic(text: str, account: str = "yui") -> dict:
     """用指定账号发一条文字动态。需小号 Cookie（含 bili_jct）。
 
-    现行接口 POST /x/dynamic/web/create/v1/dyn（JSON body + csrf + wbi query）。
+    v0.8.8 接口修复：原 /x/dynamic/web/create/v1/dyn 已被 B站 下线（HTTP 404），
+    改用旧版稳定接口 POST api.vc.bilibili.com/dynamic_svr/v1/dynamic_svr/create
+    （body: type=4, content=JSON字符串, from=create.client.web, api=req），
+    返回 dynamic_id 供删除/回读验证。
     """
     _require_login(account)
     text = (text or "").strip()
@@ -1940,31 +1943,45 @@ def post_dynamic(text: str, account: str = "yui") -> dict:
     csrf = _csrf(account)
     if not csrf:
         raise BiliError("Cookie 缺少 bili_jct（CSRF token），无法发布动态", "NO_CSRF")
-    try:
-        up_uid = my_info(account)["mid"]
-    except BiliError as exc:
-        raise BiliError("动态发布失败：无法读取小号信息：" + exc.message, "NO_UID") from exc
     body = {
-        "dynamic_id": 0,
         "type": 4,
-        "rid": 0,
-        "content": {"content": text},
-        "up_uid": int(up_uid),
-        "at_uids": "",
-        "ctrl": "[]",
+        "content": json.dumps({"content": text}, ensure_ascii=False),
+        "from": "create.client.web",
+        "api": "req",
     }
-    # 复查修复（v0.7.3）：动态发布接口现行要求 wbi 签名 query（wts+w_rid），
-    # 缺失会报 -403/-352；游客密钥即可签名，失败时保持裸请求兜底。
-    query = {"platform": "web", "csrf": csrf}
     try:
-        query = _wbi_sign(query, _get_mixin_key())
-    except BiliError:
-        pass
-    try:
-        _http_post_json(_API + "/x/dynamic/web/create/v1/dyn", body, csrf, account=account, query=query)
+        resp = _http_post_json(
+            "https://api.vc.bilibili.com/dynamic_svr/v1/dynamic_svr/create",
+            body, csrf, account=account,
+        )
     except BiliError as exc:
         raise BiliError("动态发布失败：" + exc.message, "DYN_FAILED:" + exc.code) from exc
-    return {"ok": True, "text": text[:100]}
+    data = resp.get("data") or {}
+    dyn_id = str(data.get("dynamic_id_str") or data.get("dynamic_id") or "")
+    return {"ok": True, "text": text[:100], "dynamic_id": dyn_id}
+
+
+def delete_dynamic(dynamic_id, account: str = "yui") -> dict:
+    """删除指定动态（v0.8.8 新增，供发布后回读验证/误发撤回）。
+
+    接口 POST api.vc.bilibili.com/dynamic_svr/v1/dynamic_svr/rm_dynamic。
+    """
+    _require_login(account)
+    csrf = _csrf(account)
+    if not csrf:
+        raise BiliError("Cookie 缺少 bili_jct", "NO_CSRF")
+    try:
+        did = int(dynamic_id)
+    except (TypeError, ValueError):
+        raise BiliError("dynamic_id 必须是数字", "BAD_ID")
+    try:
+        _http_post_json(
+            "https://api.vc.bilibili.com/dynamic_svr/v1/dynamic_svr/rm_dynamic",
+            {"dynamic_id": did}, csrf, account=account,
+        )
+    except BiliError as exc:
+        raise BiliError("动态删除失败：" + exc.message, "DYN_DEL_FAILED:" + exc.code) from exc
+    return {"ok": True, "dynamic_id": str(did)}
 
 
 def _safe_multipart_name(name: str) -> str:

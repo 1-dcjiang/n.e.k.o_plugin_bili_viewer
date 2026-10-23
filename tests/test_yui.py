@@ -571,31 +571,51 @@ def test_bili_post_dynamic_requires_login(monkeypatch) -> None:
         assert exc.code == "NEED_LOGIN"
 
 
-def test_bili_post_dynamic_wbi_signed_query(monkeypatch) -> None:
-    """v0.7.3 复查修复：动态发布必须带 wbi 签名 query（wts+w_rid），否则 B站 -403/-352。"""
+def test_bili_post_dynamic_vc_stable_endpoint(monkeypatch) -> None:
+    """v0.8.8 接口修复：原 /x/dynamic/web/create/v1/dyn 已 404，改用旧版稳定接口
+    api.vc.bilibili.com/dynamic_svr/v1/dynamic_svr/create（content 为 JSON 字符串）。"""
+    import json as _json
+
     from plugin.plugins.bili_viewer import bili
 
     monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
-    calls: list[tuple[str, dict, str]] = []
+    calls: list[tuple[str, dict]] = []
 
     def fake_post_json(url, body, csrf, account="yui", timeout=12.0, query=None):
-        calls.append((url, dict(body or {}), dict(query or {})))
+        calls.append((url, dict(body or {})))
+        return {"code": 0, "data": {"dynamic_id": 1262306092504842241, "dynamic_id_str": "1262306092504842241"}}
+
+    monkeypatch.setattr(bili, "_http_post_json", fake_post_json)
+    r = bili.post_dynamic("测试动态", account="yui")
+    assert r["ok"] is True
+    assert r["dynamic_id"] == "1262306092504842241"
+    assert len(calls) == 1
+    url, body = calls[0]
+    assert "api.vc.bilibili.com/dynamic_svr/v1/dynamic_svr/create" in url
+    assert body["type"] == 4
+    assert body["from"] == "create.client.web"
+    # content 必须是 JSON 字符串（旧接口格式）
+    assert _json.loads(body["content"])["content"] == "测试动态"
+
+
+def test_bili_delete_dynamic(monkeypatch) -> None:
+    """v0.8.8 新增：删除动态走 rm_dynamic 接口。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    calls: list[tuple[str, dict]] = []
+
+    def fake_post_json(url, body, csrf, account="yui", timeout=12.0, query=None):
+        calls.append((url, dict(body or {})))
         return {"code": 0, "data": {}}
 
     monkeypatch.setattr(bili, "_http_post_json", fake_post_json)
-    monkeypatch.setattr(bili, "my_info", lambda account="main": {"mid": 123456})
-    monkeypatch.setattr(bili, "_get_mixin_key", lambda: "m" * 32)
-    r = bili.post_dynamic("测试动态", account="yui")
+    r = bili.delete_dynamic(1262306092504842241, account="yui")
     assert r["ok"] is True
     assert len(calls) == 1
-    url, body, query_dict = calls[0]
-    assert "/x/dynamic/web/create/v1/dyn" in url
-    assert body["content"]["content"] == "测试动态"
-    assert body["up_uid"] == 123456
-    # query 必须含 csrf 与 wbi 签名结果
-    assert query_dict.get("csrf") == "yj"
-    assert "wts" in query_dict
-    assert "w_rid" in query_dict
+    url, body = calls[0]
+    assert "dynamic_svr/rm_dynamic" in url
+    assert body["dynamic_id"] == 1262306092504842241
 
 
 def test_bili_safe_multipart_name(monkeypatch) -> None:

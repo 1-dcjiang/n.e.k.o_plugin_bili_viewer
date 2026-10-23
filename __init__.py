@@ -2018,11 +2018,13 @@ class BiliViewerPlugin(NekoPluginBase):
         if not self._yui_daily_reserve("dynamic"):
             return {"output": "今天动态已发满 6 条，明天再继续。", "is_error": True, "error": "RATE_LIMITED"}
         try:
-            bili.post_dynamic(text, account="yui")
+            result = bili.post_dynamic(text, account="yui")
         except bili.BiliError as exc:
             self._yui_daily_release("dynamic")
+            _logger.warning("yui dynamic post failed: code=%s msg=%s text_len=%d", exc.code, exc.message, len(text))
             return self._wrap_auth(exc, "发布动态")
-        return {"output": "动态已发布。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": {"ok": True}}
+        _logger.info("yui dynamic posted: dynamic_id=%s text_len=%d", result.get("dynamic_id", ""), len(text))
+        return {"output": "动态已发布。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": result}
 
     @llm_tool(
         name="bili_yui_upload",

@@ -53,6 +53,11 @@
 > 停留会过期，过期后感知回退窗口标题搜索（标题无房间号，按主播名搜索可能定位到该主播
 > 的旧房间/同名直播间）。现在：标签页过期时用弹幕房间兜底，标签页直播房间与弹幕房间
 > 冲突时以弹幕房间为准；tab 接收也补了本地诊断日志（仅 URL/标题，无 cookie）。
+> v0.8.8 动态发布接口修复（修复"怎么发布失败了"）：原 `/x/dynamic/web/create/v1/dyn`
+> 已被 B站 下线（HTTP 404），改用旧版稳定接口 `api.vc.bilibili.com/dynamic_svr/v1/dynamic_svr/create`
+> （body: type=4, content=JSON字符串, from=create.client.web, api=req），返回 dynamic_id；
+> 新增 `delete_dynamic()`（rm_dynamic 接口，供误发撤回/回读验证）；工具层补错误码日志，
+> 以后动态失败可直接查日志对线。实测：cookie 有效、wbi 正常、旧接口发+删均 code=0。
 
 ## 使用示例（对 YUI 说）
 
