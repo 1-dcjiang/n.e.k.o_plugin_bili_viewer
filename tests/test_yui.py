@@ -608,6 +608,39 @@ def test_bili_safe_multipart_name(monkeypatch) -> None:
     assert bili._safe_multipart_name("ok.mp4") == "ok.mp4"
 
 
+# ══════════ 自主查看私信（v0.8.2） ══════════
+
+
+def test_unread_tick_push_and_cooldown(monkeypatch) -> None:
+    """自主查私信：有未读且冷却已过时静默注入；无未读/冷却内不注入。"""
+    from plugin.plugins.bili_viewer import BiliViewerPlugin, bili_social
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    fake_ctx = _FakeCtx()
+    inst = BiliViewerPlugin(ctx=fake_ctx)
+    fake_counts = {
+        "replies": 1, "mentions": 0, "likes": 0, "private_messages": 2, "system": 1,
+    }
+    monkeypatch.setattr(bili_social, "unread_counts", lambda account="yui": fake_counts)
+    # 有未读 → 注入
+    inst._unread_tick()
+    assert len(fake_ctx.pushed) == 1
+    kw = fake_ctx.pushed[0]
+    assert kw.get("ai_behavior") == "read"
+    assert kw.get("visibility") == []
+    assert kw.get("coalesce_key") == "bili_unread_sync"
+    assert "私信2" in kw["parts"][0]["text"]
+    assert "4 条未读" in kw["parts"][0]["text"]
+    # 冷却期内不重复注入
+    inst._unread_tick()
+    assert len(fake_ctx.pushed) == 1
+    # 无未读 → 不注入
+    monkeypatch.setattr(bili_social, "unread_counts", lambda account="yui": {"replies": 0, "mentions": 0, "likes": 0, "private_messages": 0, "system": 0})
+    inst._unread_inject_ts = 0.0
+    inst._unread_tick()
+    assert len(fake_ctx.pushed) == 1
+
+
 def test_yui_cookie_file_mtime_cache(monkeypatch, tmp_path) -> None:
     """v0.7.3 优化：小号 Cookie 文件 mtime 缓存，内容未变不重复读盘。"""
     from plugin.plugins.bili_viewer import bili

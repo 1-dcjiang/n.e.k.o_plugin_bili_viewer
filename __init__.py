@@ -70,6 +70,10 @@ _SYNC_MIN_INTERVAL = 15.0  # 两次推送的最小间隔（秒），避免频繁
 _SYNC_DISABLE_ENV = "BILLI_SYNC_DISABLE"
 _BROWSER_MONITOR_EVERY = 24  # 浏览器接入监控刷新频率：约每 24 次轮询（≈60s）一次
 
+# 自主查看私信（v0.8.2）：低频轮询小号未读 + 注入冷却，防止刷屏打扰
+_UNREAD_POLL_INTERVAL = 180.0       # 每 3 分钟轮询一次小号未读数（轻量接口）
+_UNREAD_INJECT_COOLDOWN = 1200.0    # 同一轮未读注入后 20 分钟内不再重复提醒（等 YUI 处理）
+
 # YUI 自主运营（v0.7.0）
 _YUI_AUTONOMY_ENV = "YUI_AUTONOMY"       # "0" 关闭自主运营，默认开启
 _YUI_AUTONOMY_TICK = 30.0                # 自主唤醒判定间隔（秒）
@@ -237,6 +241,9 @@ class BiliViewerPlugin(NekoPluginBase):
         # 防止自主引擎与手动调用并发触发两个投稿流程（分钟级长任务）
         self._yui_upload_lock = threading.Lock()
         self._yui_uploading = False
+        # 自主查看私信状态（v0.8.2）：上次轮询/上次注入时间戳
+        self._unread_poll_ts = 0.0
+        self._unread_inject_ts = 0.0
         # 启动后台实时感知线程（守护线程，不阻塞插件生命周期）
         self._start_sync_watcher()
 
@@ -278,6 +285,13 @@ class BiliViewerPlugin(NekoPluginBase):
                     self._browser_monitor = self._monitor_browser()
                 except Exception:
                     pass
+            # 自主查看私信（v0.8.2）：低频轮询小号未读，有未读且冷却已过时静默注入
+            try:
+                if time.time() - self._unread_poll_ts >= _UNREAD_POLL_INTERVAL:
+                    self._unread_poll_ts = time.time()
+                    self._unread_tick()
+            except Exception:
+                pass  # 未读轮询失败不影响主循环
             try:
                 tab = self._ext_tab()
                 if tab:
@@ -388,6 +402,48 @@ class BiliViewerPlugin(NekoPluginBase):
         cap = {"dynamic": _YUI_DYNAMIC_DAILY_MAX, "upload": _YUI_UPLOAD_DAILY_MAX}.get(op, 99)
         with self._yui_rate_lock:
             return self._yui_daily.get(f"{op}:{day}", 0) < cap
+
+    def _unread_tick(self) -> None:
+        """自主查看私信（v0.8.2）：小号未读轮询。
+
+        - 每 _UNREAD_POLL_INTERVAL 秒查一次小号未读数（轻量 x/msgfeed/unread）；
+        - 有未读且距上次注入超过 _UNREAD_INJECT_COOLDOWN 时，静默注入 read 消息，
+          YUI 在下次自然对话中自主查看/回复（bili_inbox / bili_dm_read / bili_dm_send 已就绪）；
+        - 只轮询小号（yui）：主账号是用户的，YUI 不自主处理其私信；
+        - 小号未配置/风控/网络失败一律静默跳过（调用方兜底捕获）。
+        """
+        counts = bili_social.unread_counts("yui")
+        total = int(counts.get("replies") or 0) + int(counts.get("mentions") or 0) + int(counts.get("likes") or 0) + int(counts.get("private_messages") or 0) + int(counts.get("system") or 0)
+        if not total:
+            return
+        if time.time() - self._unread_inject_ts < _UNREAD_INJECT_COOLDOWN:
+            return
+        self._unread_inject_ts = time.time()
+        detail = "、".join(
+            f"{label}{n}"
+            for label, n in (
+                ("私信", counts.get("private_messages")),
+                ("回复", counts.get("replies")),
+                ("@", counts.get("mentions")),
+                ("赞", counts.get("likes")),
+                ("系统", counts.get("system")),
+            )
+            if n
+        )
+        text = (
+            f"你的B站小号有 {total} 条未读消息（{detail}），可以自主查看并酌情处理："
+            "先 bili_inbox 看详情，私信用 bili_dm_read 读、bili_dm_send 回复；"
+            "评论/弹幕按既有纪律执行。"
+        )
+        self.ctx.push_message(
+            visibility=[],
+            ai_behavior="read",
+            parts=[{"type": "text", "text": text}],
+            source=self.plugin_id,
+            coalesce_key="bili_unread_sync",
+            priority=0,
+            metadata={"bili_unread": True},
+        )
 
     def _yui_daily_reserve(self, op: str) -> bool:
         """原子占用（复查优化 v0.7.8）：锁内检查+预占天级配额。
