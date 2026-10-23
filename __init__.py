@@ -550,7 +550,8 @@ class BiliViewerPlugin(NekoPluginBase):
             dm_content = self._read_latest_dm_for_inject("yui")
         if dm_content:
             text = (
-                f"你的B站小号收到新私信（{detail}），以下是最新私信内容，请立即阅读并回复：\n"
+                f"你的B站小号收到新私信（{detail}），以下是最新私信内容，请立即阅读并直接回复对方本人"
+                f"（对方在等你的回答，严禁只对用户复述、严禁先问用户怎么回、严禁路由到弹幕连发等其它工具）：\n"
                 f"{dm_content}"
             )
             behavior = "respond"  # v0.9.4：私信必须触发回复
@@ -622,7 +623,13 @@ class BiliViewerPlugin(NekoPluginBase):
                     # 配错时 owner 会解析成 YUI 自己导致 SELF_DM，YUI 无法回复粉丝私信）
                     header = f"与 {name or uid}（uid {uid}）的私信（最近 {len(lines)} 条）："
                     guide = (
-                        f"\n回复该私信：用 bili_dm_send(uid={uid}, account={account}, text=你的回复内容)；"
+                        f"\n【直接回复对方·最高纪律】对方（{name or uid}）在等你的直接回复，这是私信回复任务："
+                        f"请立即用 bili_dm_send(uid={uid}, account={account}, text=你的回答内容) 把回答发给对方本人。"
+                        f"严禁把答案只说给用户听、严禁先问用户怎么回（用户说'你自己决定'就自己决定、无需征询）、"
+                        f"严禁向用户复述你的回答内容或汇报'我回他XX了'；"
+                        f"严禁路由到弹幕/连发/评论等任何其它工具（对方问的是问题不是让你发弹幕）；"
+                        f"回答直接自然、以内容本身直接开头（严禁'刚才正说到…/本喵觉得应该…'等复述式开场）；"
+                        f"发送成功对外只回'私信已发送。'；"
                         f"看更多上下文：bili_dm_read(uid={uid})"
                     )
                     return header + "\n" + "\n".join(lines) + guide
