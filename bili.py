@@ -1748,10 +1748,13 @@ def live_send_danmaku(room: str, text: str, account: str = "yui") -> dict:
     if isinstance(resp_data, dict):
         dmid = str(resp_data.get("dmid") or resp_data.get("dmid_str") or "")
     # v0.9.7 复查：与 send_video_danmaku 一致，dmid 为空时抛 DANMAKU_UNVERIFIED（防假成功）
+    # v0.9.13 用户实测：接口不返回 dmid 时弹幕很可能已实际发出（直播弹幕接口有时不回 dmid 但发送成功）
     if not dmid:
         raise BiliError(
-            "直播弹幕接口已接受（code=0）但未返回弹幕 ID（dmid），可能被风控拦截——不能确认已发送，请勿声称已发出；"
-            "可等待 10 秒后重试一次（弹幕单条不会重复发送，安全），连续两次仍无 dmid 即停止并如实告知用户弹幕被拦截发不出去。",
+            "直播弹幕接口已接受（code=0）但未返回弹幕 ID（dmid）——弹幕**很可能已经发出去了**"
+            "（B站直播弹幕接口有时不返回 dmid 但发送成功）。请勿声称已发出，也严禁立即重试"
+            "（可能已发出，重试会造成重复刷屏）；请先确认直播间弹幕是否已出现，"
+            "确认确实没有后再等 10 秒重试一次，连续两次仍无则停止并如实告知用户。",
             "DANMAKU_UNVERIFIED",
         )
     return {
