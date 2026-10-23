@@ -1400,3 +1400,61 @@ def test_delete_dynamic_unverified_still_exists(monkeypatch) -> None:
         raise AssertionError("应当抛 DYN_DEL_UNVERIFIED")
     except bili.BiliError as exc:
         assert exc.code == "DYN_DEL_UNVERIFIED"
+
+
+def test_post_dynamic_invisible_in_feed(monkeypatch) -> None:
+    """详情能查到但动态未进对外可见动态流 → 抛 DYN_INVISIBLE（v0.9.9 修复'新动态没出来'）。"""
+    import json as _json
+
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setattr(bili, "_csrf", lambda account: "tok")
+
+    def fake_post_json(url, body, csrf, account="yui", timeout=12.0, query=None):
+        return {"code": 0, "data": {"dynamic_id": 111, "dynamic_id_str": "111"}}
+
+    def fake_http_get(url, params=None, account="yui", timeout=12.0):
+        if "get_dynamic_detail" in str(url):
+            return {"code": 0, "data": {"card": _json.dumps({"item": {"content": "新动态"}})}}
+        if "nav" in str(url):
+            return {"code": 0, "data": {"mid": 3494363678116792}}
+        if "feed/space" in str(url):
+            return {"code": 0, "data": {"items": [{"id_str": "999", "visible": True}]}}  # 新动态不在流里
+        return {"code": 0, "data": {}}
+
+    monkeypatch.setattr(bili, "_http_post_json", fake_post_json)
+    monkeypatch.setattr(bili, "_http_get", fake_http_get)
+    try:
+        bili.post_dynamic("新动态", account="yui")
+        raise AssertionError("应当抛 DYN_INVISIBLE")
+    except bili.BiliError as exc:
+        assert exc.code == "DYN_INVISIBLE"
+
+
+def test_post_dynamic_visible_in_feed_ok(monkeypatch) -> None:
+    """详情验证通过且动态在对外可见流里（visible=True）→ ok（v0.9.9）。"""
+    import json as _json
+
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setattr(bili, "_csrf", lambda account: "tok")
+
+    def fake_post_json(url, body, csrf, account="yui", timeout=12.0, query=None):
+        return {"code": 0, "data": {"dynamic_id": 222, "dynamic_id_str": "222"}}
+
+    def fake_http_get(url, params=None, account="yui", timeout=12.0):
+        if "get_dynamic_detail" in str(url):
+            return {"code": 0, "data": {"card": _json.dumps({"item": {"content": "成功动态"}})}}
+        if "nav" in str(url):
+            return {"code": 0, "data": {"mid": 3494363678116792}}
+        if "feed/space" in str(url):
+            return {"code": 0, "data": {"items": [{"id_str": "222", "visible": True}]}}
+        return {"code": 0, "data": {}}
+
+    monkeypatch.setattr(bili, "_http_post_json", fake_post_json)
+    monkeypatch.setattr(bili, "_http_get", fake_http_get)
+    r = bili.post_dynamic("成功动态", account="yui")
+    assert r["ok"] is True
+    assert r["dynamic_id"] == "222"

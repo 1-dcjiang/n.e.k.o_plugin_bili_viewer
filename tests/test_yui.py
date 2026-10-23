@@ -589,7 +589,14 @@ def test_bili_post_dynamic_vc_stable_endpoint(monkeypatch) -> None:
 
     def fake_http_get(url, params=None, account="yui", timeout=12.0):
         # 动态详情接口回读验证：返回正确的内容
-        return {"code": 0, "data": {"card": _json.dumps({"item": {"content": "测试动态"}})}}
+        if "get_dynamic_detail" in str(url):
+            return {"code": 0, "data": {"card": _json.dumps({"item": {"content": "测试动态"}})}}
+        # 对外可见动态流验证（v0.9.9）：返回 items 包含发布的 dyn_id
+        if "feed/space" in str(url):
+            return {"code": 0, "data": {"items": [{"id_str": "1262306092504842241", "visible": True}]}}
+        if "nav" in str(url):
+            return {"code": 0, "data": {"mid": 3494363678116792}}
+        return {"code": 0, "data": {}}
 
     monkeypatch.setattr(bili, "_http_post_json", fake_post_json)
     monkeypatch.setattr(bili, "_http_get", fake_http_get)

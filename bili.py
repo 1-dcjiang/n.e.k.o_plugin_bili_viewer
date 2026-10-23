@@ -1991,6 +1991,14 @@ def post_dynamic(text: str, account: str = "yui") -> dict:
                 + "如需补发请先到 B站 动态页面确认当前状态，再决定是否删除重发。",
                 "DYN_UNVERIFIED",
             )
+        # v0.9.9：对外可见验证——详情接口能查到 ≠ 对外可见
+        # （被风控/审核拦截时详情对发布者可见，但动态不进对外可见动态流，用户看不到）
+        if not _dynamic_in_feed_verified(account, dyn_id):
+            raise BiliError(
+                "动态详情能查到但未进入对外可见的动态流（可能被风控/审核拦截，仅自己可见）——"
+                "严禁声称已发布；请到 B站 动态页面确认状态，必要时稍后重发，严禁连续盲发。",
+                "DYN_INVISIBLE",
+            )
     return {"ok": True, "text": text[:100], "dynamic_id": dyn_id}
 
 
@@ -2034,6 +2042,44 @@ def _dynamic_verified(account: str, dynamic_id: str, text: str, tries: int = 3) 
         if i < tries - 1:
             time.sleep(1.5)
     return False, last_actual
+
+
+def _yui_uid(account: str) -> int:
+    """获取指定账号的 uid（nav 接口），供动态流验证使用。"""
+    data = _http_get(_API + "/x/web-interface/nav", account=account)
+    mid = (data.get("data") or {}).get("mid")
+    if not mid:
+        raise BiliError("无法获取账号 uid（nav 接口），动态流验证不可用", "NO_UID")
+    return int(mid)
+
+
+def _dynamic_in_feed_verified(account: str, dynamic_id: str, tries: int = 3) -> bool:
+    """动态流验证（v0.9.9）：调 space 对外可见动态流，确认动态 id_str 命中且 visible=True。
+
+    背景：get_dynamic_detail 详情接口对发布者可见 ≠ 对外可见——被风控/审核拦截时
+    详情能查到（内容验证通过），但动态不进对外可见动态流，其他人（包括用户）看不到。
+    实测（2026-10-23）：feed/space 返回 items[].id_str 与 visible 字段；
+    tries=3 间隔 1.5s（动态流同步有延迟，与 _dynamic_verified 同模式）。
+    """
+    uid = _yui_uid(account)
+    for i in range(tries):
+        try:
+            feed = _http_get(
+                "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space",
+                {"host_mid": uid, "offset": ""},
+                account=account,
+            )
+        except BiliError:
+            if i < tries - 1:
+                time.sleep(1.5)
+            continue
+        items = ((feed.get("data") or {}).get("items")) or []
+        for it in items:
+            if str(it.get("id_str") or "") == str(dynamic_id):
+                return bool(it.get("visible", True))  # 在流里但 visible=False 视为未对外可见
+        if i < tries - 1:
+            time.sleep(1.5)
+    return False
 
 
 def _dynamic_deleted_verified(account: str, dynamic_id: str, tries: int = 3) -> bool:

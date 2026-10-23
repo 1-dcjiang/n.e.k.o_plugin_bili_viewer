@@ -117,6 +117,12 @@
 > （风控延迟/接口假成功）时仍返回 ok=True，YUI 说"已删除"但动态还在。修复：新增 `_dynamic_deleted_verified`
 > 回读验证（详情查不到即确认删除，tries=3 间隔 1.5s），未删除抛 `DYN_DEL_UNVERIFIED`；
 > `bili_dynamic_delete` description 加 `DYN_DEL_UNVERIFIED` 处理铁律（严禁声称已删除/重复盲删）。
+> v0.9.9 修复动态发布假成功（"新动态也没出来"）：详情接口能查到 ≠ 对外可见——被风控/审核拦截时
+> 动态仅发布者自己可见（get_dynamic_detail 对发布者返回内容一致，验证通过），但不进对外可见动态流，
+> 其他人（包括用户）看不到。实测 feed/space 接口确认 items[].id_str 与 visible 字段。
+> 修复：新增 `_dynamic_in_feed_verified` 动态流验证（发布后确认 id_str 命中且 visible=True，
+> tries=3 间隔 1.5s）；未进流抛 `DYN_INVISIBLE`（严禁声称已发布/连续盲发）；
+> `bili_yui_dynamic` description 加 `DYN_INVISIBLE` 处理铁律。
 
 ## 使用示例（对 YUI 说）
 
