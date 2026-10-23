@@ -297,6 +297,11 @@ class BiliViewerPlugin(NekoPluginBase):
                     self._unread_tick()
             except Exception:
                 pass  # 未读轮询失败不影响主循环
+            # 弹幕连发任务推进（v0.9.15）：有活动任务且到点则自动发一条
+            try:
+                self._danmaku_loop_tick()
+            except Exception:
+                pass  # 连发失败不影响主循环
             try:
                 tab = self._ext_tab()
                 if tab:
@@ -400,6 +405,79 @@ class BiliViewerPlugin(NekoPluginBase):
         cap = {"dynamic": _YUI_DYNAMIC_DAILY_MAX, "upload": _YUI_UPLOAD_DAILY_MAX}.get(op, 99)
         with self._yui_rate_lock:
             return self._yui_daily.get(f"{op}:{day}", 0) < cap
+
+    # ══════════ 弹幕连发任务（v0.9.15） ══════════
+    # 用户实测反馈"不会自动发，仍然会挂机"：YUI 是单轮指令驱动，无法自行持续推进长指令
+    # （如"发666一共1000次"）。新增后台连发任务：调用一次，每 interval 秒自动发一条，
+    # 直到发满 / 连续 3 次失败 / 用户停止——无需用户逐条下指令。
+    _DM_LOOP_FILE = "danmaku_loop.json"
+
+    def _loop_path(self) -> str:
+        base = os.environ.get("LOCALAPPDATA") or ""
+        d = os.path.join(base, "N.E.K.O", "bili_viewer", "bili_social")
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            pass
+        return os.path.join(d, self._DM_LOOP_FILE)
+
+    def _loop_load(self) -> dict:
+        try:
+            with open(self._loop_path(), "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _loop_save(self, st: dict) -> None:
+        try:
+            with open(self._loop_path(), "w", encoding="utf-8") as f:
+                json.dump(st, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+    def _danmaku_loop_tick(self) -> None:
+        """弹幕连发任务推进：sync 轮询里调用，到点发一条（v0.9.15）。
+
+        - 连续 3 次发送失败自动停止（防止无限盲发）；
+        - DANMAKU_UNVERIFIED（无 dmid 但很可能已发出）计入发送并标记未确认，不视为失败；
+        - 发满 total 自动停止；进度留档可用 bili_live_danmaku_status 查询。
+        """
+        st = self._loop_load()
+        if not st.get("active"):
+            return
+        if time.time() < float(st.get("next_due") or 0):
+            return
+        room = str(st.get("room") or "").strip()
+        text = str(st.get("text") or "").strip()
+        account = str(st.get("account") or "yui")
+        if not room or not text:
+            st.update({"active": False, "last_error": "任务参数缺失", "updated_at": time.strftime("%H:%M:%S")})
+            self._loop_save(st)
+            return
+        try:
+            bili.live_send_danmaku(room, text, account=account)
+            st["sent"] = int(st.get("sent") or 0) + 1
+            st["fail_streak"] = 0
+            st["last_error"] = ""
+        except bili.BiliError as exc:
+            if exc.code == "DANMAKU_UNVERIFIED":
+                # v0.9.13：无 dmid 很可能已发出——计入发送并标记未确认，不视为失败
+                st["sent"] = int(st.get("sent") or 0) + 1
+                st["unconfirmed"] = int(st.get("unconfirmed") or 0) + 1
+                st["fail_streak"] = 0
+                st["last_error"] = ""
+            else:
+                st["fail_streak"] = int(st.get("fail_streak") or 0) + 1
+                st["last_error"] = f"{exc.code}: {str(exc.message)[:80]}"
+                if st["fail_streak"] >= 3:
+                    st["active"] = False
+                    st["stopped_reason"] = "连续 3 次发送失败"
+        st["next_due"] = time.time() + max(float(st.get("interval") or 5.0), 2.5)
+        st["updated_at"] = time.strftime("%H:%M:%S")
+        if int(st.get("sent") or 0) >= int(st.get("total") or 0):
+            st["active"] = False
+            st["stopped_reason"] = "已完成全部次数"
+        self._loop_save(st)
 
     def _unread_tick(self) -> None:
         """自主查看私信（v0.8.2 + v0.9.0 内容直读）：小号未读轮询。
@@ -1767,6 +1845,118 @@ class BiliViewerPlugin(NekoPluginBase):
         self._mark_danmaku_sent("live", room, text, 0)
         self._record_send_result("live", True, "", result.get("server") or "", room, dmid=result.get("dmid") or "")
         return {"output": "弹幕已发送。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": result}
+
+    @llm_tool(
+        name="bili_live_danmaku_loop",
+        description=(
+            "【弹幕连发任务·v0.9.15】启动后台自动连发弹幕任务：调用一次即可让插件按 interval 秒间隔自动发送，"
+            "直到发满 times 次 / 连续 3 次发送失败 / 用户停止——无需用户逐条下指令，YUI 不会再挂机。"
+            "发送逐条真实验证：无 dmid（DANMAKU_UNVERIFIED）记为'很可能已发出'不重试不视为失败。"
+            "【铁律】调用一次即启动，严禁反复调用同一任务；启动后立即发送第一条并后台持续推进；"
+            "对外回复必须如实说明任务已启动（条数/间隔/房间），严禁声称'已发完 N 条'除非用 bili_live_danmaku_status 确认；"
+            "用户要求停止时用 bili_live_danmaku_stop。"
+            "参数 room：直播间房间号或链接；text：弹幕内容（最长 30 字）；times：总次数（1-1000）；"
+            "interval：间隔秒数（默认 5，最小 3，对齐 B站 实际风控 5 秒）；account：yui（默认）/ main。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "room": {"type": "string", "description": "直播间房间号或链接"},
+                "text": {"type": "string", "description": "弹幕内容，最长 30 字"},
+                "times": {"type": "integer", "description": "总发送次数，1-1000"},
+                "interval": {"type": "number", "description": "间隔秒数，默认 5，最小 3"},
+                "account": {"type": "string", "description": "yui=YUI 小号（默认）/ main=主账号"},
+            },
+            "required": ["room", "text", "times"],
+        },
+        timeout=15.0,
+    )
+    async def bili_live_danmaku_loop(self, *, room: str = "", text: str = "", times: int = 0, interval: float = 0, account: str = "", **_):
+        params = _.get("parameters") or {}
+        room = (room or params.get("room") or "").strip()
+        text = (text or params.get("text") or "").strip()
+        times = int(times or params.get("times") or 0)
+        interval = float(interval or params.get("interval") or 5.0)
+        account = self._resolve_account(account or params.get("account") or "")
+        if not room or not text:
+            return {"output": "请提供直播间房间号和弹幕内容。", "is_error": True, "error": "EMPTY_PARAMS"}
+        if len(text) > 30:
+            return {"output": f"弹幕最长 30 字，当前 {len(text)} 字。", "is_error": True, "error": "TOO_LONG"}
+        if not 1 <= times <= 1000:
+            return {"output": "总次数需在 1-1000 之间。", "is_error": True, "error": "BAD_TIMES"}
+        interval = max(3.0, interval)
+        st = {
+            "room": room,
+            "text": text,
+            "total": times,
+            "sent": 0,
+            "unconfirmed": 0,
+            "interval": interval,
+            "active": True,
+            "fail_streak": 0,
+            "last_error": "",
+            "next_due": time.time(),
+            "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "updated_at": time.strftime("%H:%M:%S"),
+            "account": account,
+            "stopped_reason": "",
+        }
+        self._loop_save(st)
+        try:
+            self._danmaku_loop_tick()  # 立即发第一条
+        except Exception:
+            pass
+        st2 = self._loop_load()
+        out = f"弹幕连发任务已启动：直播间 {room}，内容「{text}」，共 {times} 条，每 {int(interval)} 秒一条，后台自动发送中。"
+        if st2.get("active") is False and st2.get("stopped_reason"):
+            out += f"（已停止：{st2['stopped_reason']}）"
+        return {"output": out, "is_error": False, "result": st2}
+
+    @llm_tool(
+        name="bili_live_danmaku_stop",
+        description=(
+            "停止正在运行的弹幕连发任务（v0.9.15）。用户说'停/别发了/够了'时调用。"
+            "返回已发送条数/剩余条数。参数：无。"
+        ),
+        parameters={"type": "object", "properties": {}, "required": []},
+        timeout=10.0,
+    )
+    async def bili_live_danmaku_stop(self, **_):
+        st = self._loop_load()
+        if not st.get("active"):
+            return {"output": "当前没有运行中的弹幕连发任务。", "is_error": False, "result": st}
+        st["active"] = False
+        st["stopped_reason"] = "用户停止"
+        st["updated_at"] = time.strftime("%H:%M:%S")
+        self._loop_save(st)
+        left = int(st.get("total") or 0) - int(st.get("sent") or 0)
+        return {"output": f"弹幕连发已停止：已发 {st.get('sent', 0)}/{st.get('total', 0)} 条，剩余 {left} 条。", "is_error": False, "result": st}
+
+    @llm_tool(
+        name="bili_live_danmaku_status",
+        description=(
+            "查询弹幕连发任务进度（v0.9.15）：是否运行中、已发/总数、未确认条数、最近错误、停止原因。"
+            "YUI 汇报连发进度或用户询问'发到哪了/发了几条'时调用。参数：无。"
+        ),
+        parameters={"type": "object", "properties": {}, "required": []},
+        timeout=10.0,
+    )
+    async def bili_live_danmaku_status(self, **_):
+        st = self._loop_load()
+        if not st:
+            return {"output": "当前没有弹幕连发任务记录。", "is_error": False, "result": {}}
+        if st.get("active"):
+            running = "运行中"
+        elif st.get("stopped_reason") == "已完成全部次数":
+            running = "已完成"
+        else:
+            running = "已停止"
+        out = f"弹幕连发任务：{running}｜已发 {st.get('sent', 0)}/{st.get('total', 0)} 条（其中未确认 {st.get('unconfirmed', 0)} 条）"
+        if st.get("last_error"):
+            out += f"｜最近错误：{st['last_error']}"
+        if st.get("stopped_reason"):
+            out += f"｜{st['stopped_reason']}"
+        return {"output": out, "is_error": False, "result": st}
 
     @llm_tool(
         name="bili_video_send_danmaku",

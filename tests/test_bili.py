@@ -1547,3 +1547,57 @@ def test_fans_list(monkeypatch) -> None:
     assert items[0] == {"uid": 1426057300, "name": "直到她按下快门", "mutual": True, "relation": "mutual_follow"}
     assert items[1]["uid"] == 555
     assert data["total"] == 2
+
+
+def test_danmaku_loop_tick_send_and_finish(monkeypatch) -> None:
+    """弹幕连发任务：到点发送、DANMAKU_UNVERIFIED 计入未确认、发满自动停止（v0.9.15）。"""
+    from plugin.plugins.bili_viewer import BiliViewerPlugin, bili
+
+    inst = object.__new__(BiliViewerPlugin)
+
+    calls = []
+
+    def fake_send(room, text, account="yui"):
+        calls.append((room, text, account))
+        raise bili.BiliError("无 dmid", "DANMAKU_UNVERIFIED")
+
+    monkeypatch.setattr(bili, "live_send_danmaku", fake_send)
+    st = {
+        "room": "1", "text": "666", "total": 2, "sent": 0, "unconfirmed": 0,
+        "interval": 5.0, "active": True, "fail_streak": 0, "last_error": "",
+        "next_due": 0, "account": "yui",
+    }
+    monkeypatch.setattr(inst, "_loop_load", lambda: st)
+    monkeypatch.setattr(inst, "_loop_save", lambda s: st.update(s))
+    inst._danmaku_loop_tick()
+    assert st["sent"] == 1 and st["unconfirmed"] == 1 and st["active"] is True
+    st["next_due"] = 0
+    inst._danmaku_loop_tick()
+    assert st["sent"] == 2
+    assert st["active"] is False and st["stopped_reason"] == "已完成全部次数"
+    assert len(calls) == 2
+
+
+def test_danmaku_loop_tick_stop_on_fail(monkeypatch) -> None:
+    """弹幕连发任务：连续 3 次真失败自动停止（v0.9.15）。"""
+    from plugin.plugins.bili_viewer import BiliViewerPlugin, bili
+
+    inst = object.__new__(BiliViewerPlugin)
+
+    def fake_send(room, text, account="yui"):
+        raise bili.BiliError("接口失败", "SEND_FAILED")
+
+    monkeypatch.setattr(bili, "live_send_danmaku", fake_send)
+    st = {
+        "room": "1", "text": "666", "total": 10, "sent": 0, "unconfirmed": 0,
+        "interval": 5.0, "active": True, "fail_streak": 0, "last_error": "",
+        "next_due": 0, "account": "yui",
+    }
+    monkeypatch.setattr(inst, "_loop_load", lambda: st)
+    monkeypatch.setattr(inst, "_loop_save", lambda s: st.update(s))
+    for _ in range(3):
+        st["next_due"] = 0
+        inst._danmaku_loop_tick()
+    assert st["active"] is False
+    assert st["stopped_reason"] == "连续 3 次发送失败"
+    assert st["sent"] == 0
