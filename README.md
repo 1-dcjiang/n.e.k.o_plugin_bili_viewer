@@ -91,6 +91,14 @@
 > 修复：(1) `content` 改用纯文本 `text`；(2) 新增 `_dynamic_verified` 回读验证——发布后
 > 调动态详情接口确认内容正确，不匹配则自动删除误发动态并抛 `DYN_UNVERIFIED`（防假成功）；
 > (3) 新增 `bili_dynamic_delete` 工具（YUI 说"不知道怎么删动态"就是因为没这个工具）。
+> v0.9.4 修复私信自动检测与自动回复（修复"还是不会自动检测私信，检测到也不会自动回复"）：
+> 根因有三：(1) `_unread_tick` 注入用 `ai_behavior="read"`（只读不触发回复），YUI 收到私信
+> 提醒后只是"读了"但不回复——N.E.K.O `push_message` 支持 `respond|read|blind`，私信必须用
+> `respond` 才会触发 YUI 主动回复；(2) 冷却时间 20 分钟太长，私信需及时回复；(3) 注入私信
+> 内容后没有更新本地已读游标（`dm_seen.json`），5 分钟后 `_unread_tick` 又检测到同一条私信
+> 是"新消息"，重复注入导致 YUI 重复回复。修复：(1) 私信未读注入用 `ai_behavior="respond"`
+> 触发回复，其他未读（回复/@/赞/系统）保持 `read`；(2) 冷却从 20 分钟缩短到 5 分钟；
+> (3) `_read_latest_dm_for_inject` 读取后立即调用 `record_dm_seen` 更新游标，防重复注入。
 
 ## 使用示例（对 YUI 说）
 

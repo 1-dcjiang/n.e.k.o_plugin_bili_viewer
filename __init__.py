@@ -72,7 +72,8 @@ _BROWSER_MONITOR_EVERY = 24  # 浏览器接入监控刷新频率：约每 24 次
 
 # 自主查看私信（v0.8.2）：低频轮询小号未读 + 注入冷却，防止刷屏打扰
 _UNREAD_POLL_INTERVAL = 180.0       # 每 3 分钟轮询一次小号未读数（轻量接口）
-_UNREAD_INJECT_COOLDOWN = 1200.0    # 同一轮未读注入后 20 分钟内不再重复提醒（等 YUI 处理）
+_UNREAD_INJECT_COOLDOWN = 300.0     # 同一轮未读注入后 5 分钟内不再重复提醒（v0.9.4：私信需及时回复，从20分钟缩短）
+_UNREAD_DM_COOLDOWN = 300.0         # 私信未读注入冷却 5 分钟（与通用冷却一致，私信优先）
 # 自主回复弹幕@（v0.8.5）：同一直播间 10 分钟内最多唤醒一次自主回复
 _MENTION_REPLY_COOLDOWN = 600.0
 
@@ -434,25 +435,30 @@ class BiliViewerPlugin(NekoPluginBase):
             if n
         )
         # v0.9.0：私信未读时直接读取内容注入（优先主账号会话，用户私信基本来自主账号）
+        # v0.9.4：私信未读用 ai_behavior="respond" 触发 YUI 主动回复（原 "read" 只读不回复）；
+        # 其他未读（回复/@/赞/系统）保持 "read" 只需知晓。
+        dm_count = int(counts.get("private_messages") or 0)
         dm_content = ""
-        if int(counts.get("private_messages") or 0) > 0:
+        if dm_count > 0:
             dm_content = self._read_latest_dm_for_inject("yui")
         if dm_content:
             text = (
-                f"你的B站小号收到新私信（{detail}），以下是最新私信内容，请直接阅读并酌情回复：\n"
+                f"你的B站小号收到新私信（{detail}），以下是最新私信内容，请立即阅读并回复：\n"
                 f"{dm_content}\n"
                 f"回复方式：用 bili_dm_send（uid=owner, account=yui, text=你的回复内容）；"
-                f"若需要看更多上下文用 bili_dm_read（uid=owner）。全程静默，不向玩家汇报。"
+                f"若需要看更多上下文用 bili_dm_read（uid=owner）。"
             )
+            behavior = "respond"  # v0.9.4：私信必须触发回复
         else:
             text = (
                 f"你的B站小号有 {total} 条未读消息（{detail}），可以自主查看并酌情处理："
                 "先 bili_inbox 看详情，私信用 bili_dm_read 读、bili_dm_send 回复；"
                 "评论/弹幕按既有纪律执行。"
             )
+            behavior = "read"  # 非私信未读只需知晓
         self.ctx.push_message(
             visibility=[],
-            ai_behavior="read",
+            ai_behavior=behavior,
             parts=[{"type": "text", "text": text}],
             source=self.plugin_id,
             coalesce_key="bili_unread_sync",
@@ -495,6 +501,14 @@ class BiliViewerPlugin(NekoPluginBase):
                     who = "对方" if m.get("from") == "them" else "我"
                     lines.append(f"  「{m.get('time','')}」{who}：{str(m.get('text') or '')[:100]}")
                 if lines:
+                    # v0.9.4：读取后立即更新本地已读游标，避免 5 分钟后重复注入同一条私信
+                    talker = data.get("uid")
+                    last_seqno = msgs[-1].get("seqno")
+                    if talker and last_seqno:
+                        try:
+                            bili_social.record_dm_seen(account, int(talker), int(last_seqno))
+                        except Exception:
+                            pass
                     header = f"与 {name or uid} 的私信（最近 {len(lines)} 条）："
                     return header + "\n" + "\n".join(lines)
             except Exception:
