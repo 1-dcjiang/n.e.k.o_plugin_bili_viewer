@@ -89,6 +89,19 @@ def _wrap_err(exc: bili.BiliError) -> dict:
     return out
 
 
+def _tool_params(_: dict) -> dict:
+    """宿主 llm_tool 传参防御（v0.9.32）。
+
+    N.E.K.O 调用工具时 **_ 里的 "parameters" 键偶发被传成标量（int/str，
+    如 limit=30 或 room 值直接落入该键），导致 params.get() 抛
+    'int'/'str' object has no attribute 'get'（bili_dm_read/bili_dm_send/
+    bili_video_like/bili_see_live 实证）。非 dict 一律降级为空字典，
+    参数改从显式形参兜底（形参值亦做 str() 归一），保证工具不崩溃。
+    """
+    p = _.get("parameters")
+    return p if isinstance(p, dict) else {}
+
+
 # 实时同步的轮询间隔（秒）与稳定判定次数（连续 N 次相同才推送，防抖动）
 _SYNC_POLL_INTERVAL = 2.5
 _SYNC_STABLE_COUNT = 2
@@ -1097,8 +1110,8 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=25.0,
     )
     async def bili_search(self, *, keyword: str = "", type: str = "video", **_):
-        params = _.get("parameters") or {}
-        keyword = (keyword or params.get("keyword") or "").strip()
+        params = _tool_params(_)
+        keyword = str(keyword or params.get("keyword") or "").strip()
         stype = (type or params.get("type") or "video").strip().lower()
         try:
             results = bili.search(keyword, stype)
@@ -1135,8 +1148,8 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=20.0,
     )
     async def bili_video_info(self, *, bvid: str = "", account: str = "", **_):
-        params = _.get("parameters") or {}
-        bvid = (bvid or params.get("bvid") or "").strip()
+        params = _tool_params(_)
+        bvid = str(bvid or params.get("bvid") or "").strip()
         account = self._resolve_account(account or params.get("account") or "")
         if not bvid:
             return {"output": "请提供视频的 BV 号或链接。", "is_error": True, "error": "NO_BVID"}
@@ -1164,8 +1177,8 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=25.0,
     )
     async def bili_video_danmaku(self, *, bvid: str = "", limit: int = 0, **_):
-        params = _.get("parameters") or {}
-        bvid = (bvid or params.get("bvid") or "").strip()
+        params = _tool_params(_)
+        bvid = str(bvid or params.get("bvid") or "").strip()
         try:
             n = int(limit or params.get("limit") or 60)
         except (TypeError, ValueError):
@@ -1196,8 +1209,8 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=25.0,
     )
     async def bili_video_subtitle(self, *, bvid: str = "", lan: str = "zh-CN", **_):
-        params = _.get("parameters") or {}
-        bvid = (bvid or params.get("bvid") or "").strip()
+        params = _tool_params(_)
+        bvid = str(bvid or params.get("bvid") or "").strip()
         lan = (lan or params.get("lan") or "zh-CN").strip()
         if not bvid:
             return {"output": "请提供视频的 BV 号或链接。", "is_error": True, "error": "NO_BVID"}
@@ -1223,8 +1236,8 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=20.0,
     )
     async def bili_video_ai_summary(self, *, bvid: str = "", **_):
-        params = _.get("parameters") or {}
-        bvid = (bvid or params.get("bvid") or "").strip()
+        params = _tool_params(_)
+        bvid = str(bvid or params.get("bvid") or "").strip()
         if not bvid:
             return {"output": "请提供视频的 BV 号或链接。", "is_error": True, "error": "NO_BVID"}
         try:
@@ -1253,8 +1266,8 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=25.0,
     )
     async def bili_video_comments(self, *, bvid: str = "", mode: str = "hot", page: int = 1, limit: int = 0, **_):
-        params = _.get("parameters") or {}
-        bvid = (bvid or params.get("bvid") or "").strip()
+        params = _tool_params(_)
+        bvid = str(bvid or params.get("bvid") or "").strip()
         mode = (mode or params.get("mode") or "hot").strip().lower()
         mode = "new" if mode == "new" else "hot"
         try:
@@ -1295,8 +1308,8 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=20.0,
     )
     async def bili_live_info(self, *, room: str = "", **_):
-        params = _.get("parameters") or {}
-        room = (room or params.get("room") or "").strip()
+        params = _tool_params(_)
+        room = str(room or params.get("room") or "").strip()
         if not room:
             return {"output": "请提供直播房间号或直播间链接。", "is_error": True, "error": "NO_ROOM"}
         try:
@@ -1333,10 +1346,10 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=30.0,
     )
     async def bili_enter_live(self, *, room: str = "", account: str = "", browser: str = "", **_):
-        params = _.get("parameters") or {}
-        room = (room or params.get("room") or "").strip()
+        params = _tool_params(_)
+        room = str(room or params.get("room") or "").strip()
         acct = (account or params.get("account") or "yui").strip() or "yui"
-        browser = (browser or params.get("browser") or "").strip().lower()
+        browser = str(browser or params.get("browser") or "").strip().lower()
         # v0.7.44：browser 留空时按最近推送的绑定浏览器定向，消除 Chrome/Edge 双扩展抢指令竞态
         if not browser:
             src = (getattr(self, "_ext_source", "") or "").lower()
@@ -1423,8 +1436,8 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=40.0,
     )
     async def bili_live_danmaku(self, *, room: str = "", duration: int = 0, **_):
-        params = _.get("parameters") or {}
-        room = (room or params.get("room") or "").strip()
+        params = _tool_params(_)
+        room = str(room or params.get("room") or "").strip()
         try:
             duration = int(duration if duration else params.get("duration") or 8)
         except (TypeError, ValueError):
@@ -1482,8 +1495,8 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=30.0,
     )
     async def bili_live_viewers(self, *, room: str = "", limit: int = 10, account: str = "", **_):
-        params = _.get("parameters") or {}
-        room = (room or params.get("room") or "").strip()
+        params = _tool_params(_)
+        room = str(room or params.get("room") or "").strip()
         try:
             limit = int(limit or params.get("limit") or 10)
         except (TypeError, ValueError):
@@ -1536,7 +1549,7 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=20.0,
     )
     async def bili_user_info(self, *, mid: int = 0, **_):
-        params = _.get("parameters") or {}
+        params = _tool_params(_)
         try:
             mid = int(mid or params.get("mid") or 0)
         except (TypeError, ValueError):
@@ -1568,7 +1581,7 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=25.0,
     )
     async def bili_user_videos(self, *, mid: int = 0, page: int = 1, limit: int = 0, **_):
-        params = _.get("parameters") or {}
+        params = _tool_params(_)
         try:
             mid = int(mid or params.get("mid") or 0)
             page = int(page if page else params.get("page") or 1)
@@ -1639,7 +1652,7 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=20.0,
     )
     async def bili_my_info(self, *, account: str = "", **_):
-        params = _.get("parameters") or {}
+        params = _tool_params(_)
         account = self._resolve_account(account or params.get("account") or "")
         try:
             info = bili.my_info(account)
@@ -1669,7 +1682,7 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=20.0,
     )
     async def bili_set_account_role(self, *, role: str = "yui", uid: int = 0, force: bool = False, **_):
-        params = _.get("parameters") or {}
+        params = _tool_params(_)
         role = (role or params.get("role") or "yui").strip()
         try:
             uid = int(uid if uid else params.get("uid") or 0) or None
@@ -1707,7 +1720,7 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=300.0,
     )
     async def bili_unfollow_all(self, *, account: str = "", dry_run: bool = False, **_):
-        params = _.get("parameters") or {}
+        params = _tool_params(_)
         account = self._resolve_account(account or params.get("account") or "")
         try:
             result = bili.unfollow_all(account, dry_run=bool(dry_run or params.get("dry_run", False)))
@@ -1745,7 +1758,7 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=25.0,
     )
     async def bili_my_videos(self, *, page: int = 1, limit: int = 0, account: str = "", **_):
-        params = _.get("parameters") or {}
+        params = _tool_params(_)
         account = self._resolve_account(account or params.get("account") or "")
         try:
             page = int(page if page else params.get("page") or 1)
@@ -1798,8 +1811,8 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=30.0,
     )
     async def bili_edit_video(self, *, bvid: str = "", title: str = "", desc: str = "", tag: str = "", account: str = "", **_):
-        params = _.get("parameters") or {}
-        bvid = (bvid or params.get("bvid") or "").strip()
+        params = _tool_params(_)
+        bvid = str(bvid or params.get("bvid") or "").strip()
         account = self._resolve_account(account or params.get("account") or "")
         if not bvid:
             return {"output": "请提供要修改的稿件 BV 号。", "is_error": True, "error": "NO_BVID"}
@@ -1843,8 +1856,8 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=30.0,
     )
     async def bili_see_live(self, *, room: str = "", **_):
-        params = _.get("parameters") or {}
-        room = (room or params.get("room") or "").strip()
+        params = _tool_params(_)
+        room = str(room or params.get("room") or "").strip()
         dom = self._ext_dom()
         dom_live = dom if (dom and dom.get("kind") == "live") else None
         if not room:
@@ -1911,8 +1924,8 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=30.0,
     )
     async def bili_see_video(self, *, bvid: str = "", **_):
-        params = _.get("parameters") or {}
-        bvid = (bvid or params.get("bvid") or "").strip()
+        params = _tool_params(_)
+        bvid = str(bvid or params.get("bvid") or "").strip()
         dom = self._ext_dom()
         dom_video = dom if (dom and dom.get("kind") == "video") else None
         if not bvid:
@@ -1995,9 +2008,9 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=30.0,
     )
     async def bili_live_send_danmaku(self, *, room: str = "", text: str = "", account: str = "", **_):
-        params = _.get("parameters") or {}
-        room = (room or params.get("room") or "").strip()
-        text = (text or params.get("text") or "").strip()
+        params = _tool_params(_)
+        room = str(room or params.get("room") or "").strip()
+        text = str(text or params.get("text") or "").strip()
         account = self._resolve_account(account or params.get("account") or "")
         tab = self._ext_tab(force=True)  # v0.9.20：每次询问强制重新检测当前页面
         page_room = None
@@ -2092,9 +2105,9 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=15.0,
     )
     async def bili_live_danmaku_loop(self, *, room: str = "", text: str = "", times: int = 0, interval: float = 0, account: str = "", **_):
-        params = _.get("parameters") or {}
-        room = (room or params.get("room") or "").strip()
-        text = (text or params.get("text") or "").strip()
+        params = _tool_params(_)
+        room = str(room or params.get("room") or "").strip()
+        text = str(text or params.get("text") or "").strip()
         times = int(times or params.get("times") or 0)
         interval = float(interval or params.get("interval") or 5.0)
         account = self._resolve_account(account or params.get("account") or "")
@@ -2222,9 +2235,9 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=30.0,
     )
     async def bili_video_send_danmaku(self, *, bvid: str = "", text: str = "", progress: int = 0, account: str = "", **_):
-        params = _.get("parameters") or {}
-        bvid = (bvid or params.get("bvid") or "").strip()
-        text = (text or params.get("text") or "").strip()
+        params = _tool_params(_)
+        bvid = str(bvid or params.get("bvid") or "").strip()
+        text = str(text or params.get("text") or "").strip()
         account = self._resolve_account(account or params.get("account") or "")
         try:
             progress = int(progress if progress else params.get("progress") or 0)
@@ -2320,10 +2333,10 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=30.0,
     )
     async def bili_reply_comment(self, *, target: str = "", text: str = "", account: str = "", parent: str = "", **_):
-        params = _.get("parameters") or {}
-        target = (target or params.get("target") or "").strip()
-        text = (text or params.get("text") or "").strip()
-        parent = (parent or params.get("parent") or "").strip()
+        params = _tool_params(_)
+        target = str(target or params.get("target") or "").strip()
+        text = str(text or params.get("text") or "").strip()
+        parent = str(parent or params.get("parent") or "").strip()
         account = self._resolve_account(account or params.get("account") or "")
         if not text:
             return {"output": "请提供评论内容。", "is_error": True, "error": "EMPTY_MSG"}
@@ -2437,9 +2450,9 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=30.0,
     )
     async def bili_follow_user(self, *, target: str = "", account: str = "", **_):
-        params = _.get("parameters") or {}
-        target = (target or params.get("target") or "").strip()
-        raw_account = (account or params.get("account") or "").strip()
+        params = _tool_params(_)
+        target = str(target or params.get("target") or "").strip()
+        raw_account = str(account or params.get("account") or "").strip()
         account = self._resolve_account(raw_account)
         if not target:
             return {"output": "请提供要关注的用户 uid 或昵称。", "is_error": True, "error": "EMPTY_TARGET"}
@@ -2488,9 +2501,9 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=30.0,
     )
     async def bili_unfollow_user(self, *, target: str = "", account: str = "", **_):
-        params = _.get("parameters") or {}
-        target = (target or params.get("target") or "").strip()
-        raw_account = (account or params.get("account") or "").strip()
+        params = _tool_params(_)
+        target = str(target or params.get("target") or "").strip()
+        raw_account = str(account or params.get("account") or "").strip()
         account = self._resolve_account(raw_account)
         if not target:
             return {"output": "请提供要取消关注的用户 uid 或昵称。", "is_error": True, "error": "EMPTY_TARGET"}
@@ -2538,8 +2551,8 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=30.0,
     )
     async def bili_yui_dynamic(self, *, text: str = "", **_):
-        params = _.get("parameters") or {}
-        text = (text or params.get("text") or "").strip()
+        params = _tool_params(_)
+        text = str(text or params.get("text") or "").strip()
         if not text:
             return {"output": "请提供动态内容。", "is_error": True, "error": "EMPTY_MSG"}
         if not self._yui_daily_reserve("dynamic"):
@@ -2575,7 +2588,7 @@ class BiliViewerPlugin(NekoPluginBase):
         },
     )
     async def bili_dynamic_delete(self, *, dynamic_id: str = "", **_):
-        params = _.get("parameters") or {}
+        params = _tool_params(_)
         dynamic_id = str(dynamic_id or params.get("dynamic_id") or "").strip()
         if not dynamic_id:
             return {"output": "请提供要删除的动态 ID。", "is_error": True, "error": "EMPTY_ID"}
@@ -2615,11 +2628,11 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=300.0,
     )
     async def bili_yui_upload(self, *, file: str = "", title: str = "", desc: str = "", tags: str = "", tid: int = 0, **_):
-        params = _.get("parameters") or {}
-        file = (file or params.get("file") or "").strip()
-        title = (title or params.get("title") or "").strip()
-        desc = (desc or params.get("desc") or "").strip()
-        tags = (tags or params.get("tags") or "").strip()
+        params = _tool_params(_)
+        file = str(file or params.get("file") or "").strip()
+        title = str(title or params.get("title") or "").strip()
+        desc = str(desc or params.get("desc") or "").strip()
+        tags = str(tags or params.get("tags") or "").strip()
         try:
             tid = int(tid if tid else params.get("tid") or 171)
         except (TypeError, ValueError):
@@ -2700,11 +2713,11 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=300.0,
     )
     async def bili_yui_upload_video_url(self, *, url: str = "", title: str = "", desc: str = "", tags: str = "", tid: int = 0, **_):
-        params = _.get("parameters") or {}
-        url = (url or params.get("url") or "").strip()
-        title = (title or params.get("title") or "").strip()
-        desc = (desc or params.get("desc") or "").strip()
-        tags = (tags or params.get("tags") or "").strip()
+        params = _tool_params(_)
+        url = str(url or params.get("url") or "").strip()
+        title = str(title or params.get("title") or "").strip()
+        desc = str(desc or params.get("desc") or "").strip()
+        tags = str(tags or params.get("tags") or "").strip()
         if not url:
             return {"output": "请提供视频直链（url）。", "is_error": True, "error": "NO_URL"}
         if not title:
@@ -2803,8 +2816,8 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=20.0,
     )
     async def bili_yui_command_doubao(self, *, instruction: str = "", **_):
-        params = _.get("parameters") or {}
-        instruction = (instruction or params.get("instruction") or "").strip()
+        params = _tool_params(_)
+        instruction = str(instruction or params.get("instruction") or "").strip()
         if not instruction:
             return {"output": "请写下要交给豆包的指令内容。", "is_error": True, "error": "NO_INSTRUCTION"}
         if len(instruction) > 4000:
@@ -2855,8 +2868,8 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=15.0,
     )
     async def bili_yui_read_doubao_reply(self, *, request_id: str = "", **_):
-        params = _.get("parameters") or {}
-        request_id = (request_id or params.get("request_id") or "").strip()
+        params = _tool_params(_)
+        request_id = str(request_id or params.get("request_id") or "").strip()
         if not request_id:
             return {"output": "请提供豆包返回的请求号（request_id）。", "is_error": True, "error": "NO_REQUEST_ID"}
         # 防路径穿越：只允许安全字符
@@ -3004,10 +3017,10 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=20.0,
     )
     async def bili_set_roles(self, *, action: str = "", uid: int = 0, role: str = "", **_):
-        params = _.get("parameters") or {}
+        params = _tool_params(_)
         action = (action or params.get("action") or "swap").strip()
         uid = int(uid if uid else params.get("uid") or 0) or 0
-        role = (role or params.get("role") or "").strip()
+        role = str(role or params.get("role") or "").strip()
         main_file = bili._main_cookie_from_file()
         yui_file = bili._yui_cookie_from_file()
         # 安全（v0.7.10）：只有账号 cookie 与文件层完全一致（绑定流程持久化）才允许互换；
@@ -3067,7 +3080,7 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=30.0,
     )
     async def bili_inbox(self, *, account: str = "", limit: int = 5, **_):
-        params = _.get("parameters") or {}
+        params = _tool_params(_)
         account = self._resolve_account(account or params.get("account") or "")
         limit = int(limit or params.get("limit") or 5)
         try:
@@ -3106,7 +3119,7 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=20.0,
     )
     async def bili_unread(self, *, account: str = "", **_):
-        params = _.get("parameters") or {}
+        params = _tool_params(_)
         account = self._resolve_account(account or params.get("account") or "")
         try:
             data = bili_social.unread_counts(account)
@@ -3136,7 +3149,7 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=20.0,
     )
     async def bili_feed_replies(self, *, account: str = "", limit: int = 20, **_):
-        params = _.get("parameters") or {}
+        params = _tool_params(_)
         account = self._resolve_account(account or params.get("account") or "")
         limit = int(limit or params.get("limit") or 20)
         try:
@@ -3162,7 +3175,7 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=20.0,
     )
     async def bili_feed_mentions(self, *, account: str = "", limit: int = 20, **_):
-        params = _.get("parameters") or {}
+        params = _tool_params(_)
         account = self._resolve_account(account or params.get("account") or "")
         limit = int(limit or params.get("limit") or 20)
         try:
@@ -3188,7 +3201,7 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=20.0,
     )
     async def bili_feed_likes(self, *, account: str = "", limit: int = 20, **_):
-        params = _.get("parameters") or {}
+        params = _tool_params(_)
         account = self._resolve_account(account or params.get("account") or "")
         limit = int(limit or params.get("limit") or 20)
         try:
@@ -3214,7 +3227,7 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=20.0,
     )
     async def bili_feed_system(self, *, account: str = "", limit: int = 10, **_):
-        params = _.get("parameters") or {}
+        params = _tool_params(_)
         account = self._resolve_account(account or params.get("account") or "")
         limit = int(limit or params.get("limit") or 10)
         try:
@@ -3242,7 +3255,7 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=20.0,
     )
     async def bili_dm_list(self, *, account: str = "", unread_only: bool = False, limit: int = 20, **_):
-        params = _.get("parameters") or {}
+        params = _tool_params(_)
         account = self._resolve_account(account or params.get("account") or "")
         limit = int(limit or params.get("limit") or 20)
         try:
@@ -3274,8 +3287,8 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=25.0,
     )
     async def bili_dm_read(self, *, uid: str = "", account: str = "", mark_read: bool = False, limit: int = 30, **_):
-        params = _.get("parameters") or {}
-        uid = (uid or params.get("uid") or "").strip()
+        params = _tool_params(_)
+        uid = str(uid or params.get("uid") or "").strip()
         if not uid:
             return {"output": "请提供对方 UID 或昵称。", "is_error": True, "error": "EMPTY_UID"}
         account = self._resolve_account(account or params.get("account") or "")
@@ -3330,9 +3343,9 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=30.0,
     )
     async def bili_dm_send(self, *, uid: str = "", text: str = "", account: str = "", allow_new: bool = False, **_):
-        params = _.get("parameters") or {}
-        uid = (uid or params.get("uid") or "").strip()
-        text = (text or params.get("text") or "").strip()
+        params = _tool_params(_)
+        uid = str(uid or params.get("uid") or "").strip()
+        text = str(text or params.get("text") or "").strip()
         allow_new = bool(allow_new or params.get("allow_new", False))
         account = self._resolve_account(account or params.get("account") or "")
         if not uid or not text:
@@ -3367,7 +3380,7 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=20.0,
     )
     async def bili_fans_list(self, *, limit: int = 0, account: str = "", **_):
-        params = _.get("parameters") or {}
+        params = _tool_params(_)
         limit = int(limit or params.get("limit") or 20)
         account = self._resolve_account(account or params.get("account") or "")
         try:
@@ -3397,8 +3410,8 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=20.0,
     )
     async def bili_video_relation(self, *, bvid: str = "", account: str = "", **_):
-        params = _.get("parameters") or {}
-        bvid = (bvid or params.get("bvid") or "").strip()
+        params = _tool_params(_)
+        bvid = str(bvid or params.get("bvid") or "").strip()
         if not bvid:
             return {"output": "请提供视频 BV 号或链接。", "is_error": True, "error": "EMPTY_BVID"}
         account = self._resolve_account(account or params.get("account") or "")
@@ -3429,8 +3442,8 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=25.0,
     )
     async def bili_video_like(self, *, bvid: str = "", account: str = "", undo: bool = False, **_):
-        params = _.get("parameters") or {}
-        bvid = (bvid or params.get("bvid") or "").strip()
+        params = _tool_params(_)
+        bvid = str(bvid or params.get("bvid") or "").strip()
         undo = bool(undo or params.get("undo", False))
         account = self._resolve_account(account or params.get("account") or "")
         if not bvid:
@@ -3467,8 +3480,8 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=25.0,
     )
     async def bili_video_coin(self, *, bvid: str = "", coins: int = 0, account: str = "", with_like: bool = False, **_):
-        params = _.get("parameters") or {}
-        bvid = (bvid or params.get("bvid") or "").strip()
+        params = _tool_params(_)
+        bvid = str(bvid or params.get("bvid") or "").strip()
         try:
             coins = int(coins if coins else params.get("coins") or 0)
         except (TypeError, ValueError):
@@ -3507,10 +3520,10 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=25.0,
     )
     async def bili_video_fav(self, *, bvid: str = "", account: str = "", remove: bool = False, folder: str = "", **_):
-        params = _.get("parameters") or {}
-        bvid = (bvid or params.get("bvid") or "").strip()
+        params = _tool_params(_)
+        bvid = str(bvid or params.get("bvid") or "").strip()
         remove = bool(remove or params.get("remove", False))
-        folder = (folder or params.get("folder") or "").strip()
+        folder = str(folder or params.get("folder") or "").strip()
         account = self._resolve_account(account or params.get("account") or "")
         if not bvid:
             return {"output": "请提供视频 BV 号或链接。", "is_error": True, "error": "EMPTY_BVID"}
@@ -3543,8 +3556,8 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=25.0,
     )
     async def bili_video_triple(self, *, bvid: str = "", account: str = "", **_):
-        params = _.get("parameters") or {}
-        bvid = (bvid or params.get("bvid") or "").strip()
+        params = _tool_params(_)
+        bvid = str(bvid or params.get("bvid") or "").strip()
         account = self._resolve_account(account or params.get("account") or "")
         if not bvid:
             return {"output": "请提供视频 BV 号或链接。", "is_error": True, "error": "EMPTY_BVID"}
@@ -3573,7 +3586,7 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=20.0,
     )
     async def bili_my_favs(self, *, account: str = "", **_):
-        params = _.get("parameters") or {}
+        params = _tool_params(_)
         account = self._resolve_account(account or params.get("account") or "")
         try:
             items = bili_social.my_favs(account)
@@ -3606,7 +3619,7 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=20.0,
     )
     async def bili_rank(self, *, kind: str = "", rid: int = 0, limit: int = 10, account: str = "", **_):
-        params = _.get("parameters") or {}
+        params = _tool_params(_)
         kind = (kind or params.get("kind") or "hot").strip()
         try:
             rid = int(rid if rid else params.get("rid") or 0)
@@ -3648,7 +3661,7 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=25.0,
     )
     async def bili_my_stats(self, *, account: str = "", video_limit: int = 5, **_):
-        params = _.get("parameters") or {}
+        params = _tool_params(_)
         account = self._resolve_account(account or params.get("account") or "")
         video_limit = int(video_limit or params.get("video_limit") or 5)
         try:
@@ -3778,7 +3791,7 @@ class BiliViewerPlugin(NekoPluginBase):
           60 秒窗口内只做约 8 个，limit 钳制在 1..8）。
         逐个真实点赞 + 回读验证（bili_social.video_like），风控/限流不中断继续。
         """
-        params = _.get("parameters") or {}
+        params = _tool_params(_)
         mid = str(mid or params.get("mid") or "").strip()
         account = self._resolve_account(account or params.get("account") or "")
         try:
@@ -3872,8 +3885,8 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=60.0,
     )
     async def entry_run(self, **kwargs):
-        params = kwargs.get("parameters") or {}
-        action = kwargs.get("action") or params.get("action") or ""
+        params = _tool_params(kwargs)
+        action = str(kwargs.get("action") or params.get("action") or "")
         room = str(kwargs.get("room") or params.get("room") or "")
         bvid = str(kwargs.get("bvid") or params.get("bvid") or "")
         text = str(kwargs.get("text") or params.get("text") or "")
@@ -3990,7 +4003,7 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=30.0,
     )
     async def entry_danmaku(self, **kwargs):
-        params = kwargs.get("parameters") or {}
+        params = _tool_params(kwargs)
         room = str(kwargs.get("room") or params.get("room") or "")
         bvid = str(kwargs.get("bvid") or params.get("bvid") or "")
         text = str(kwargs.get("text") or params.get("text") or "")
@@ -4802,7 +4815,7 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=90.0,
     )
     async def bili_bind_account(self, *, allow: bool = False, **_):
-        params = _.get("parameters") or {}
+        params = _tool_params(_)
         allow = bool(allow) if isinstance(allow, bool) else bool(params.get("allow"))
         if not allow:
             return {"output": "已保持不读取浏览器 Cookie（仅手动配置可用）。", "is_error": False, "allowed": False}

@@ -208,6 +208,19 @@
 > 触发 YUI 读取回执并按豆包答复继续执行（如 bili_yui_upload_video_url 下载投稿）；
 > 同一 request_id 只通知一次（_bridge_notified 去重，上限 500 防内存膨胀）；
 > 只读本地目录、零网络请求；回执文本中注明"豆包代办的成果，严禁说成自己完成"。
+> v0.9.32 工具入口参数类型防御（修复 'int'/'str' object has no attribute 'get' 崩溃）：
+> 用户实证：YUI 读粉丝私信时 bili_dm_read / bili_dm_send / bili_video_like / bili_see_live
+> 连日报 'int'/'str' object has no attribute 'get'（N.E.K.O_Plugin_error.log 6+ 条，
+> 10-24 11:01/11:02/11:08/11:10 连续崩溃）——根因是宿主调用 llm_tool 时 **_ 里的
+> parameters 键偶发被传成标量（int/str，如 limit=30 或 room 值直接落入该键）而非 dict，
+> 入口 `params = _.get("parameters") or {}` 后 `params.get(...)` 直接在标量上炸。
+> 修复：52 个工具入口统一改模块级 _tool_params 防御（parameters 非 dict 时降级空字典，
+> 参数改从显式形参兜底）+ 50 处字符串形参 str() 归一（uid/account/text/bvid/room/action 等），
+> 标量参数不再崩溃；run/danmaku 总入口同样防御。测试：新增 4 个复现回归测试
+> （dm_read int 标量 / see_live str 标量 / entry_run / dm_send），全量 303 passed + ruff 通过。
+> 附带测试隔离修复：BiliViewerPlugin 经 NekoPluginBase 包装后 SdkContext._host_ctx 恒非空，
+> 每个测试都会启动真实后台线程，v0.9.31 的 bridge tick 首轮即扫真实 outbox 污染断言——
+> conftest autouse fixture 统一设 BILLI_SYNC_DISABLE=1，并把插件目录加入 sys.path 修 import web_ui。
 > v0.9.30 视频有效性校验防空壳：
 > 用户实证：yui_uploads 积累 8 个 4096 字节无效 .mp4 占位（文件头 0x00010001 重复、非视频容器），
 > 因下载链路只校验'非空'而被当作成功视频继续投稿——新增模块级 _looks_like_video 容器头识别

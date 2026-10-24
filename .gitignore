@@ -4,3 +4,4 @@ __pycache__/
 .pytest_cache/
 store.db
 .ruff_cache/
+yui_uploads/

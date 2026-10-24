@@ -1486,3 +1486,72 @@ def test_bridge_reply_skip_processing(monkeypatch, tmp_path) -> None:
 
     assert ctx.pushes == []
     assert rid not in inst._bridge_notified
+
+
+# ══════════ 工具入口参数类型防御（v0.9.32）：宿主把 parameters 键传成标量 ══════════
+
+
+def test_tool_params_scalar_int_defense(monkeypatch) -> None:
+    """v0.9.32 复现回归：宿主把 _ 里 parameters 键传成 int（如 limit=30 落入该键），
+    bili_dm_read 不再抛 'int' object has no attribute 'get'，参数从显式形参兜底。"""
+    from plugin.plugins.bili_viewer import BiliViewerPlugin, bili_social
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    fake_ctx = _FakeCtx()
+    inst = BiliViewerPlugin(ctx=fake_ctx)
+
+    def _fake_dm_messages(account, uid, limit, mark_read=False):
+        return {
+            "uid": 456,
+            "marked_read": False,
+            "messages": [
+                {"msg_seqno": 1, "from": "them", "time": "10-24 11:00", "text": "在吗", "sender_uid": 456},
+                {"msg_seqno": 2, "from": "me", "time": "10-24 11:01", "text": "在的", "sender_uid": 123},
+            ],
+        }
+
+    monkeypatch.setattr(bili_social, "dm_messages", _fake_dm_messages)
+    # 模拟宿主异常传参：parameters 键值为标量 int（实测 bili_dm_read 崩溃根因）
+    out = asyncio.run(inst.bili_dm_read(uid="456", parameters=30))
+    assert out["is_error"] is False
+    assert "在吗" in out["output"]
+
+
+def test_tool_params_scalar_str_defense(monkeypatch) -> None:
+    """v0.9.32 复现回归：parameters 键值为 str 时（bili_see_live 实测崩溃场景），
+    工具不抛 'str' object has no attribute 'get'，返回正常的缺参错误。"""
+    from plugin.plugins.bili_viewer import BiliViewerPlugin
+
+    monkeypatch.setenv("BILLI_SYNC_DISABLE", "1")
+    fake_ctx = _FakeCtx()
+    inst = BiliViewerPlugin(ctx=fake_ctx)
+    inst._ext_dom = lambda: None
+    inst._ext_tab = lambda force=False: None
+    out = asyncio.run(inst.bili_see_live(parameters="abc"))
+    assert out["is_error"] is True
+    assert out["error"] == "NO_ROOM"
+
+
+def test_entry_run_scalar_parameters_defense(monkeypatch) -> None:
+    """v0.9.32：总入口 entry_run 收到标量 parameters 时不崩溃，action 从 kwargs 正常解析。"""
+    from plugin.plugins.bili_viewer import BiliViewerPlugin
+
+    monkeypatch.setenv("BILLI_SYNC_DISABLE", "1")
+    fake_ctx = _FakeCtx()
+    inst = BiliViewerPlugin(ctx=fake_ctx)
+    inst._ext_tab = lambda force=False: None
+    out = asyncio.run(inst.entry_run(action="query", parameters=30))
+    assert out["is_error"] is False
+    assert "未感知到当前 B站 页面" in out["output"]
+
+
+def test_tool_params_dm_send_scalar_int_defense(monkeypatch) -> None:
+    """v0.9.32：bili_dm_send 收到标量 parameters（int）时不崩溃，返回缺参错误。"""
+    from plugin.plugins.bili_viewer import BiliViewerPlugin
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    fake_ctx = _FakeCtx()
+    inst = BiliViewerPlugin(ctx=fake_ctx)
+    out = asyncio.run(inst.bili_dm_send(parameters=30))
+    assert out["is_error"] is True
+    assert out["error"] == "EMPTY_PARAMS"
