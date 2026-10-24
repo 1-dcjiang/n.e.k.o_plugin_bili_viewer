@@ -198,6 +198,16 @@
 > 私信白名单（owner/粉丝/对方先发/互关，粉丝全放行满足"适用于所有关注她的粉丝"）、私信 payload（嵌套
 > msg[sender_uid]/msg[dev_id] per-install + wbi query）、动态发布/删除双回读、直播弹幕回读、5 秒风控间隔、
 > 弹幕连发任务（danmaku_loop.json）。
+> v0.9.31 豆包回执就绪自动唤醒（修复投稿监督失败根因）：
+> 用户实证：YUI 用 bili_yui_command_doubao 下发指令后，豆包处理完写好 outbox 回执，
+> 但 YUI 是纯事件驱动 agent——深夜无直播、无新消息、无屏幕变化时没有任何事件唤醒她
+> 去 bili_yui_read_doubao_reply 轮询，回执躺 8 小时没人消费（「YUI投稿监督」连续 7 轮
+> 未见投稿动作的根因）。新增后台 _bridge_reply_tick：随感知线程每 30 秒扫一次
+> %LOCALAPPDATA%/N.E.K.O/doubao_bridge/outbox，发现 status=="done" 且未通知过的回执时，
+> 用 ctx.push_message(ai_behavior="respond") 注入信号（visibility=[] 不弹 UI），
+> 触发 YUI 读取回执并按豆包答复继续执行（如 bili_yui_upload_video_url 下载投稿）；
+> 同一 request_id 只通知一次（_bridge_notified 去重，上限 500 防内存膨胀）；
+> 只读本地目录、零网络请求；回执文本中注明"豆包代办的成果，严禁说成自己完成"。
 > v0.9.30 视频有效性校验防空壳：
 > 用户实证：yui_uploads 积累 8 个 4096 字节无效 .mp4 占位（文件头 0x00010001 重复、非视频容器），
 > 因下载链路只校验'非空'而被当作成功视频继续投稿——新增模块级 _looks_like_video 容器头识别

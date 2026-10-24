@@ -1415,3 +1415,74 @@ def test_command_doubao_desc_has_video_pipeline(monkeypatch) -> None:
     assert "严禁把直链转手丢给玩家" in desc2
     desc3 = metas["bili_yui_upload_video_url"].description
     assert "严禁因为拿不到链接就向玩家索要" in desc3
+
+
+# ══════════ 豆包指令桥回执就绪自动唤醒（v0.9.31） ══════════
+
+
+def test_bridge_reply_wakeup_once(monkeypatch, tmp_path) -> None:
+    """v0.9.31：outbox 有 done 回执时注入一次 respond 信号唤醒 YUI，且不重复通知。"""
+    from plugin.plugins.bili_viewer import BiliViewerPlugin
+
+    class _Ctx:
+        def __init__(self) -> None:
+            self.pushes = []
+
+        def push_message(self, **kwargs) -> None:
+            self.pushes.append(kwargs)
+
+    monkeypatch.setenv("BILLI_SYNC_DISABLE", "1")  # 防启动真实后台线程
+    ctx = _Ctx()
+    inst = BiliViewerPlugin(ctx=ctx)
+    outbox = tmp_path / "outbox"
+    outbox.mkdir()
+    rid = "cmd_test123"
+    (outbox / f"{rid}.json").write_text(
+        json.dumps(
+            {"request_id": rid, "reply": "视频已生成：https://example.com/v.mp4", "status": "done", "done_at": "2026-10-24 01:12:55"},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(inst, "_doubao_bridge_dir", lambda: str(tmp_path))
+
+    inst._bridge_reply_tick()
+    inst._bridge_reply_tick()  # 同一回执第二次 tick 不再通知
+
+    assert len(ctx.pushes) == 1
+    body = ctx.pushes[0]
+    assert body.get("ai_behavior") == "respond"
+    assert body.get("coalesce_key") == f"doubao_reply_{rid}"
+    text = body["parts"][0]["text"]
+    assert rid in text
+    assert "bili_yui_read_doubao_reply" in text
+    assert body.get("metadata", {}).get("request_id") == rid
+
+
+def test_bridge_reply_skip_processing(monkeypatch, tmp_path) -> None:
+    """v0.9.31：回执未完成（processing）不注入唤醒信号。"""
+    from plugin.plugins.bili_viewer import BiliViewerPlugin
+
+    class _Ctx:
+        def __init__(self) -> None:
+            self.pushes = []
+
+        def push_message(self, **kwargs) -> None:
+            self.pushes.append(kwargs)
+
+    monkeypatch.setenv("BILLI_SYNC_DISABLE", "1")
+    ctx = _Ctx()
+    inst = BiliViewerPlugin(ctx=ctx)
+    outbox = tmp_path / "outbox"
+    outbox.mkdir()
+    rid = "cmd_proc1"
+    (outbox / f"{rid}.json").write_text(
+        json.dumps({"request_id": rid, "status": "processing"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(inst, "_doubao_bridge_dir", lambda: str(tmp_path))
+
+    inst._bridge_reply_tick()
+
+    assert ctx.pushes == []
+    assert rid not in inst._bridge_notified

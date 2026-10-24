@@ -113,6 +113,13 @@ _YUI_DYNAMIC_DAILY_MAX = 6               # 每日动态上限
 _YUI_UPLOAD_DAILY_MAX = 2                # 每日投稿上限
 _YUI_UPLOAD_DIR = "yui_uploads"          # 插件目录下，YUI 投稿视频文件放置目录
 
+# 豆包指令桥回执就绪自动唤醒（v0.9.31）：
+# 用户实证：YUI 下发指令后豆包写好 outbox 回执，但 YUI 是事件驱动 agent，深夜无直播/无消息时
+# 不会被唤醒轮询，回执躺 8 小时没人消费（投稿监督失败根因）。插件后台轮询 outbox，
+# 发现 status=="done" 且未通知过的回执时，用 push_message(ai_behavior="respond") 触发 YUI 行动。
+_BRIDGE_REPLY_POLL_INTERVAL = 30.0       # 回执检查间隔（秒）：每 30s 扫一次 outbox（轻量本地读目录）
+_BRIDGE_REPLY_NOTIFY_MAX = 500           # 已通知 request_id 集合上限，超出整体清空（防内存膨胀）
+
 
 def _looks_like_danmaku_instruction(text: str) -> bool:
     """启发式防呆（v0.9.28）：弹幕 text 参数是否其实是'指令原文'而非'要发送的内容'。
@@ -317,6 +324,9 @@ class BiliViewerPlugin(NekoPluginBase):
         self._unread_inject_ts = 0.0
         # 自主回复弹幕@冷却表（v0.8.5）：room → 上次唤醒时间
         self._mention_reply_cool: dict[str, float] = {}
+        # 豆包指令桥回执唤醒状态（v0.9.31）：已通知的 request_id 集合 + 轮询时间戳
+        self._bridge_notified: set[str] = set()
+        self._bridge_poll_ts = 0.0
         # 启动后台实时感知线程（守护线程，不阻塞插件生命周期）
         self._start_sync_watcher()
 
@@ -365,6 +375,13 @@ class BiliViewerPlugin(NekoPluginBase):
                     self._unread_tick()
             except Exception:
                 pass  # 未读轮询失败不影响主循环
+            # 豆包指令桥回执就绪自动唤醒（v0.9.31）：outbox 有新 done 回执时注入信号触发 YUI 行动
+            try:
+                if time.time() - self._bridge_poll_ts >= _BRIDGE_REPLY_POLL_INTERVAL:
+                    self._bridge_poll_ts = time.time()
+                    self._bridge_reply_tick()
+            except Exception:
+                pass  # 回执检查失败不影响主循环
             # 弹幕连发任务推进（v0.9.15）：有活动任务且到点则自动发一条
             try:
                 self._danmaku_loop_tick()
@@ -575,6 +592,61 @@ class BiliViewerPlugin(NekoPluginBase):
             st["next_due"] = time.time() + max(float(st.get("interval") or 5.0), 5.0)
         st["updated_at"] = time.strftime("%H:%M:%S")
         self._loop_save(st)
+
+    def _bridge_reply_tick(self) -> None:
+        """豆包指令桥回执就绪自动唤醒（v0.9.31）。
+
+        用户实证：YUI 用 bili_yui_command_doubao 下发指令后，豆包处理完写好 outbox 回执，
+        但 YUI 是纯事件驱动 agent——深夜无直播、无新消息、无屏幕变化时没有任何事件唤醒她
+        去 bili_yui_read_doubao_reply 轮询，回执可能躺数小时没人消费（此前 8 小时未投稿根因）。
+        本 tick 在后台每 _BRIDGE_REPLY_POLL_INTERVAL 秒扫一次 outbox：
+        - 发现 status=="done" 且本会话未通知过的回执 → push_message(ai_behavior="respond")
+          注入信号，触发 YUI 读取回执并按豆包答复继续执行（如 bili_yui_upload_video_url 投稿）；
+        - 同一 request_id 只通知一次（_bridge_notified 去重），防刷屏；
+        - 只读本地指令箱目录，零网络请求；任何失败静默跳过（调用方兜底捕获）。
+        """
+        if len(self._bridge_notified) > _BRIDGE_REPLY_NOTIFY_MAX:
+            self._bridge_notified.clear()  # 防内存膨胀：超限整体清空，最坏只重复提醒一次
+        bridge = self._doubao_bridge_dir()
+        outbox = os.path.join(bridge, "outbox")
+        try:
+            names = sorted(os.listdir(outbox))
+        except OSError:
+            return
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            rid = name[: -len(".json")]
+            if not rid or rid in self._bridge_notified:
+                continue
+            path = os.path.join(outbox, name)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if data.get("status") != "done":
+                continue
+            self._bridge_notified.add(rid)
+            text = (
+                f"【豆包指令桥·回执就绪】你之前交给豆包的指令已处理完成（请求号 {rid}）。"
+                f"请立即用 bili_yui_read_doubao_reply(request_id={rid}) 读取回执，"
+                f"并严格按豆包答复继续执行（若回执含视频直链，用 bili_yui_upload_video_url "
+                f"下载并投稿；这是豆包代办的成果，对外如实说明，严禁说成自己完成）。"
+                f"本条为后台任务信号，无需开口播报，直接静默执行即可。"
+            )
+            try:
+                self.ctx.push_message(
+                    visibility=[],
+                    ai_behavior="respond",
+                    parts=[{"type": "text", "text": text}],
+                    source=self.plugin_id,
+                    coalesce_key=f"doubao_reply_{rid}",
+                    priority=0,
+                    metadata={"doubao_reply_ready": True, "request_id": rid},
+                )
+            except Exception:
+                pass  # 注入失败不影响主循环（已入 notified，本轮不再重试）
 
     def _unread_tick(self) -> None:
         """自主查看私信（v0.8.2 + v0.9.0 内容直读）：小号未读轮询。
