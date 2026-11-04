@@ -1887,7 +1887,10 @@ class BiliViewerPlugin(NekoPluginBase):
                     "area": d.get("area", ""),
                     "parent_area": d.get("parent_area", ""),
                     "recent_danmaku": [
-                        {"user": x.get("user", ""), "text": x.get("text", "")}
+                        {
+                            "user": x.get("user", "") if isinstance(x, dict) else "",
+                            "text": x.get("text", "") if isinstance(x, dict) else str(x),
+                        }
                         for x in (d.get("danmaku") or [])[-20:]
                     ],
                     "_source": "page-dom",
