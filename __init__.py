@@ -319,6 +319,8 @@ class BiliViewerPlugin(NekoPluginBase):
         super().__init__(ctx)
         self._sync_thread: threading.Thread | None = None
         self._sync_lock = threading.Lock()
+        # 后台 watcher 停止信号：插件重载/关闭时置位并 join，避免旧线程继续跑出第二份 watcher
+        self._sync_stop = threading.Event()
         # 弹幕发送幂等去重：key=(kind,target,text) -> 上次发送时间戳。
         # 防止 LLM/宿主对同一指令重复触发发送工具/兜底入口导致同一条弹幕发两次（v0.6.38）。
         self._danmaku_sent: dict[str, float] = {}
@@ -358,6 +360,7 @@ class BiliViewerPlugin(NekoPluginBase):
         with self._sync_lock:
             if self._sync_thread is not None and self._sync_thread.is_alive():
                 return  # 防重复启动
+            self._sync_stop.clear()
             self._sync_thread = threading.Thread(
                 target=self._sync_watcher_loop,
                 name="bili-now-watching-sync",
@@ -372,7 +375,7 @@ class BiliViewerPlugin(NekoPluginBase):
         candidate_count = 0
         last_push_ts = 0.0
         monitor_ticks = 0
-        while True:
+        while not self._sync_stop.is_set():
             # 浏览器接入低频监控：约每 _BROWSER_MONITOR_EVERY 次轮询刷新一次
             monitor_ticks += 1
             if monitor_ticks >= _BROWSER_MONITOR_EVERY:
@@ -380,26 +383,26 @@ class BiliViewerPlugin(NekoPluginBase):
                 try:
                     self._browser_monitor = self._monitor_browser()
                 except Exception:
-                    pass
+                    _logger.exception("browser monitor tick failed")
             # 自主查看私信（v0.8.2）：低频轮询小号未读，有未读且冷却已过时静默注入
             try:
                 if time.time() - self._unread_poll_ts >= _UNREAD_POLL_INTERVAL:
                     self._unread_poll_ts = time.time()
                     self._unread_tick()
             except Exception:
-                pass  # 未读轮询失败不影响主循环
+                _logger.exception("unread poll tick failed")
             # 豆包指令桥回执就绪自动唤醒（v0.9.31）：outbox 有新 done 回执时注入信号触发 YUI 行动
             try:
                 if time.time() - self._bridge_poll_ts >= _BRIDGE_REPLY_POLL_INTERVAL:
                     self._bridge_poll_ts = time.time()
                     self._bridge_reply_tick()
             except Exception:
-                pass  # 回执检查失败不影响主循环
+                _logger.exception("bridge reply tick failed")
             # 弹幕连发任务推进（v0.9.15）：有活动任务且到点则自动发一条
             try:
                 self._danmaku_loop_tick()
             except Exception:
-                pass  # 连发失败不影响主循环
+                _logger.exception("danmaku loop tick failed")
             try:
                 tab = self._ext_tab()
                 if tab:
@@ -411,7 +414,7 @@ class BiliViewerPlugin(NekoPluginBase):
                     parsed = bili.pick_now_watching()
             except Exception:
                 # 感知单次失败不退出线程：等待后重试，避免同步永久失效
-                threading.Event().wait(_SYNC_POLL_INTERVAL)
+                self._sync_stop.wait(_SYNC_POLL_INTERVAL)
                 continue
             if not parsed:
                 # 无可感知窗口（如仅剩聊天客户端/终端）：YUI 仍可自主运营（自主挑选热门）
@@ -419,13 +422,13 @@ class BiliViewerPlugin(NekoPluginBase):
                     self._yui_autonomy_tick(None)
                 except Exception:
                     pass
-                threading.Event().wait(_SYNC_POLL_INTERVAL)
+                self._sync_stop.wait(_SYNC_POLL_INTERVAL)
                 continue
             # YUI 自主运营判定（节流唤醒，跟随用户或自主挑选热门；失败静默）
             try:
                 self._yui_autonomy_tick(parsed)
             except Exception:
-                pass
+                _logger.exception("autonomy tick failed")
             # v0.2.17 + v0.8.5：直播弹幕 @小号——静默注入感知；带房间号时可自主回弹幕
             # （同一直播间冷却 _MENTION_REPLY_COOLDOWN 内不重复唤醒，防刷屏）
             # v0.8.6：统一用包内 web_ui（顶层 `import web_ui` 会加载出第二个模块实例，
@@ -436,7 +439,7 @@ class BiliViewerPlugin(NekoPluginBase):
                     self._handle_mention(mention)
                     web_ui.get_mention_notify(clear=True)
             except Exception:
-                pass
+                _logger.exception("mention notify tick failed")
             fingerprint = _window_fingerprint(parsed)
             if fingerprint != candidate:
                 candidate, candidate_count = fingerprint, 0
@@ -466,16 +469,47 @@ class BiliViewerPlugin(NekoPluginBase):
                         last_pushed = fingerprint
                         last_push_ts = now
                     except Exception:
-                        pass  # 推送失败不中断轮询
-            threading.Event().wait(_SYNC_POLL_INTERVAL)
+                        _logger.exception("push_message failed")  # 推送失败不中断轮询
+            self._sync_stop.wait(_SYNC_POLL_INTERVAL)
 
     # ══════════ YUI 自主运营（v0.7.0，独立小号） ══════════
 
+    def _ensure_yui_state(self) -> None:
+        """惰性补齐自主运营状态（兼容测试/反序列化用 object.__new__ 跳过 __init__）。
+
+        生产实例在 __init__ 里全部创建；但历史测试与宿主恢复路径可能直接
+        object.__new__ 构造，缺少 _yui_rate_lock/_yui_rate/_yui_daily/_yui_cool
+        时会在发送/节流路径抛 AttributeError。这里按需补齐，不改变正常实例行为。
+        """
+        if getattr(self, "_yui_rate_lock", None) is None:
+            self._yui_rate_lock = threading.Lock()
+        for attr in ("_yui_rate", "_yui_daily", "_yui_cool"):
+            if getattr(self, attr, None) is None:
+                setattr(self, attr, {})
+
     def _yui_rate_check(self, op: str, key: str, window: float) -> bool:
         """频率限制：op 作用于 key 的操作距上次是否超过 window 秒。True=允许。"""
+        self._ensure_yui_state()
         with self._yui_rate_lock:
             last = self._yui_rate.get(f"{op}:{key}", 0.0)
             return (time.time() - last) >= window
+
+    def _prune_yui_state_locked(self, now: float | None = None) -> None:
+        """清理自主运营三张表的过期键，防止长期运行无限增长（调用方必须已持锁）。
+
+        - _yui_cool：未来冷却时间戳，已过期（<now）即可删；
+        - _yui_daily：只保留当天键，跨天旧计数无意义；
+        - _yui_rate：删除 24 小时前的操作时间戳。
+        仅在超过阈值时重建字典，避免每次 tick 都做全量扫描。
+        """
+        now = time.time() if now is None else now
+        if len(self._yui_cool) > 256:
+            self._yui_cool = {k: v for k, v in self._yui_cool.items() if v > now}
+        if len(self._yui_daily) > 64:
+            day = time.strftime("%Y%m%d")
+            self._yui_daily = {k: v for k, v in self._yui_daily.items() if k.endswith(day)}
+        if len(self._yui_rate) > 2048:
+            self._yui_rate = {k: v for k, v in self._yui_rate.items() if now - v < 86400}
 
     def _yui_rate_reserve(self, op: str, key: str, window: float) -> bool:
         """原子占用（复查优化 v0.7.8）：锁内检查+标记，杜绝并发双发竞态。
@@ -485,20 +519,25 @@ class BiliViewerPlugin(NekoPluginBase):
         → 同一目标发两条。reserve 在锁内一次性完成检查+占用：第二个线程会看到
         窗口未过被拒绝。发送失败时调用方必须 _yui_rate_rollback 释放窗口。
         """
+        self._ensure_yui_state()
         with self._yui_rate_lock:
+            now = time.time()
+            self._prune_yui_state_locked(now)
             last = self._yui_rate.get(f"{op}:{key}", 0.0)
-            if (time.time() - last) < window:
+            if (now - last) < window:
                 return False
-            self._yui_rate[f"{op}:{key}"] = time.time()
+            self._yui_rate[f"{op}:{key}"] = now
             return True
 
     def _yui_rate_rollback(self, op: str, key: str) -> None:
         """释放占用：发送失败/去重命中后回退时间戳，允许稍后重试。"""
+        self._ensure_yui_state()
         with self._yui_rate_lock:
             self._yui_rate.pop(f"{op}:{key}", None)
 
     def _yui_daily_allow(self, op: str) -> bool:
         """天级上限：dynamic≤6、upload≤2；True=允许。"""
+        self._ensure_yui_state()
         day = time.strftime("%Y%m%d")
         cap = {"dynamic": _YUI_DYNAMIC_DAILY_MAX, "upload": _YUI_UPLOAD_DAILY_MAX}.get(op, 99)
         with self._yui_rate_lock:
@@ -540,6 +579,7 @@ class BiliViewerPlugin(NekoPluginBase):
         - 发送用 verify=False（不阻塞主循环），记录 pending（3 秒后回读验证）；
         - 到点先回读上一条：直播间最近弹幕命中自己 uid+文本 → sent+1 继续；
           未命中 → 疑似被 B站 静默拦截，立即停止并如实上报（严禁假成功）；
+          回读本身异常 → 保留 pending 重试，连续 3 次失败才停止，绝不误报"未出现"。
         - 连续 3 次真发送失败自动停止；发满 total 自动停止。
         """
         st = self._loop_load()
@@ -564,9 +604,30 @@ class BiliViewerPlugin(NekoPluginBase):
                     and bili._danmaku_text_eq(m.get("text"), pending.get("text"))
                     for m in msgs
                 )
-            except Exception:
-                hit = False
+            except Exception as exc:
+                # v0.9.35：回读失败 ≠ 弹幕没出现。网络/接口异常时既不能计入成功，
+                # 也不能误报 DANMAKU_UNCONFIRMED；保留 pending 重试，连续失败才停止。
+                retries = int(st.get("readback_retries") or 0) + 1
+                st["readback_retries"] = retries
+                if retries >= 3:
+                    st["active"] = False
+                    st["stopped_reason"] = "连续 3 次回读失败（网络/接口异常），无法确认弹幕是否发出，已停止且未计入成功"
+                    st["last_error"] = f"DANMAKU_READBACK_FAILED: {type(exc).__name__}"
+                    st["updated_at"] = time.strftime("%H:%M:%S")
+                    self._loop_save(st)
+                    _logger.exception("danmaku loop stopped: readback failed 3x room=%s", room)
+                    return
+                st["last_error"] = (
+                    f"DANMAKU_READBACK_RETRY: 回读异常（{type(exc).__name__}: {str(exc)[:60]}），"
+                    "未判定成功/失败，稍后重试"
+                )
+                st["next_due"] = time.time() + 3.0
+                st["updated_at"] = time.strftime("%H:%M:%S")
+                self._loop_save(st)
+                _logger.exception("danmaku loop readback failed room=%s retry=%s", room, retries)
+                return
             st["pending"] = None
+            st["readback_retries"] = 0
             if hit:
                 st["sent"] = int(st.get("sent") or 0) + 1
                 st["fail_streak"] = 0
@@ -593,6 +654,7 @@ class BiliViewerPlugin(NekoPluginBase):
         try:
             bili.live_send_danmaku(room, text, account=account, verify=False)
             st["pending"] = {"room": room, "text": text, "verify_due": time.time() + 3.0}
+            st["readback_retries"] = 0
             st["next_due"] = time.time() + max(float(st.get("interval") or 5.0), 5.0)
             st["fail_streak"] = 0
             st["last_error"] = ""
@@ -839,7 +901,9 @@ class BiliViewerPlugin(NekoPluginBase):
         """
         day = time.strftime("%Y%m%d")
         cap = {"dynamic": _YUI_DYNAMIC_DAILY_MAX, "upload": _YUI_UPLOAD_DAILY_MAX}.get(op, 99)
+        self._ensure_yui_state()
         with self._yui_rate_lock:
+            self._prune_yui_state_locked()
             used = self._yui_daily.get(f"{op}:{day}", 0)
             if used >= cap:
                 return False
@@ -848,15 +912,19 @@ class BiliViewerPlugin(NekoPluginBase):
 
     def _yui_daily_release(self, op: str) -> None:
         """释放预占：发布失败后回退天级计数，允许稍后重试。"""
+        self._ensure_yui_state()
         day = time.strftime("%Y%m%d")
         with self._yui_rate_lock:
+            self._prune_yui_state_locked()
             used = self._yui_daily.get(f"{op}:{day}", 0)
             if used > 0:
                 self._yui_daily[f"{op}:{day}"] = used - 1
 
     def _yui_daily_bump(self, op: str) -> None:
+        self._ensure_yui_state()
         day = time.strftime("%Y%m%d")
         with self._yui_rate_lock:
+            self._prune_yui_state_locked()
             self._yui_daily[f"{op}:{day}"] = self._yui_daily.get(f"{op}:{day}", 0) + 1
 
     def _yui_autonomy_tick(self, parsed: dict | None) -> None:
@@ -876,8 +944,10 @@ class BiliViewerPlugin(NekoPluginBase):
             return
         key = f"{kind}:{target}"
         now = time.time()
-        if now < self._yui_cool.get(key, 0.0):
-            return  # 同目标冷却期内不重复唤醒
+        self._ensure_yui_state()
+        with self._yui_rate_lock:
+            if now < self._yui_cool.get(key, 0.0):
+                return  # 同目标冷却期内不重复唤醒
         text = self._yui_autonomy_text(kind, target, info)
         if not text:
             return
@@ -893,9 +963,11 @@ class BiliViewerPlugin(NekoPluginBase):
                 priority=0,
                 metadata={"autonomy": True},
             )
-            self._yui_cool[key] = now + _YUI_AUTONOMY_COOLDOWN
+            with self._yui_rate_lock:
+                self._prune_yui_state_locked()
+                self._yui_cool[key] = now + _YUI_AUTONOMY_COOLDOWN
         except Exception:
-            pass  # 唤醒失败不中断轮询
+            _logger.exception("autonomy wake failed")  # 唤醒失败不中断轮询
 
     def _yui_resolve_target(self, parsed: dict | None) -> tuple[str | None, str | None, dict]:
         """解析自主运营目标：用户在 B站 → 跟随用户；否则自主挑选热门视频。
@@ -1081,13 +1153,25 @@ class BiliViewerPlugin(NekoPluginBase):
 
     @lifecycle(id="shutdown")
     async def on_shutdown(self, **_):
+        # 先停后台轮询线程，避免旧实例在重载后继续跑出一份 watcher（双 watcher）
+        try:
+            self._sync_stop.set()
+            with self._sync_lock:
+                th = self._sync_thread
+                self._sync_thread = None
+            if th is not None and th.is_alive():
+                await asyncio.to_thread(th.join, 2.0)
+                if th.is_alive():
+                    _logger.warning("sync watcher did not stop within 2s; daemon thread left to exit")
+        except Exception:
+            _logger.exception("stop sync watcher failed")
         # 关闭常驻面板，释放 8765 端口（线程化避免阻塞关闭流程）
         try:
             panel = getattr(self, "_bind_panel", None)
             if panel is not None:
                 await asyncio.to_thread(panel.stop)
         except Exception:
-            pass
+            _logger.exception("stop bind panel failed")
         return {"status": "shutdown"}
 
     # ══════════ 搜索 ══════════
@@ -1114,7 +1198,7 @@ class BiliViewerPlugin(NekoPluginBase):
         keyword = str(keyword or params.get("keyword") or "").strip()
         stype = (type or params.get("type") or "video").strip().lower()
         try:
-            results = bili.search(keyword, stype)
+            results = await asyncio.to_thread(bili.search, keyword, stype)
         except bili.BiliError as exc:
             return _wrap_err(exc)
         lines = []
@@ -1154,7 +1238,7 @@ class BiliViewerPlugin(NekoPluginBase):
         if not bvid:
             return {"output": "请提供视频的 BV 号或链接。", "is_error": True, "error": "NO_BVID"}
         try:
-            info = bili.video_info(bvid, account=account)
+            info = await asyncio.to_thread(bili.video_info, bvid, account=account)
         except bili.BiliError as exc:
             return _wrap_err(exc)
         return {"output": bili.format_video_info(info), "is_error": False, "video": info}
@@ -1384,7 +1468,7 @@ class BiliViewerPlugin(NekoPluginBase):
         if browser and browser not in ("chrome", "edge", "360"):
             return {"output": "browser 参数只能为 chrome / edge / 360。", "is_error": True, "error": "BAD_BROWSER"}
         try:
-            bili.live_info(room)
+            await asyncio.to_thread(bili.live_info, room)
         except bili.BiliError as exc:
             return _wrap_err(exc)
         # 写指令给扩展（面板服务 127.0.0.1:8765；扩展 alarm 每 30s 轮询并开标签驻场）
@@ -1394,14 +1478,19 @@ class BiliViewerPlugin(NekoPluginBase):
             body = {"type": "enter-live", "room": room}
             if browser:
                 body["browser"] = browser
-            req = urllib.request.Request(
-                "http://127.0.0.1:8765/api/queue-command",
-                data=_json.dumps(body).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                r = _json.loads(resp.read().decode("utf-8") or "{}")
+
+            def _queue_command() -> dict:
+                req = urllib.request.Request(
+                    "http://127.0.0.1:8765/api/queue-command",
+                    data=_json.dumps(body).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    return _json.loads(resp.read().decode("utf-8") or "{}")
+
+            # 面板请求最长 10s，放进线程执行，避免 async 工具卡住整个事件循环
+            r = await asyncio.to_thread(_queue_command)
         except Exception as exc:
             return {"output": f"指令下发失败（面板服务不可达）：{exc}", "is_error": True, "error": "CMD_FAILED"}
         if not r.get("queued"):
@@ -1463,7 +1552,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 pass
             return {"output": f"直播间实时弹幕（最近 {len(ext_items)} 条）：\n" + "\n".join(lines[-25:]) + note, "is_error": False, "danmakus": [{"user": s, "text": t} for s, t, _a in ext_items]}
         try:
-            items = bili.live_danmaku(room, duration=duration)
+            items = await asyncio.to_thread(bili.live_danmaku, room, duration=duration)
         except bili.BiliError as exc:
             return _wrap_err(exc)
         lines = [f"{i}. {d['user']}：{d['text']}" for i, d in enumerate(items, 1)]
@@ -1515,7 +1604,7 @@ class BiliViewerPlugin(NekoPluginBase):
         unresolved: list[str] = []
         for name in names[:limit]:
             try:
-                uid = bili._resolve_uid(name, account)
+                uid = await asyncio.to_thread(bili._resolve_uid, name, account)
                 viewers.append({"uid": uid, "name": name})
             except bili.BiliError:
                 unresolved.append(name)
@@ -1723,7 +1812,9 @@ class BiliViewerPlugin(NekoPluginBase):
         params = _tool_params(_)
         account = self._resolve_account(account or params.get("account") or "")
         try:
-            result = bili.unfollow_all(account, dry_run=bool(dry_run or params.get("dry_run", False)))
+            result = await asyncio.to_thread(
+                bili.unfollow_all, account, dry_run=bool(dry_run or params.get("dry_run", False))
+            )
         except bili.BiliError as exc:
             return _wrap_err(exc)
         if result.get("dry_run"):
@@ -2111,8 +2202,11 @@ class BiliViewerPlugin(NekoPluginBase):
         params = _tool_params(_)
         room = str(room or params.get("room") or "").strip()
         text = str(text or params.get("text") or "").strip()
-        times = int(times or params.get("times") or 0)
-        interval = float(interval or params.get("interval") or 5.0)
+        try:
+            times = int(times or params.get("times") or 0)
+            interval = float(interval or params.get("interval") or 5.0)
+        except (TypeError, ValueError):
+            return {"output": "times 需为整数、interval 需为数字。", "is_error": True, "error": "BAD_PARAMS"}
         account = self._resolve_account(account or params.get("account") or "")
         if not room or not text:
             return {"output": "请提供直播间房间号和弹幕内容。", "is_error": True, "error": "EMPTY_PARAMS"}
@@ -2139,9 +2233,9 @@ class BiliViewerPlugin(NekoPluginBase):
         }
         self._loop_save(st)
         try:
-            self._danmaku_loop_tick()  # 立即发第一条
+            await asyncio.to_thread(self._danmaku_loop_tick)  # 立即发第一条（网络+回读，放线程）
         except Exception:
-            pass
+            _logger.exception("danmaku loop immediate tick failed")
         st2 = self._loop_load()
         out = f"弹幕连发任务已启动：直播间 {room}，内容「{text}」，共 {times} 条，每 {int(interval)} 秒一条，后台自动发送中。"
         if st2.get("active") is False and st2.get("stopped_reason"):

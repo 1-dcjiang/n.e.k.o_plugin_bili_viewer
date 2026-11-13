@@ -198,6 +198,21 @@
 > 私信白名单（owner/粉丝/对方先发/互关，粉丝全放行满足"适用于所有关注她的粉丝"）、私信 payload（嵌套
 > msg[sender_uid]/msg[dev_id] per-install + wbi query）、动态发布/删除双回读、直播弹幕回读、5 秒风控间隔、
 > 弹幕连发任务（danmaku_loop.json）。
+> v0.9.35 全仓复查修复（三个最可疑点 + 次要项）：
+> ① 6 个 async 工具（bili_search / bili_video_info / bili_enter_live / bili_live_danmaku /
+>    bili_live_viewers / bili_unfollow_all）原本在事件循环里直接调同步 urllib，现全部
+>    `asyncio.to_thread` 下放；bili_enter_live 的面板 POST 与 live_viewers 的逐个 uid 解析同样下放；
+> ② 弹幕回读异常不再当成“未命中”：网络/接口异常时保留 pending 并写
+>    DANMAKU_READBACK_RETRY，3 秒后重试；连续 3 次失败才 DANMAKU_READBACK_FAILED 停止，
+>    绝不误报 DANMAKU_UNCONFIRMED（只有成功回读且确实没找到才判未确认）；
+> ③ WBI/风控：签名查询串改用 quote（空格 %20）并剔除键名含 `!'()*` 的参数；密钥失效
+>    （FORBIDDEN/WBI_KEY）清缓存重取一次；HTTP 412/429 映射 RISK_CONTROL；匿名请求自动
+>    申请/携带游客 buvid3/buvid4（6h 缓存，失败本地 UUID 兜底）。
+> 次要项：on_shutdown 置位并 join watcher（防重载后双 watcher）；`_yui_cool/_yui_daily/
+> _yui_rate` 超阈值清理过期键；bili_live_danmaku_loop 的 times/interval 非法返回 BAD_PARAMS；
+> 连发首条 tick 放线程；watcher 各分支异常改为记录日志而非静默 pass。
+> 测试：新增 WBI 空格/特殊键、密钥失效重取、回读异常重试 3 个回归；conftest 隔离真实
+> Cookie 与扩展共享缓冲；全量 309 passed，ruff 通过。
 > v0.9.34 直播弹幕回读匹配收敛（防“旧弹幕冒充新弹幕”假确认）：
 > 宽松匹配拆成归一化 + 分级规则：去空白/大小写/首尾标点/HTML 转义后完全一致即确认；
 > 等长且差异位为 `*` 视为 B站 敏感词掩码；仅当两侧归一后均 ≥8 字时才允许高相似

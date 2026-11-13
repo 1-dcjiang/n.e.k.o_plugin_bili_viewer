@@ -23,6 +23,7 @@ import struct
 import time
 import urllib.parse
 import urllib.request
+import uuid
 import xml.etree.ElementTree as ET
 import zlib
 
@@ -68,6 +69,9 @@ _MAIN_COOKIE_FILE = "main_cookie.txt"  # 插件目录下的主账号 Cookie 文�
 _YUI_COOKIE_DIR = os.path.dirname(os.path.abspath(__file__))  # 可注入目录便于测试
 _yui_cookie_file_cache: tuple[float, str] = (0.0, "")  # (mtime, 内容)，避免 watcher 高频轮询反复读盘
 _main_cookie_file_cache: tuple[float, str] = (0.0, "")
+_visitor_cookie_cache = ""
+_visitor_cookie_ts = 0.0
+_VISITOR_COOKIE_TTL = 6 * 3600
 
 
 def _yui_cookie_from_file() -> str:
@@ -207,6 +211,46 @@ def _cookie(account: str = "main") -> str:
     return os.environ.get("BILI_COOKIE", "").strip() or _main_cookie_from_file()
 
 
+def _visitor_cookie() -> str:
+    """匿名请求的游客 Cookie（buvid3/buvid4）。
+
+    B站 对无 buvid3 的匿名请求更容易返回 -352。优先向官方 finger/spi 申请
+    游客标识（6 小时缓存）；接口不可达时退回本地生成的合法格式标识，绝不让
+    匿名读请求因为缺 buvid3 直接失败。
+    """
+    global _visitor_cookie_cache, _visitor_cookie_ts
+    now = time.time()
+    if _visitor_cookie_cache and now - _visitor_cookie_ts < _VISITOR_COOKIE_TTL:
+        return _visitor_cookie_cache
+    try:
+        req = urllib.request.Request(
+            _API + "/x/frontend/finger/spi",
+            headers={
+                "User-Agent": _UA,
+                "Referer": "https://www.bilibili.com/",
+                "Accept": "application/json, text/plain, */*",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read())
+        d = data.get("data") or {}
+        b3 = str(d.get("b_3") or "").strip()
+        b4 = str(d.get("b_4") or "").strip()
+        if b3:
+            _visitor_cookie_cache = f"buvid3={b3}" + (f"; buvid4={b4}" if b4 else "")
+            _visitor_cookie_ts = now
+            return _visitor_cookie_cache
+    except Exception:
+        pass
+    # 网络不可用时的兜底：B站 buvid3 是客户端指纹，格式合法即可随请求发送；
+    # 不阻塞、不重试，避免匿名读请求被一次游客标识申请拖慢。
+    raw = uuid.uuid4().hex.upper()
+    b3 = f"{raw[:8]}-{raw[8:12]}-{raw[12:16]}-{raw[16:20]}-{raw[20:32]}infoc"
+    _visitor_cookie_cache = f"buvid3={b3}"
+    _visitor_cookie_ts = now
+    return _visitor_cookie_cache
+
+
 def _open_with_retry(req, timeout: float, retries: int = 3, jitter: bool = False):
     """urlopen 网络层自动重试（防拦截加固，v0.7.11）。
 
@@ -224,6 +268,12 @@ def _open_with_retry(req, timeout: float, retries: int = 3, jitter: bool = False
         try:
             return urllib.request.urlopen(req, timeout=timeout)
         except urllib.error.HTTPError as exc:
+            # HTTP 412/429 是 B站 风控拦截，不能降级成普通 HTTP_ERROR：
+            # 上层按 RISK_CONTROL 提示等待/换登录态，避免把风控当网络故障盲目重试。
+            if exc.code == 412:
+                raise BiliError("触发风控限制（HTTP 412），请等待 1-2 分钟后再试", "RISK_CONTROL") from exc
+            if exc.code == 429:
+                raise BiliError("访问过于频繁（HTTP 429），请等待 1-2 分钟后再试", "RISK_CONTROL") from exc
             if exc.code >= 500 and i < retries:
                 last = exc
                 continue
@@ -253,17 +303,15 @@ def _http_get(url: str, params: dict | None = None, timeout: float = _TIMEOUT, a
         "Referer": "https://www.bilibili.com/",
         "Accept": "application/json, text/plain, */*",
     })
-    if _cookie(account):
-        req.add_header("Cookie", _cookie(account))
-    try:
-        with _open_with_retry(req, timeout) as resp:
-            raw = resp.read()
-    except urllib.error.HTTPError as exc:
-        raise BiliError(f"接口 HTTP {exc.code}", "HTTP_ERROR") from exc
-    except urllib.error.URLError as exc:
-        raise BiliError(f"网络错误：{exc.reason}", "NETWORK") from exc
-    except socket.timeout as exc:
-        raise BiliError("请求超时", "TIMEOUT") from exc
+    cookie = _cookie(account)
+    if not cookie:
+        cookie = _visitor_cookie()
+    if cookie:
+        req.add_header("Cookie", cookie)
+    # _open_with_retry 已把 HTTP/网络异常统一转成 BiliError，这里不再重复捕获
+    # （旧版 except urllib.error.HTTPError 是死代码：异常在 _open_with_retry 内就被转换了）。
+    with _open_with_retry(req, timeout) as resp:
+        raw = resp.read()
     try:
         data = json.loads(raw)
     except ValueError as exc:
@@ -307,17 +355,13 @@ def _get_mixin_key() -> str:
         "Referer": "https://www.bilibili.com/",
         "Accept": "application/json, text/plain, */*",
     })
-    if _cookie():
-        req.add_header("Cookie", _cookie())
-    try:
-        with _open_with_retry(req, _TIMEOUT) as resp:
-            raw = resp.read()
-    except urllib.error.HTTPError as exc:
-        raise BiliError(f"接口 HTTP {exc.code}", "HTTP_ERROR") from exc
-    except urllib.error.URLError as exc:
-        raise BiliError(f"网络错误：{exc.reason}", "NETWORK") from exc
-    except socket.timeout as exc:
-        raise BiliError("请求超时", "TIMEOUT") from exc
+    # 不再固定只带主账号 Cookie：主账号未配置时优先用小号，两个都没有时带游客
+    # buvid3，避免匿名 nav 因缺登录态/指纹直接返回 -352 导致签名密钥拿不到。
+    cookie = _cookie("main") or _cookie("yui") or _visitor_cookie()
+    if cookie:
+        req.add_header("Cookie", cookie)
+    with _open_with_retry(req, _TIMEOUT) as resp:
+        raw = resp.read()
     try:
         data = json.loads(raw)
     except ValueError as exc:
@@ -335,21 +379,45 @@ def _get_mixin_key() -> str:
     return mixin
 
 
+def _invalidate_mixin_cache() -> None:
+    """签名失败时清空 mixin 缓存，下次重新从 nav 取密钥。"""
+    global _mixin_cache, _mixin_cache_ts
+    _mixin_cache, _mixin_cache_ts = None, 0.0
+
+
 def _wbi_sign(params: dict, mixin_key: str) -> dict:
-    """给请求参数附加 wts 与 w_rid 签名。"""
+    """给请求参数附加 wts 与 w_rid 签名。
+
+    v0.9.35：按 B站 官方 WBI 算法修正两处——
+    1. 查询串必须用 quote（空格编码为 %20），不能用 urlencode 默认的 quote_plus（空格变 +）；
+    2. 键名含 !'()* 的参数必须剔除，否则签名与服务端计算不一致。
+    """
     params = dict(params)
     params["wts"] = int(time.time())
-    items = sorted(params.items(), key=lambda kv: str(kv[0]))
-    query = urllib.parse.urlencode(items)
+    items = sorted(
+        ((str(k), v) for k, v in params.items() if not any(c in str(k) for c in "!'()*")),
+        key=lambda kv: kv[0],
+    )
+    query = urllib.parse.urlencode(items, quote_via=urllib.parse.quote)
     params["w_rid"] = hashlib.md5((query + mixin_key).encode()).hexdigest()
     return params
 
 
 def _wbi_get(url: str, params: dict, timeout: float = _TIMEOUT, account: str = "main") -> dict:
-    """带 wbi 签名的 GET。v0.9.6 复查：加 account 参数（默认 main 保持向后兼容）。"""
-    mixin = _get_mixin_key()
-    signed = _wbi_sign(params, mixin)
-    return _http_get(url, signed, timeout=timeout, account=account)
+    """带 wbi 签名的 GET。v0.9.6 复查：加 account 参数（默认 main 保持向后兼容）。
+
+    v0.9.35：签名/密钥失效时清缓存重取一次。B站 wbi 密钥会轮换，旧实现缓存 1 小时
+    且失败不失效，换密钥后整小时都拿旧签名请求（表现为 -403/-352）。
+    """
+    for attempt in range(2):
+        try:
+            signed = _wbi_sign(params, _get_mixin_key())
+            return _http_get(url, signed, timeout=timeout, account=account)
+        except BiliError as exc:
+            if attempt == 0 and exc.code in ("FORBIDDEN", "WBI_KEY"):
+                _invalidate_mixin_cache()
+                continue
+            raise
 
 
 # ══════════════ 解析辅助 ══════════════

@@ -71,6 +71,56 @@ def test_wbi_sign() -> None:
     assert signed["w_rid"] == expect
 
 
+def test_wbi_sign_spaces_and_special_keys() -> None:
+    """v0.9.35：空格按 %20 编码，含 !'()* 的键不参与签名。"""
+    import urllib.parse
+
+    from plugin.plugins.bili_viewer.bili import _wbi_sign
+
+    mixin = "b" * 32
+    params = {"keyword": "hello world", "bad!key": "x", "page": 1}
+    signed = _wbi_sign(params, mixin)
+    items = sorted(
+        (str(k), str(v))
+        for k, v in signed.items()
+        if k != "w_rid" and not any(c in str(k) for c in "!'()*")
+    )
+    query = urllib.parse.urlencode(items, quote_via=urllib.parse.quote)
+    expect = hashlib.md5((query + mixin).encode()).hexdigest()
+    assert signed["w_rid"] == expect
+    assert "%20" in query and "+" not in query
+    assert "bad!key" not in query
+    # 旧算法（quote_plus 空格变 +）必须算出不同签名，证明修复真实生效
+    old = urllib.parse.urlencode([(str(k), str(v)) for k, v in signed.items() if k != "w_rid"])
+    assert signed["w_rid"] != hashlib.md5((old + mixin).encode()).hexdigest()
+
+
+def test_wbi_get_refetches_key_on_forbidden(monkeypatch) -> None:
+    """v0.9.35：wbi 签名被拒（FORBIDDEN）时清缓存重取密钥再试一次。"""
+    from plugin.plugins.bili_viewer import bili
+
+    keys: list[int] = []
+
+    def fake_key() -> str:
+        keys.append(1)
+        return "c" * 32
+
+    calls: list[int] = []
+
+    def fake_http(url, params, timeout=10.0, account="main"):
+        calls.append(1)
+        if len(calls) == 1:
+            raise bili.BiliError("无权限访问", "FORBIDDEN")
+        return {"code": 0, "data": {}}
+
+    monkeypatch.setattr(bili, "_get_mixin_key", fake_key)
+    monkeypatch.setattr(bili, "_http_get", fake_http)
+    out = bili._wbi_get("https://api.bilibili.com/x/test", {"a": 1})
+    assert out["code"] == 0
+    assert len(calls) == 2
+    assert len(keys) == 2  # 第二次重新取密钥
+
+
 def test_mixin_table_length() -> None:
     from plugin.plugins.bili_viewer.bili import _MIXIN_TABLE
 
@@ -1711,6 +1761,33 @@ def test_danmaku_loop_tick_unconfirmed_stops(monkeypatch) -> None:
     assert st["active"] is False
     assert "未在直播间出现" in (st.get("stopped_reason") or "")
     assert st["sent"] == 0
+
+
+def test_danmaku_loop_readback_exception_retries(monkeypatch) -> None:
+    """v0.9.35：回读异常保留 pending 重试，不能误判成"弹幕未出现"。"""
+    from plugin.plugins.bili_viewer import BiliViewerPlugin, bili
+
+    inst = object.__new__(BiliViewerPlugin)
+    monkeypatch.setattr(
+        bili,
+        "_live_recent_danmaku",
+        lambda room_id, account="yui": (_ for _ in ()).throw(RuntimeError("network down")),
+    )
+    monkeypatch.setattr(bili, "_yui_uid", lambda account: 3494363678116792)
+    st = {
+        "room": "1", "text": "666", "total": 10, "sent": 0, "unconfirmed": 0,
+        "interval": 5.0, "active": True, "fail_streak": 0, "last_error": "",
+        "next_due": 0, "account": "yui",
+        "pending": {"room": "1", "text": "666", "verify_due": 0},
+    }
+    monkeypatch.setattr(inst, "_loop_load", lambda: st)
+    monkeypatch.setattr(inst, "_loop_save", lambda s: st.update(s))
+    inst._danmaku_loop_tick()
+    assert st["active"] is True
+    assert st["pending"] is not None
+    assert st.get("readback_retries") == 1
+    assert (st.get("last_error") or "").startswith("DANMAKU_READBACK_RETRY")
+    assert "DANMAKU_UNCONFIRMED" not in (st.get("last_error") or "")
 
 
 def test_danmaku_loop_interval_min_is_5(monkeypatch) -> None:
