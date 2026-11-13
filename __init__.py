@@ -561,7 +561,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 msgs = bili._live_recent_danmaku(int(room), account)
                 hit = any(
                     int(m.get("uid") or 0) == my_uid
-                    and (m.get("text") or "").strip() == str(pending.get("text") or "")
+                    and bili._danmaku_text_eq(m.get("text"), pending.get("text"))
                     for m in msgs
                 )
             except Exception:
@@ -1997,7 +1997,7 @@ class BiliViewerPlugin(NekoPluginBase):
             "拿不到 dmid 是正常现象，不是错误、不代表失败——严禁纠结'为什么没拿到ID'、严禁向用户解释或复述该现象；"
             "发送是否成功由插件回读直播间最近弹幕验证（confirmed）决定："
             "确认出现才返回成功（回复'弹幕已发送。'）；未确认（DANMAKU_UNCONFIRMED）如实报告"
-            "'接口已接受但直播间未出现，疑似被 B站 弹幕过滤拦截'，严禁声称已发送，严禁重试刷屏。"
+            "'接口已接受但回读未捕获该条（可能延迟/弹幕量大/敏感词改写），以直播间实际显示为准'，严禁声称已发送，严禁重试刷屏。"
         ),
         parameters={
             "type": "object",
@@ -2070,10 +2070,10 @@ class BiliViewerPlugin(NekoPluginBase):
         if result.get("confirmed", True):
             return {"output": "弹幕已发送。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": result}
         # v0.9.18：接口接受但回读未在直播间出现（B站 静默吞弹幕）——如实报告，严禁假成功
-        note = result.get("confirm_note") or "接口已接受但直播间最近弹幕未出现该条"
+        note = result.get("confirm_note") or "接口已接受但回读直播间最近弹幕未捕获该条"
         _logger.warning("live danmaku UNCONFIRMED room=%s text=%r note=%s", room, text[:20], note)
         return {
-            "output": "接口已接受，但回读直播间弹幕未出现该条（疑似被 B站 弹幕过滤/风控拦截），未确认已发出；已停止，不重试以免刷屏。",
+            "output": f"{note}；未确认已发出，不重试以免刷屏。",
             "is_error": True,
             "error": "DANMAKU_UNCONFIRMED",
             "result": result,

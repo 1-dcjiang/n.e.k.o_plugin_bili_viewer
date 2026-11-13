@@ -382,6 +382,50 @@ def test_live_send_danmaku_uses_msg_send(monkeypatch) -> None:
     assert posted["form"]["csrf_token"] == "tok"
 
 
+def test_danmaku_text_eq_lenient(monkeypatch) -> None:
+    """弹幕回读宽松匹配：抗转义/敏感词改写/空白差异，不把已发出的弹幕误报拦截。"""
+    from plugin.plugins.bili_viewer.bili import _danmaku_text_eq
+
+    # 完全一致
+    assert _danmaku_text_eq("你好呀", "你好呀") is True
+    # 空白/大小写差异
+    assert _danmaku_text_eq("Hello World", "hello  world") is True
+    # 转义/符号差异（首尾标点归一）
+    assert _danmaku_text_eq("博士说得对!!", "博士说得对") is True
+    # 完全不同
+    assert _danmaku_text_eq("随便一条", "完全无关") is False
+    # 空值
+    assert _danmaku_text_eq(None, "你好") is False
+    assert _danmaku_text_eq("", "你好") is False
+
+
+def test_danmaku_text_eq_masked_and_long_rewrite() -> None:
+    """B站 敏感词掩码 / 长文本改写仍可确认，不误报被拦截。"""
+    from plugin.plugins.bili_viewer.bili import _danmaku_text_eq
+
+    # 敏感词掩码：等长，差异位是 *
+    assert _danmaku_text_eq("敏**测试", "敏感词测试") is True
+    assert _danmaku_text_eq("敏感词测试", "敏**测试") is True
+    # 等长但差异位不是掩码 → 不能确认
+    assert _danmaku_text_eq("敏感词测试", "敏感词测x") is False
+    # 长文本轻微改写（相似度兜底）
+    assert _danmaku_text_eq("这首歌的编曲真的很有层次感啊", "这首歌的编曲真的很有层次感") is True
+    # 长文本被追加少量内容（子串兜底）
+    assert _danmaku_text_eq("这首歌的编曲真的很有层次感呀", "这首歌的编曲真的很有层次感") is True
+
+
+def test_danmaku_text_eq_short_substring_is_not_confirmation() -> None:
+    """短文本不允许子串兜底：防止把本账号上一条弹幕误判成本条已显示。"""
+    from plugin.plugins.bili_viewer.bili import _danmaku_text_eq
+
+    # 回读里有上一条「大家好我是YUI」，本条发「大家好」——不能算已确认
+    assert _danmaku_text_eq("大家好我是YUI", "大家好") is False
+    # 反向包含同样不能确认
+    assert _danmaku_text_eq("大家好", "大家好我是YUI") is False
+    # 短文本仅改一个字也不能确认（等长、无掩码、长度不足）
+    assert _danmaku_text_eq("大家好呀", "大家好啊") is False
+
+
 def test_no_csrf_for_write(monkeypatch) -> None:
     from plugin.plugins.bili_viewer.bili import BiliError, live_send_danmaku
 

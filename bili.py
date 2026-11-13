@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import difflib
 import gzip
 import hashlib
 import json
@@ -1713,6 +1714,45 @@ def edit_video(bvid: str, title: str | None = None, desc: str | None = None, tag
     return {"bvid": bvid, "title": form["title"], "desc": form["desc"], "tag": form["tag"], "ok": True}
 
 
+_DANMAKU_PUNCT = "，。！？；：、…·～—（）【】《》「」『』“”‘’" + "!?.,;:'\"()[]{}<>~-_/@#$%^&*+=|\\"
+
+
+def _norm_danmaku_text(value) -> str:
+    """回读文本归一：去空白、忽略大小写、去首尾常见标点、解 HTML 转义。"""
+    text = str(value or "")
+    text = text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+    text = re.sub(r"\s+", "", text).casefold()
+    return text.strip(_DANMAKU_PUNCT)
+
+
+def _danmaku_text_eq(actual, sent) -> bool:
+    """弹幕回读宽松匹配，但只容忍“同一条弹幕被 B站 改写”的差异。
+
+    规则（按严格程度递进）：
+    1. 归一后完全一致（空白/大小写/首尾标点/HTML 转义差异不算差异）；
+    2. 等长且不同位置有一侧是 ``*``（B站 敏感词掩码，如「敏**测试」）；
+    3. 长文本高相似（归一后均 ≥8 字，SequenceMatcher ratio ≥0.90）；
+    4. 长文本互为子串（均 ≥8 字，长度差 ≤4，容忍 B站 追加/裁剪少量字符）。
+
+    短文本不做子串/相似度兜底：回读列表里有本账号此前发的弹幕，
+    「大家好」会被「大家好我是YUI」包含，若允许短文本子串就会把
+    **上一条** 误判成本条已显示（假确认）。宁可多等一轮回读，也不报假成功。
+    """
+    a = _norm_danmaku_text(actual)
+    s = _norm_danmaku_text(sent)
+    if not a or not s:
+        return False
+    if a == s:
+        return True
+    if len(a) == len(s) and all(x == y or x == "*" or y == "*" for x, y in zip(a, s)):
+        return True
+    if min(len(a), len(s)) < 8:
+        return False
+    if difflib.SequenceMatcher(None, a, s).ratio() >= 0.90:
+        return True
+    return abs(len(a) - len(s)) <= 4 and (a in s or s in a)
+
+
 def _live_recent_danmaku(room_id: int, account: str = "yui") -> list:
     """回读直播间最近弹幕（v0.9.18）：ajax/msg 返回 data.admin + data.normal 列表。
 
@@ -1739,8 +1779,9 @@ def live_send_danmaku(room: str, text: str, account: str = "yui", verify: bool =
     两者不一致时弹幕会发进错误房间（v0.6.30）。
 
     verify（v0.9.18）：发送后回读直播间最近弹幕验证（默认 True）——接口接受（code=0）≠ 已显示，
-    实测 B站 会静默吞弹幕（code=0 无 dmid 但直播间不出现）；回读最多 2 次（各等 3 秒），
-    命中自己 uid + 文本才算 confirmed。verify=False 供连发任务使用（不阻塞主循环，由任务下轮回读）。
+    实测 B站 会静默吞弹幕（code=0 无 dmid 但直播间不出现）；回读最多 3 次（2/4/4 秒），
+    命中自己 uid + 文本（经 _danmaku_text_eq 容忍敏感词改写）才算 confirmed。
+    verify=False 供连发任务使用（不阻塞主循环，由任务下轮回读）。
     """
     _require_login(account)
     text = (text or "").strip()
@@ -1786,18 +1827,21 @@ def live_send_danmaku(room: str, text: str, account: str = "yui", verify: bool =
     if verify:
         try:
             my_uid = _yui_uid(account)
-            for _ in range(2):
-                time.sleep(3)
+            # 首轮 2 秒即可覆盖大多数正常回流；未命中再 4+4 秒，兼顾延迟弹幕。
+            # 相比固定 4+4+4，常见路径少等 2 秒，总等待上限也从 12 秒降到 10 秒。
+            for wait in (2, 4, 4):
+                time.sleep(wait)
                 msgs = _live_recent_danmaku(int(page_room), account)
                 if any(
                     int(m.get("uid") or 0) == my_uid
-                    and (m.get("text") or "").strip() == text
+                    and _danmaku_text_eq(m.get("text"), text)
                     for m in msgs
                 ):
                     confirmed = True
                     break
             if not confirmed:
-                confirm_note = "接口已接受但直播间最近弹幕未出现该条，疑似被 B站 弹幕过滤/风控拦截"
+                confirm_note = ("接口已接受（code=0），回读窗口内未捕获该条弹幕"
+                                "（可能弹幕延迟/直播间弹幕量大/敏感词改写），以直播间实际显示为准")
         except Exception:
             confirm_note = "回读验证失败（网络/风控），未确认是否出现在直播间"
     return {
