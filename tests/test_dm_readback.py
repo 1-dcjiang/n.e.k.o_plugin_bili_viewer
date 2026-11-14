@@ -32,9 +32,19 @@ def test_dm_verified_false_when_read_ok_but_missing(monkeypatch) -> None:
 
 def test_dm_verified_retries_after_read_error(monkeypatch) -> None:
     """v0.9.38：一次回读异常不再直接放弃，后续重试成功应返回 True。"""
+    import time as _real_time
+
     from plugin.plugins.bili_viewer import bili, bili_social
 
-    monkeypatch.setattr(bili_social.time, "sleep", lambda _s: None)
+    class _ScopedTime:
+        """只替换被测模块的 time，避免污染全进程的 stdlib 时钟。"""
+
+        sleep = staticmethod(lambda _s: None)
+
+        def __getattr__(self, name):
+            return getattr(_real_time, name)
+
+    monkeypatch.setattr(bili_social, "time", _ScopedTime())
     calls = {"n": 0}
 
     def flaky(*_a, **_kw):
