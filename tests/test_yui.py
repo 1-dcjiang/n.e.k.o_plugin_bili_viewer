@@ -91,7 +91,7 @@ def test_assign_cookie_first_is_main_second_is_yui(monkeypatch, tmp_path) -> Non
     r1 = inst._assign_cookie("SESSDATA=a; DedeUserID=111; bili_jct=a1", 0, "extension")
     assert r1["bound"] is True and "大号" in r1["detail"]
     assert bili._cookie("main") == "SESSDATA=a; DedeUserID=111; bili_jct=a1"
-    assert (tmp_path / "main_cookie.txt").read_text(encoding="utf-8") == "SESSDATA=a; DedeUserID=111; bili_jct=a1"
+    assert bili._read_cookie_file(str(tmp_path / "main_cookie.txt")) == "SESSDATA=a; DedeUserID=111; bili_jct=a1"
     acc = pkg._read_accounts()
     assert acc["main"]["uid"] == 111
 
@@ -99,7 +99,7 @@ def test_assign_cookie_first_is_main_second_is_yui(monkeypatch, tmp_path) -> Non
     r2 = inst._assign_cookie("SESSDATA=b; DedeUserID=222; bili_jct=b2", 0, "extension")
     assert r2["bound"] is True and "小号" in r2["detail"]
     assert bili._cookie("yui") == "SESSDATA=b; DedeUserID=222; bili_jct=b2"
-    assert (tmp_path / "yui_cookie.txt").read_text(encoding="utf-8") == "SESSDATA=b; DedeUserID=222; bili_jct=b2"
+    assert bili._read_cookie_file(str(tmp_path / "yui_cookie.txt")) == "SESSDATA=b; DedeUserID=222; bili_jct=b2"
     acc = pkg._read_accounts()
     assert acc["yui"]["uid"] == 222
 
@@ -238,7 +238,7 @@ def test_default_account_fallback_to_main(monkeypatch) -> None:
 
     def fake_send(room, text, account="main"):
         captured.append(account)
-        return {"ok": True}
+        return {"ok": True, "confirmed": True}
 
     monkeypatch.setattr(bili, "live_send_danmaku", fake_send)
     inst = _make_inst(monkeypatch)
@@ -256,7 +256,7 @@ def test_default_account_uses_yui_when_configured(monkeypatch) -> None:
 
     def fake_send(room, text, account="main"):
         captured.append(account)
-        return {"ok": True}
+        return {"ok": True, "confirmed": True}
 
     monkeypatch.setattr(bili, "live_send_danmaku", fake_send)
     inst = _make_inst(monkeypatch)
@@ -274,7 +274,7 @@ def test_yui_danmaku_rate_limit(monkeypatch) -> None:
     monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
 
     def fake_send(room, text, account="main"):
-        return {"ok": True}
+        return {"ok": True, "confirmed": True}
 
     monkeypatch.setattr(bili, "live_send_danmaku", fake_send)
     inst = _make_inst(monkeypatch)
@@ -311,7 +311,7 @@ def test_yui_rate_reserve_atomic_blocks_concurrent(monkeypatch) -> None:
     from plugin.plugins.bili_viewer import bili
 
     monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
-    monkeypatch.setattr(bili, "live_send_danmaku", lambda room, text, account="main": {"ok": True})
+    monkeypatch.setattr(bili, "live_send_danmaku", lambda room, text, account="main": {"ok": True, "confirmed": True})
     inst = _make_inst(monkeypatch)
     # 第一次发送：成功（占用窗口）
     r1 = asyncio.run(inst.bili_live_send_danmaku(room="12345", text="第一条", account="yui"))
@@ -331,7 +331,7 @@ def test_yui_rate_rollback_after_failure(monkeypatch) -> None:
     def fake_send(room, text, account="main"):
         if state["fail"]:
             raise bili.BiliError("接口失败", "SEND_FAILED")
-        return {"ok": True}
+        return {"ok": True, "confirmed": True}
 
     monkeypatch.setattr(bili, "live_send_danmaku", fake_send)
     inst = _make_inst(monkeypatch)
@@ -1384,7 +1384,7 @@ def test_live_danmaku_normal_text_passes_guard(monkeypatch) -> None:
 
     inst = _make_inst(monkeypatch)
     monkeypatch.setattr(inst, "_ext_tab", lambda force=False: None)
-    monkeypatch.setattr(bili, "live_send_danmaku", lambda room, text, account="yui": {"room": room, "text": text})
+    monkeypatch.setattr(bili, "live_send_danmaku", lambda room, text, account="yui": {"room": room, "text": text, "confirmed": True})
     monkeypatch.setattr(inst, "_danmaku_recently_sent", lambda *a, **k: False)
     r = asyncio.run(inst.bili_live_send_danmaku(room="12345", text="我是YUI小猫娘，很高兴认识大家", account="yui"))
     assert r["is_error"] is False and "已发送" in r["output"]

@@ -11,6 +11,8 @@ import time
 import urllib.error
 import urllib.request
 
+import pytest
+
 
 def _web_ui():
     from plugin.plugins.bili_viewer import web_ui
@@ -294,3 +296,40 @@ def test_panel_get_origin_blocked(monkeypatch, tmp_path):
             assert resp.status == 200
     finally:
         panel.stop()
+
+def test_queue_command_requires_panel_token(monkeypatch):
+    """v0.9.37：/api/queue-command 必须带启动时随机 token，否则 403。"""
+    panel, url = _start_panel(lambda *_: {"ok": True})
+    web_ui = _web_ui()
+    web_ui._CMD_QUEUE.clear()
+    try:
+        body = json.dumps({"type": "enter-live", "room": "12345"}).encode()
+        for headers in ({}, {"X-Neko-Token": "wrong"}):
+            req = urllib.request.Request(url + "api/queue-command", data=body, method="POST")
+            for k, v in headers.items():
+                req.add_header(k, v)
+            with pytest.raises(urllib.error.HTTPError) as exc:
+                urllib.request.urlopen(req, timeout=10)
+            assert exc.value.code == 403
+
+        req = urllib.request.Request(url + "api/queue-command", data=body, method="POST")
+        req.add_header("X-Neko-Token", panel.token)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        assert payload.get("queued") is True
+    finally:
+        web_ui._CMD_QUEUE.clear()
+        panel._server.shutdown()
+
+
+def test_panel_rejects_foreign_host_header(monkeypatch):
+    """v0.9.37：DNS rebinding 防护——Host 不是 127.0.0.1/localhost 时 403。"""
+    panel, url = _start_panel(lambda *_: {"ok": True})
+    try:
+        req = urllib.request.Request(url + "api/status")
+        req.add_header("Host", "evil.example:8765")
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(req, timeout=10)
+        assert exc.value.code == 403
+    finally:
+        panel._server.shutdown()

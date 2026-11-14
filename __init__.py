@@ -79,7 +79,8 @@ _ERR_HINTS: dict[str, str] = {
 
 def _wrap_err(exc: bili.BiliError) -> dict:
     out: dict = {
-        "output": exc.message,
+        # v0.9.37：异常原文统一脱敏，Cookie/csrf/token/本机路径不进 LLM 上下文
+        "output": bili.redact_text(exc.message),
         "is_error": True,
         "error": exc.code,
     }
@@ -125,6 +126,7 @@ _YUI_COMMENT_WINDOW = 120.0              # 同一视频评论最小间隔（秒�
 _YUI_DYNAMIC_DAILY_MAX = 6               # 每日动态上限
 _YUI_UPLOAD_DAILY_MAX = 2                # 每日投稿上限
 _YUI_UPLOAD_DIR = "yui_uploads"          # 插件目录下，YUI 投稿视频文件放置目录
+_LOOP_FILE_LOCK = threading.Lock()       # danmaku_loop 状态文件读写锁（工具线程与 watcher 共用）
 
 # 豆包指令桥回执就绪自动唤醒（v0.9.31）：
 # 用户实证：YUI 下发指令后豆包写好 outbox 回执，但 YUI 是事件驱动 agent，深夜无直播/无消息时
@@ -600,14 +602,6 @@ class BiliViewerPlugin(NekoPluginBase):
         with self._yui_rate_lock:
             self._yui_rate.pop(f"{op}:{key}", None)
 
-    def _yui_daily_allow(self, op: str) -> bool:
-        """天级上限：dynamic≤6、upload≤2；True=允许。"""
-        self._ensure_yui_state()
-        day = time.strftime("%Y%m%d")
-        cap = {"dynamic": _YUI_DYNAMIC_DAILY_MAX, "upload": _YUI_UPLOAD_DAILY_MAX}.get(op, 99)
-        with self._yui_rate_lock:
-            return self._yui_daily.get(f"{op}:{day}", 0) < cap
-
     # ══════════ 弹幕连发任务（v0.9.15） ══════════
     # 用户实测反馈"不会自动发，仍然会挂机"：YUI 是单轮指令驱动，无法自行持续推进长指令
     # （如"发666一共1000次"）。新增后台连发任务：调用一次，每 interval 秒自动发一条，
@@ -624,18 +618,28 @@ class BiliViewerPlugin(NekoPluginBase):
         return os.path.join(d, self._DM_LOOP_FILE)
 
     def _loop_load(self) -> dict:
-        try:
-            with open(self._loop_path(), "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
+        with _LOOP_FILE_LOCK:
+            try:
+                with open(self._loop_path(), "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                return {}
 
     def _loop_save(self, st: dict) -> None:
-        try:
-            with open(self._loop_path(), "w", encoding="utf-8") as f:
-                json.dump(st, f, ensure_ascii=False, indent=2)
-        except OSError:
-            pass
+        with _LOOP_FILE_LOCK:
+            tmp = ""
+            try:
+                path = self._loop_path()
+                tmp = path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(st, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, path)
+            except OSError:
+                if tmp:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
 
     def _danmaku_loop_tick(self) -> None:
         """弹幕连发任务推进：sync 轮询里调用（v0.9.15）。
@@ -725,11 +729,18 @@ class BiliViewerPlugin(NekoPluginBase):
             st["last_error"] = ""
         except bili.BiliError as exc:
             st["fail_streak"] = int(st.get("fail_streak") or 0) + 1
-            st["last_error"] = f"{exc.code}: {str(exc.message)[:80]}"
+            st["last_error"] = f"{exc.code}: {bili.redact_text(exc.message, 80)}"
             if st["fail_streak"] >= 3:
                 st["active"] = False
                 st["stopped_reason"] = "连续 3 次发送失败"
             st["next_due"] = time.time() + max(float(st.get("interval") or 5.0), 5.0)
+        except Exception as exc:
+            # v0.9.37：非 BiliError 也必须记账并停止，不能让异常穿透后台线程后任务卡死
+            st["fail_streak"] = int(st.get("fail_streak") or 0) + 1
+            st["last_error"] = f"SEND_EXCEPTION: {bili.redact_text(exc, 80)}"
+            st["active"] = False
+            st["stopped_reason"] = "发送出现非接口异常，已停止"
+            _logger.exception("danmaku loop send crashed room=%s", room)
         st["updated_at"] = time.strftime("%H:%M:%S")
         self._loop_save(st)
 
@@ -985,13 +996,6 @@ class BiliViewerPlugin(NekoPluginBase):
             if used > 0:
                 self._yui_daily[f"{op}:{day}"] = used - 1
 
-    def _yui_daily_bump(self, op: str) -> None:
-        self._ensure_yui_state()
-        day = time.strftime("%Y%m%d")
-        with self._yui_rate_lock:
-            self._prune_yui_state_locked()
-            self._yui_daily[f"{op}:{day}"] = self._yui_daily.get(f"{op}:{day}", 0) + 1
-
     def _yui_autonomy_tick(self, parsed: dict | None) -> None:
         """自主运营判定：开关与小号配置检查 → 解析目标 → 冷却 → 组装上下文唤醒 YUI。
 
@@ -1186,10 +1190,15 @@ class BiliViewerPlugin(NekoPluginBase):
             desktop_deliver.ensure_desktop_package_async(_plugin_dir)
         except Exception:
             pass
+        # 0.4) 旧版明文 Cookie 文件迁移为 DPAPI 加密（阻塞磁盘 IO 移出事件循环）
+        try:
+            await asyncio.to_thread(bili.migrate_cookie_files)
+        except Exception as exc:
+            _logger.warning("cookie migration failed: %s", bili.redact_text(exc))
         # 0.5) 常驻本地接入面板（127.0.0.1:8765）：扩展一装好就能直连推送，
         #      不再需要先调用 bili_bind_web 才启动面板。端口被占（已有实例）则复用/跳过。
         try:
-            self._ensure_panel()
+            await asyncio.to_thread(self._ensure_panel)
         except Exception:
             pass
         # 1) 手动配置（settings.bili_cookie / 环境变量 BILI_COOKIE）——2s 预算，快速返回
@@ -1212,7 +1221,7 @@ class BiliViewerPlugin(NekoPluginBase):
         # 2.5) 系统音频桥常驻：启动即拉起 WASAPI loopback 采集（全自动、无需浏览器授权），
         #      让 YUI 随时能听到，而不是等 bili_listen_audio 被调用才冷启动。
         try:
-            self._ensure_sys_audio_bridge()
+            await asyncio.to_thread(self._ensure_sys_audio_bridge)
             _logger.info("sys audio bridge ensured at startup")
         except Exception as e:
             _logger.warning(f"sys audio bridge startup ensure failed: {e}")
@@ -1353,7 +1362,7 @@ class BiliViewerPlugin(NekoPluginBase):
         if not bvid:
             return {"output": "请提供视频的 BV 号或链接。", "is_error": True, "error": "NO_BVID"}
         try:
-            danmakus = bili.video_danmaku(bvid, limit=n)
+            danmakus = await asyncio.to_thread(bili.video_danmaku, bvid, limit=n)
         except bili.BiliError as exc:
             return _wrap_err(exc)
         return {"output": f"弹幕（前 {len(danmakus)} 条）：\n" + "\n".join(danmakus), "is_error": False, "danmakus": danmakus}
@@ -1381,7 +1390,7 @@ class BiliViewerPlugin(NekoPluginBase):
         if not bvid:
             return {"output": "请提供视频的 BV 号或链接。", "is_error": True, "error": "NO_BVID"}
         try:
-            text = bili.video_subtitle(bvid, lan=lan)
+            text = await asyncio.to_thread(bili.video_subtitle, bvid, lan=lan)
         except bili.BiliError as exc:
             return _wrap_err(exc)
         return {"output": f"视频字幕（{lan}）：\n" + text[:3000], "is_error": False, "subtitle": text[:6000]}
@@ -1407,7 +1416,7 @@ class BiliViewerPlugin(NekoPluginBase):
         if not bvid:
             return {"output": "请提供视频的 BV 号或链接。", "is_error": True, "error": "NO_BVID"}
         try:
-            summary = bili.video_ai_summary(bvid)
+            summary = await asyncio.to_thread(bili.video_ai_summary, bvid)
         except bili.BiliError as exc:
             return _wrap_err(exc)
         return {"output": f"AI 视频概要：\n{summary}", "is_error": False, "summary": summary}
@@ -1446,7 +1455,9 @@ class BiliViewerPlugin(NekoPluginBase):
         if not bvid:
             return {"output": "请提供视频的 BV 号或链接。", "is_error": True, "error": "NO_BVID"}
         try:
-            comments = bili.video_comments(bvid, mode=mode, page=page, limit=n)
+            comments = await asyncio.to_thread(
+                bili.video_comments, bvid, mode=mode, page=page, limit=n
+            )
         except bili.BiliError as exc:
             return _wrap_err(exc)
         lines = []
@@ -1479,7 +1490,7 @@ class BiliViewerPlugin(NekoPluginBase):
         if not room:
             return {"output": "请提供直播房间号或直播间链接。", "is_error": True, "error": "NO_ROOM"}
         try:
-            info = bili.live_info(room)
+            info = await asyncio.to_thread(bili.live_info, room)
         except bili.BiliError as exc:
             return _wrap_err(exc)
         return {"output": bili.format_live_info(info), "is_error": False, "live": info}
@@ -1562,10 +1573,14 @@ class BiliViewerPlugin(NekoPluginBase):
                 body["browser"] = browser
 
             def _queue_command() -> dict:
+                panel = getattr(self, "_bind_panel", None)
+                token = str(getattr(panel, "token", "") or "")
+                if not token:
+                    raise RuntimeError("面板 token 未初始化")
                 req = urllib.request.Request(
                     "http://127.0.0.1:8765/api/queue-command",
                     data=_json.dumps(body).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
+                    headers={"Content-Type": "application/json", web_ui._PANEL_TOKEN_HEADER: token},
                     method="POST",
                 )
                 with urllib.request.urlopen(req, timeout=10) as resp:
@@ -1728,7 +1743,7 @@ class BiliViewerPlugin(NekoPluginBase):
         if not mid or mid <= 0:
             return {"output": "请提供 UP主的数字 mid（可用 bili_search(type=user) 先搜索）。", "is_error": True, "error": "NO_MID"}
         try:
-            info = bili.user_info(mid)
+            info = await asyncio.to_thread(bili.user_info, mid)
         except bili.BiliError as exc:
             return _wrap_err(exc)
         return {"output": bili.format_user_info(info), "is_error": False, "user": info}
@@ -1764,7 +1779,7 @@ class BiliViewerPlugin(NekoPluginBase):
         if not mid or mid <= 0:
             return {"output": "请提供 UP主的数字 mid（可用 bili_search(type=user) 先搜索）。", "is_error": True, "error": "NO_MID"}
         try:
-            videos = bili.user_videos(mid, page=page, limit=n)
+            videos = await asyncio.to_thread(bili.user_videos, mid, page=page, limit=n)
         except bili.BiliError as exc:
             return _wrap_err(exc)
         lines = []
@@ -1797,7 +1812,7 @@ class BiliViewerPlugin(NekoPluginBase):
         try:
             # v0.9.20：每次调用强制重新检测当前浏览器页面（实时查询接口，不依赖缓存）
             tab = self._ext_tab(force=True)
-            info = bili.now_watching(tab=tab)
+            info = await asyncio.to_thread(bili.now_watching, tab=tab)
         except bili.BiliError as exc:
             return _wrap_err(exc)
         output = bili.format_now_watching(info)
@@ -1826,7 +1841,7 @@ class BiliViewerPlugin(NekoPluginBase):
         params = _tool_params(_)
         account = self._resolve_account(account or params.get("account") or "")
         try:
-            info = bili.my_info(account)
+            info = await asyncio.to_thread(bili.my_info, account)
         except bili.BiliError as exc:
             return _wrap_err(exc)
         return {"output": bili.format_my_info(info), "is_error": False, "account": info}
@@ -1860,7 +1875,12 @@ class BiliViewerPlugin(NekoPluginBase):
         except (TypeError, ValueError):
             uid = None
         try:
-            result = bili.set_account_role(role, uid=uid, force=bool(force or params.get("force", False)))
+            result = await asyncio.to_thread(
+                bili.set_account_role,
+                role,
+                uid=uid,
+                force=bool(force or params.get("force", False)),
+            )
         except bili.BiliError as exc:
             return _wrap_err(exc)
         return {
@@ -1941,7 +1961,7 @@ class BiliViewerPlugin(NekoPluginBase):
         n = max(1, min(n, 30))
         page = max(1, page)
         try:
-            videos = bili.my_videos(page=page, limit=n, account=account)
+            videos = await asyncio.to_thread(bili.my_videos, page=page, limit=n, account=account)
         except bili.BiliError as exc:
             return _wrap_err(exc)
         return {"output": f"{'小号' if account == 'yui' else '主账号'}的稿件（第 {page} 页）：\n" + bili.format_my_videos(videos), "is_error": False, "videos": videos}
@@ -1990,7 +2010,8 @@ class BiliViewerPlugin(NekoPluginBase):
         if not bvid:
             return {"output": "请提供要修改的稿件 BV 号。", "is_error": True, "error": "NO_BVID"}
         try:
-            result = bili.edit_video(
+            result = await asyncio.to_thread(
+                bili.edit_video,
                 bvid,
                 title=(title or params.get("title") or None),
                 desc=(desc or params.get("desc") or None),
@@ -2069,7 +2090,7 @@ class BiliViewerPlugin(NekoPluginBase):
                     "_source": "page-dom",
                 }
             else:
-                see = bili.live_see(room)
+                see = await asyncio.to_thread(bili.live_see, room)
                 see["_source"] = "api"
         except bili.BiliError as exc:
             return _wrap_err(exc)
@@ -2118,7 +2139,7 @@ class BiliViewerPlugin(NekoPluginBase):
         if not bvid:
             return {"output": "未提供BV号且感知不到当前视频。", "is_error": True, "error": "NO_BVID"}
         try:
-            see = bili.video_see(bvid)
+            see = await asyncio.to_thread(bili.video_see, bvid)
             see["_source"] = "api"
             if dom_video:
                 # 页面级实时 DOM 补充：播放进度（API 拿不到 currentTime）
@@ -2232,15 +2253,28 @@ class BiliViewerPlugin(NekoPluginBase):
                 self._yui_rate_rollback("danmaku", f"live:{room}")
             return {"output": "弹幕已发送。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": {"dedup": True, "room": room}}
         try:
-            result = bili.live_send_danmaku(room, text, account=account)
+            result = await asyncio.to_thread(bili.live_send_danmaku, room, text, account=account)
         except bili.BiliError as exc:
             if account == "yui":
                 self._yui_rate_rollback("danmaku", f"live:{room}")
             self._record_send_result("live", False, exc.code, exc.message, room)
             return self._wrap_auth(exc, "发送弹幕")
+        except Exception as exc:
+            # 非 BiliError（编码/本地 IO/解析异常）也必须释放原子占用，否则 5 秒窗口被永久占住
+            if account == "yui":
+                self._yui_rate_rollback("danmaku", f"live:{room}")
+            _logger.exception("live danmaku send crashed room=%s", room)
+            return {"output": f"弹幕发送异常：{bili.redact_text(exc)}", "is_error": True, "error": "SEND_EXCEPTION"}
         self._mark_danmaku_sent("live", room, text, 0)
-        self._record_send_result("live", True, "", result.get("server") or "", room, dmid=result.get("dmid") or "")
-        if result.get("confirmed", True):
+        # v0.9.37：缺 confirmed 字段必须按“未确认”处理，不能默认成功（复核第 3 项）
+        confirmed = result.get("confirmed") is True
+        self._record_send_result(
+            "live", confirmed,
+            "" if confirmed else "DANMAKU_UNCONFIRMED",
+            "" if confirmed else "接口已接受但回读未捕获该条",
+            room, dmid=result.get("dmid") or "",
+        )
+        if confirmed:
             return {"output": "弹幕已发送。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": result}
         # v0.9.18：接口接受但回读未在直播间出现（B站 静默吞弹幕）——如实报告，严禁假成功
         note = result.get("confirm_note") or "接口已接受但回读直播间最近弹幕未捕获该条"
@@ -2462,12 +2496,19 @@ class BiliViewerPlugin(NekoPluginBase):
                 "result": {"dedup": True, "bvid": bvid, "progress": progress},
             }
         try:
-            result = bili.send_video_danmaku(bvid, text, progress_ms=progress * 1000, account=account)
+            result = await asyncio.to_thread(
+                bili.send_video_danmaku, bvid, text, progress_ms=progress * 1000, account=account
+            )
         except bili.BiliError as exc:
             if account == "yui":
                 self._yui_rate_rollback("danmaku", f"video:{bvid}")
             self._record_send_result("video", False, exc.code, exc.message, bvid)
             return self._wrap_auth(exc, "发送弹幕")
+        except Exception as exc:
+            if account == "yui":
+                self._yui_rate_rollback("danmaku", f"video:{bvid}")
+            _logger.exception("video danmaku send crashed bvid=%s", bvid)
+            return {"output": f"弹幕发送异常：{bili.redact_text(exc)}", "is_error": True, "error": "SEND_EXCEPTION"}
         self._mark_danmaku_sent("video", bvid, text, progress)
         self._record_send_result("video", True, "", result.get("dmid") or "", bvid)
         return {
@@ -2532,7 +2573,9 @@ class BiliViewerPlugin(NekoPluginBase):
                     parsed = {"kind": "live", "room_id": target} if target.isdigit() and len(target) >= 5 else None
             if isinstance(parsed, dict) and parsed.get("kind") == "video" and parsed.get("bvid"):
                 try:
-                    aid = bili.video_info(parsed["bvid"], account=account).get("aid")
+                    aid = (await asyncio.to_thread(
+                        bili.video_info, parsed["bvid"], account=account
+                    )).get("aid")
                     if aid:
                         oid, type_id = int(aid), 1
                 except bili.BiliError:
@@ -2545,7 +2588,9 @@ class BiliViewerPlugin(NekoPluginBase):
                 parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
                 if isinstance(parsed, dict) and parsed.get("kind") == "video" and parsed.get("bvid"):
                     try:
-                        aid = bili.video_info(parsed["bvid"], account=account).get("aid")
+                        aid = (await asyncio.to_thread(
+                            bili.video_info, parsed["bvid"], account=account
+                        )).get("aid")
                         if aid:
                             oid, type_id = int(aid), 1
                     except bili.BiliError:
@@ -2560,7 +2605,7 @@ class BiliViewerPlugin(NekoPluginBase):
             if not self._yui_rate_reserve("comment", key, _YUI_COMMENT_WINDOW):
                 return {"output": "刚发过评论（同一目标 120 秒内限 1 条），请稍后再试。", "is_error": True, "error": "RATE_LIMITED"}
         try:
-            res = bili.add_reply(oid, type_id, text, account=account)
+            res = await asyncio.to_thread(bili.add_reply, oid, type_id, text, account=account)
         except bili.BiliError as exc:
             if account == "yui":
                 self._yui_rate_rollback("comment", key)
@@ -2581,6 +2626,11 @@ class BiliViewerPlugin(NekoPluginBase):
                 kind_name, type_id, oid, exc.code, account,
             )
             return self._wrap_auth(exc, "发送评论")
+        except Exception as exc:
+            if account == "yui":
+                self._yui_rate_rollback("comment", key)
+            _logger.exception("comment send crashed target=%s:%s", type_id, oid)
+            return {"output": f"评论发送异常：{bili.redact_text(exc)}", "is_error": True, "error": "SEND_EXCEPTION"}
         kind_name = "video" if type_id == 1 else ("live" if type_id == 11 else f"type{type_id}")
         _logger.info(
             "comment send result: kind=%s ok=True target=%s:%s account=%s",
@@ -2643,7 +2693,7 @@ class BiliViewerPlugin(NekoPluginBase):
             if not self._yui_rate_reserve("relation", key, 60):
                 return {"output": "刚执行过关注（同一目标 60 秒内限 1 次），请稍后再试。", "is_error": True, "error": "RATE_LIMITED"}
         try:
-            result = bili.modify_relation(target, "follow", account=account)
+            result = await asyncio.to_thread(bili.modify_relation, target, "follow", account=account)
         except bili.BiliError as exc:
             if account == "yui":
                 self._yui_rate_rollback("relation", key)
@@ -2693,7 +2743,7 @@ class BiliViewerPlugin(NekoPluginBase):
             if not self._yui_rate_reserve("relation", key, 60):
                 return {"output": "刚执行过取关（同一目标 60 秒内限 1 次），请稍后再试。", "is_error": True, "error": "RATE_LIMITED"}
         try:
-            result = bili.modify_relation(target, "unfollow", account=account)
+            result = await asyncio.to_thread(bili.modify_relation, target, "unfollow", account=account)
         except bili.BiliError as exc:
             if account == "yui":
                 self._yui_rate_rollback("relation", key)
@@ -2739,7 +2789,7 @@ class BiliViewerPlugin(NekoPluginBase):
         try:
             # v0.9.25 对照 bili-cli guard.py：动态发布本地限流 60 秒/次、10 次/小时（防"发一次变3条"类连发）
             bili_social.check_limit("dynamic", account="yui")
-            result = bili.post_dynamic(text, account="yui")
+            result = await asyncio.to_thread(bili.post_dynamic, text, account="yui")
             bili_social.record_limit("dynamic", {"text_len": len(text)}, result, account="yui")
         except bili.BiliError as exc:
             self._yui_daily_release("dynamic")
@@ -2774,7 +2824,7 @@ class BiliViewerPlugin(NekoPluginBase):
         try:
             # v0.9.25 对照 bili-cli guard.py：删除操作本地限流 3 秒/次、60 次/小时
             bili_social.check_limit("delete", account="yui")
-            bili.delete_dynamic(dynamic_id, account="yui")
+            await asyncio.to_thread(bili.delete_dynamic, dynamic_id, account="yui")
             bili_social.record_limit("delete", {"dynamic_id": dynamic_id}, "ok", account="yui")
         except bili.BiliError as exc:
             return self._wrap_auth(exc, "删除动态")
@@ -2851,7 +2901,9 @@ class BiliViewerPlugin(NekoPluginBase):
                 return {"output": "已有投稿正在进行中，请稍后再试。", "is_error": True, "error": "BUSY"}
             self._yui_uploading = True
         try:
-            bili.submit_video(file_path, title, desc=desc, tags=tags, tid=tid, account="yui")
+            await asyncio.to_thread(
+                bili.submit_video, file_path, title, desc=desc, tags=tags, tid=tid, account="yui"
+            )
         except bili.BiliError as exc:
             self._yui_daily_release("upload")
             return self._wrap_auth(exc, "投稿")
@@ -2913,45 +2965,45 @@ class BiliViewerPlugin(NekoPluginBase):
         upload_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), _YUI_UPLOAD_DIR)
         os.makedirs(upload_dir, exist_ok=True)
         dest = os.path.join(upload_dir, base)
-        try:
+        def _download() -> int:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
             with urllib.request.urlopen(req, timeout=30) as resp, open(dest, "wb") as out:
-                total = 0
+                size = 0
                 while True:
                     chunk = resp.read(256 * 1024)
                     if not chunk:
                         break
-                    total += len(chunk)
-                    if total > 2 * 1024 * 1024 * 1024:
+                    size += len(chunk)
+                    if size > 2 * 1024 * 1024 * 1024:
                         raise bili.BiliError("视频文件超过 2GB，拒绝投稿", "FILE_TOO_LARGE")
                     out.write(chunk)
-            if total <= 0:
+            if size <= 0:
                 raise bili.BiliError("下载内容为空（0 字节），拒绝投稿", "EMPTY_DOWNLOAD")
             # v0.9.30：有效性校验——防 4KB 占位/错误响应当成功视频（用户实证空壳文件）
             with open(dest, "rb") as _vf:
                 _vhead = _vf.read(16)
-            if not _looks_like_video(_vhead) or total < 64 * 1024:
-                try:
-                    os.remove(dest)
-                except OSError:
-                    pass
+            if not _looks_like_video(_vhead) or size < 64 * 1024:
                 raise bili.BiliError(
                     "下载内容不是有效视频文件（文件头无视频容器特征，可能被拦截/防盗链），"
                     "已删除半成品，请换可下载直链重试",
                     "DOWNLOAD_BAD_CONTENT",
                 )
+            return size
+
+        try:
+            total = await asyncio.to_thread(_download)
         except bili.BiliError as exc:
             try:
                 os.remove(dest)
             except OSError:
                 pass
-            return {"output": exc.message, "is_error": True, "error": exc.code}
+            return {"output": bili.redact_text(exc.message), "is_error": True, "error": exc.code}
         except Exception as exc:
             try:
                 os.remove(dest)
             except OSError:
                 pass
-            return {"output": f"视频下载失败：{exc}", "is_error": True, "error": "DOWNLOAD_FAILED"}
+            return {"output": f"视频下载失败：{bili.redact_text(exc)}", "is_error": True, "error": "DOWNLOAD_FAILED"}
         _logger.info("yui upload from url: downloaded size=%d file=%s", total, base)
         # 复用 bili_yui_upload 的投稿链路（日限额/互斥/路径安全/失败回退额度全部沿用）
         return await self.bili_yui_upload(file=base, title=title, desc=desc, tags=tags, tid=tid)
@@ -3110,7 +3162,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 "error": "NO_YUI_COOKIE",
             }
         try:
-            info = bili.my_info("yui")
+            info = await asyncio.to_thread(bili.my_info, "yui")
         except bili.BiliError as exc:
             return _wrap_err(exc)
         return {
@@ -3151,7 +3203,7 @@ class BiliViewerPlugin(NekoPluginBase):
             else:
                 bound_txt = ""
             try:
-                info = bili.my_info(role)
+                info = await asyncio.to_thread(bili.my_info, role)
                 ident = f"{info['uname']}（uid {info['mid']}，Lv{info['level']}）"
             except bili.BiliError:
                 ident = f"uid {uid if uid is not None else '未知'}"
@@ -3263,7 +3315,7 @@ class BiliViewerPlugin(NekoPluginBase):
         account = self._resolve_account(account or params.get("account") or "")
         limit = int(limit or params.get("limit") or 5)
         try:
-            data = bili_social.inbox(account, max(1, min(limit, 20)))
+            data = await asyncio.to_thread(bili_social.inbox, account, max(1, min(limit, 20)))
         except bili.BiliError as exc:
             return _wrap_err(exc)
         out = {
@@ -3301,9 +3353,12 @@ class BiliViewerPlugin(NekoPluginBase):
         params = _tool_params(_)
         account = self._resolve_account(account or params.get("account") or "")
         try:
-            data = bili_social.unread_counts(account)
+            data = await asyncio.to_thread(bili_social.unread_counts, account)
             # v0.8.3：私信未读以本地游标为准（B站 msgfeed.chat 网页打开后归 0，不可靠）
-            data["private_messages"] = max(data.get("private_messages") or 0, bili_social.new_dm_count(account))
+            data["private_messages"] = max(
+                data.get("private_messages") or 0,
+                await asyncio.to_thread(bili_social.new_dm_count, account),
+            )
         except bili.BiliError as exc:
             return _wrap_err(exc)
         names = {"replies": "回复", "mentions": "@我", "likes": "赞", "private_messages": "私信", "system": "系统通知"}
@@ -3332,7 +3387,7 @@ class BiliViewerPlugin(NekoPluginBase):
         account = self._resolve_account(account or params.get("account") or "")
         limit = int(limit or params.get("limit") or 20)
         try:
-            data = bili_social.feed_replies(account, max(1, min(limit, 30)))
+            data = await asyncio.to_thread(bili_social.feed_replies, account, max(1, min(limit, 30)))
         except bili.BiliError as exc:
             return _wrap_err(exc)
         return {"output": json.dumps(data, ensure_ascii=False), "is_error": False, "result": data}
@@ -3358,7 +3413,7 @@ class BiliViewerPlugin(NekoPluginBase):
         account = self._resolve_account(account or params.get("account") or "")
         limit = int(limit or params.get("limit") or 20)
         try:
-            data = bili_social.feed_mentions(account, max(1, min(limit, 30)))
+            data = await asyncio.to_thread(bili_social.feed_mentions, account, max(1, min(limit, 30)))
         except bili.BiliError as exc:
             return _wrap_err(exc)
         return {"output": json.dumps(data, ensure_ascii=False), "is_error": False, "result": data}
@@ -3384,7 +3439,7 @@ class BiliViewerPlugin(NekoPluginBase):
         account = self._resolve_account(account or params.get("account") or "")
         limit = int(limit or params.get("limit") or 20)
         try:
-            data = bili_social.feed_likes(account, max(1, min(limit, 30)))
+            data = await asyncio.to_thread(bili_social.feed_likes, account, max(1, min(limit, 30)))
         except bili.BiliError as exc:
             return _wrap_err(exc)
         return {"output": json.dumps(data, ensure_ascii=False), "is_error": False, "result": data}
@@ -3410,7 +3465,7 @@ class BiliViewerPlugin(NekoPluginBase):
         account = self._resolve_account(account or params.get("account") or "")
         limit = int(limit or params.get("limit") or 10)
         try:
-            data = bili_social.feed_system(account, max(1, min(limit, 50)))
+            data = await asyncio.to_thread(bili_social.feed_system, account, max(1, min(limit, 50)))
         except bili.BiliError as exc:
             return _wrap_err(exc)
         return {"output": json.dumps(data, ensure_ascii=False), "is_error": False, "result": data}
@@ -3438,7 +3493,12 @@ class BiliViewerPlugin(NekoPluginBase):
         account = self._resolve_account(account or params.get("account") or "")
         limit = int(limit or params.get("limit") or 20)
         try:
-            items = bili_social.dm_conversations(account, bool(unread_only or params.get("unread_only", False)), max(1, min(limit, 50)))
+            items = await asyncio.to_thread(
+                bili_social.dm_conversations,
+                account,
+                bool(unread_only or params.get("unread_only", False)),
+                max(1, min(limit, 50)),
+            )
         except bili.BiliError as exc:
             return _wrap_err(exc)
         return {"output": json.dumps(items, ensure_ascii=False), "is_error": False, "result": items}
@@ -3473,7 +3533,13 @@ class BiliViewerPlugin(NekoPluginBase):
         account = self._resolve_account(account or params.get("account") or "")
         limit = int(limit or params.get("limit") or 30)
         try:
-            data = bili_social.dm_messages(account, uid, max(1, min(limit, 30)), bool(mark_read or params.get("mark_read", False)))
+            data = await asyncio.to_thread(
+                bili_social.dm_messages,
+                account,
+                uid,
+                max(1, min(limit, 30)),
+                bool(mark_read or params.get("mark_read", False)),
+            )
         except bili.BiliError as exc:
             return _wrap_err(exc)
         msgs = data.get("messages") or []
@@ -3530,7 +3596,7 @@ class BiliViewerPlugin(NekoPluginBase):
         if not uid or not text:
             return {"output": "请提供对方 UID 和消息内容。", "is_error": True, "error": "EMPTY_PARAMS"}
         try:
-            result = bili_social.dm_send(account, uid, text, allow_new)
+            result = await asyncio.to_thread(bili_social.dm_send, account, uid, text, allow_new)
         except bili.BiliError as exc:
             if exc.code in ("DM_UNVERIFIED", "DM_WHITELIST", "RATE_LIMITED", "TOO_LONG", "SELF_DM"):
                 _logger.info("dm send result: ok=False error=%s account=%s uid=%s", exc.code, account, uid)
@@ -3563,7 +3629,7 @@ class BiliViewerPlugin(NekoPluginBase):
         limit = int(limit or params.get("limit") or 20)
         account = self._resolve_account(account or params.get("account") or "")
         try:
-            data = bili_social.fans_list(account, limit)
+            data = await asyncio.to_thread(bili_social.fans_list, account, limit)
         except bili.BiliError as exc:
             return _wrap_err(exc)
         items = data.get("items") or []
@@ -3595,7 +3661,7 @@ class BiliViewerPlugin(NekoPluginBase):
             return {"output": "请提供视频 BV 号或链接。", "is_error": True, "error": "EMPTY_BVID"}
         account = self._resolve_account(account or params.get("account") or "")
         try:
-            data = bili_social.video_relation(bvid, account)
+            data = await asyncio.to_thread(bili_social.video_relation, bvid, account)
         except bili.BiliError as exc:
             return _wrap_err(exc)
         out = f"{data['bvid']}：已赞 {'是' if data['liked'] else '否'} ｜ 已投币 {data['coins']} ｜ 已收藏 {'是' if data['favorited'] else '否'} ｜ 关注UP {'是' if data['following_up'] else '否'}"
@@ -3628,7 +3694,7 @@ class BiliViewerPlugin(NekoPluginBase):
         if not bvid:
             return {"output": "请提供视频 BV 号或链接。", "is_error": True, "error": "EMPTY_BVID"}
         try:
-            result = bili_social.video_like(bvid, account, undo)
+            result = await asyncio.to_thread(bili_social.video_like, bvid, account, undo)
         except bili.BiliError as exc:
             if exc.code in ("LIKE_UNVERIFIED", "RATE_LIMITED"):
                 _logger.info("like result: ok=False error=%s account=%s bvid=%s", exc.code, account, bvid)
@@ -3670,7 +3736,7 @@ class BiliViewerPlugin(NekoPluginBase):
         if not bvid or not coins:
             return {"output": "请提供视频 BV 号和投币数量（1 或 2）。", "is_error": True, "error": "EMPTY_PARAMS"}
         try:
-            result = bili_social.video_coin(bvid, account, coins, with_like)
+            result = await asyncio.to_thread(bili_social.video_coin, bvid, account, coins, with_like)
         except bili.BiliError as exc:
             if exc.code in ("COIN_UNVERIFIED", "RATE_LIMITED", "COIN_LIMIT", "BAD_COINS"):
                 _logger.info("coin result: ok=False error=%s account=%s bvid=%s coins=%s", exc.code, account, bvid, coins)
@@ -3707,7 +3773,7 @@ class BiliViewerPlugin(NekoPluginBase):
         if not bvid:
             return {"output": "请提供视频 BV 号或链接。", "is_error": True, "error": "EMPTY_BVID"}
         try:
-            result = bili_social.video_fav(bvid, account, remove, folder)
+            result = await asyncio.to_thread(bili_social.video_fav, bvid, account, remove, folder)
         except bili.BiliError as exc:
             if exc.code in ("FAV_UNVERIFIED", "RATE_LIMITED", "NO_FAV_FOLDER"):
                 _logger.info("fav result: ok=False error=%s account=%s bvid=%s", exc.code, account, bvid)
@@ -3741,7 +3807,7 @@ class BiliViewerPlugin(NekoPluginBase):
         if not bvid:
             return {"output": "请提供视频 BV 号或链接。", "is_error": True, "error": "EMPTY_BVID"}
         try:
-            result = bili_social.video_triple(bvid, account)
+            result = await asyncio.to_thread(bili_social.video_triple, bvid, account)
         except bili.BiliError as exc:
             if exc.code in ("TRIPLE_UNVERIFIED", "RATE_LIMITED"):
                 _logger.info("triple result: ok=False error=%s account=%s bvid=%s", exc.code, account, bvid)
@@ -3768,7 +3834,7 @@ class BiliViewerPlugin(NekoPluginBase):
         params = _tool_params(_)
         account = self._resolve_account(account or params.get("account") or "")
         try:
-            items = bili_social.my_favs(account)
+            items = await asyncio.to_thread(bili_social.my_favs, account)
         except bili.BiliError as exc:
             return _wrap_err(exc)
         if not items:
@@ -3808,11 +3874,11 @@ class BiliViewerPlugin(NekoPluginBase):
         account = self._resolve_account(account or params.get("account") or "")
         try:
             if kind == "weekly":
-                data = bili_social.weekly_best(account)
+                data = await asyncio.to_thread(bili_social.weekly_best, account)
             elif kind == "precious":
-                data = bili_social.precious(account, max(1, min(limit, 30)))
+                data = await asyncio.to_thread(bili_social.precious, account, max(1, min(limit, 30)))
             else:
-                data = bili_social.rank(rid, max(1, min(limit, 30)), account)
+                data = await asyncio.to_thread(bili_social.rank, rid, max(1, min(limit, 30)), account)
         except bili.BiliError as exc:
             return _wrap_err(exc)
         lines = []
@@ -3844,7 +3910,7 @@ class BiliViewerPlugin(NekoPluginBase):
         account = self._resolve_account(account or params.get("account") or "")
         video_limit = int(video_limit or params.get("video_limit") or 5)
         try:
-            data = bili_social.my_stats(account, max(1, min(video_limit, 20)))
+            data = await asyncio.to_thread(bili_social.my_stats, account, max(1, min(video_limit, 20)))
         except bili.BiliError as exc:
             return _wrap_err(exc)
         s = data.get("summary") or {}
@@ -3982,7 +4048,7 @@ class BiliViewerPlugin(NekoPluginBase):
         except (TypeError, ValueError):
             return {"output": "请提供 UP主 的 uid（mid），例如 action=like&mid=1426057300。", "is_error": True, "error": "EMPTY_MID"}
         try:
-            videos = bili.user_videos(uid, page=1, limit=limit)
+            videos = await asyncio.to_thread(bili.user_videos, uid, page=1, limit=limit)
         except bili.BiliError as exc:
             return self._wrap_auth(exc, "获取视频列表")
         if not videos:
@@ -3994,7 +4060,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 failed.append({"title": v.get("title", ""), "error": "NO_BVID"})
                 continue
             try:
-                bili_social.video_like(bvid, account)
+                await asyncio.to_thread(bili_social.video_like, bvid, account)
                 _logger.info("like_all ok: account=%s bvid=%s mid=%s", account, bvid, uid)
                 ok.append({"bvid": bvid, "title": v.get("title", "")})
             except bili.BiliError as exc:

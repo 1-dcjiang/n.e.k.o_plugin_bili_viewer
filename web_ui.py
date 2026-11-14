@@ -13,14 +13,21 @@ import json
 import logging
 import os
 import re
+import secrets
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+try:
+    from . import bili
+except ImportError:  # 独立模块加载（测试 / 单文件脚本）没有父包
+    import bili  # type: ignore[no-redef]
 
 _logger = logging.getLogger("N.E.K.O.Plugin_bili_viewer.plugin.bili_viewer")
 
 _PANEL_HOST = "127.0.0.1"
 _PANEL_PORT = 8765
+_PANEL_TOKEN_HEADER = "X-Neko-Token"
 
 _EXT_ONLINE_WINDOW = 120.0  # 扩展最近一次推送超过该秒数视为离线
 _PANEL_URL = f"http://{_PANEL_HOST}:{_PANEL_PORT}/"
@@ -86,7 +93,7 @@ def _refresh_ext_cookie(cookie: str) -> dict:
         for fn in _COOKIE_FILES:
             p = os.path.join(_COOKIE_DIR, fn)
             try:
-                if f"DedeUserID={uid}" in open(p, encoding="utf-8", errors="replace").read():
+                if f"DedeUserID={uid}" in bili._read_cookie_file(p):
                     target = fn
                     break
             except OSError:
@@ -94,11 +101,9 @@ def _refresh_ext_cookie(cookie: str) -> dict:
     if not target:
         return {"updated": False}
     dst = os.path.join(_COOKIE_DIR, target)
-    tmp = dst + ".tmp"
     try:
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(core)
-        os.replace(tmp, dst)
+        # 与插件统一走加密落盘，避免扩展刷新时又写回明文
+        bili._write_cookie_file(dst, core)
         _logger.info("ext cookie refreshed: uid=%s file=%s len=%d", uid, target, len(core))
         return {"updated": True, "uid": uid, "file": target}
     except OSError as exc:
@@ -279,10 +284,26 @@ class _PanelHandler(BaseHTTPRequestHandler):
             return False
         return True  # 无来源（本地进程/脚本）视为可信
 
+    def _host_allowed(self) -> bool:
+        """Host 校验：只接受本机面板地址，阻断 DNS rebinding（v0.9.37）。
+
+        攻击者把恶意域名解析到 127.0.0.1 时，浏览器发出的 Host 仍是恶意域名；
+        仅做 Origin 校验会漏掉“无 Origin”的简单请求/导航，因此必须同时校验 Host。
+        """
+        host = (self.headers.get("Host") or "").strip().lower()
+        port = self.server.server_address[1]
+        return host in {f"127.0.0.1:{port}", f"localhost:{port}"}
+
+    def _queue_token_ok(self) -> bool:
+        """队列指令鉴权：必须携带面板启动时生成的随机 token（v0.9.37）。"""
+        expected = str(getattr(self.server, "queue_token", "") or "")
+        supplied = str(self.headers.get(_PANEL_TOKEN_HEADER) or "")
+        return bool(expected) and secrets.compare_digest(supplied, expected)
+
     # -- routes --
     def do_GET(self) -> None:
-        if not self._origin_allowed():
-            self._json(403, {"error": "origin not allowed"})
+        if not self._host_allowed() or not self._origin_allowed():
+            self._json(403, {"error": "host/origin not allowed"})
             return
         status_fn = self.server.status_fn
         if self.path.startswith("/api/status"):
@@ -306,8 +327,8 @@ class _PanelHandler(BaseHTTPRequestHandler):
         self._send(200, "text/html; charset=utf-8", _PAGE.encode("utf-8"))
 
     def do_POST(self) -> None:
-        if not self._origin_allowed():
-            self._json(403, {"error": "origin not allowed"})
+        if not self._host_allowed() or not self._origin_allowed():
+            self._json(403, {"error": "host/origin not allowed"})
             return
         if self.path.startswith("/api/bind"):
             try:
@@ -317,6 +338,9 @@ class _PanelHandler(BaseHTTPRequestHandler):
             self._json(200, payload)
             return
         if self.path.startswith("/api/queue-command"):
+            if not self._queue_token_ok():
+                self._json(403, {"error": "queue token required"})
+                return
             global _CMD_SEQ
             body = self._read_json_body()
             cmd_type = body.get("type") or ""
@@ -464,6 +488,13 @@ class BindPanel:
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        # 面板启动时生成一次性随机 token：只给同进程的插件工具使用，
+        # 网页/扩展/其他本地进程都拿不到；避免任意本机请求排队进入直播间指令。
+        self._panel_token = secrets.token_urlsafe(24)
+
+    @property
+    def token(self) -> str:
+        return self._panel_token
 
     def ensure_started(self) -> tuple[str, bool]:
         with self._lock:
@@ -479,6 +510,7 @@ class BindPanel:
             server.shot_fn = self._shot_fn
             server.audio_fn = self._audio_fn
             server.audio_state_fn = self._audio_state_fn
+            server.queue_token = self._panel_token
             thread = threading.Thread(target=server.serve_forever, name="bili-bind-panel", daemon=True)
             thread.start()
             self._server = server

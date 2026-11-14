@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import base64
 import difflib
 import gzip
 import hashlib
@@ -65,6 +66,31 @@ class BiliError(Exception):
         self.code = code
 
 
+# v0.9.37：异常原文回给 LLM 前统一脱敏。B站 的 412/风控响应、urllib 异常里
+# 可能带完整 Cookie、csrf、ticket、代理 URL 与账号 uid；_wrap_err 之前直接
+# 原样透传，等于把凭证明文写进模型上下文。这里只保留可读原因，凭证一律打码。
+_SECRET_RX = re.compile(
+    r"(?i)(SESSDATA|bili_jct|bili_ticket|DedeUserID|DedeUserName|buvid3|buvid4|"
+    r"access_key|refresh_token|csrf|csrf_token|cookie|authorization|token|password|secret|passwd)"
+    r"\s*[=:]\s*(?:Bearer\s+)?[^;\s'\"，。]+"
+)
+_BARE_SECRET_RX = re.compile(r"(?i)(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})")
+
+
+def redact_text(value: object, limit: int = 1200) -> str:
+    """把异常/日志文本里的凭证与本机绝对路径脱敏后再交给 LLM。"""
+    text = str(value or "")
+    home = os.path.expanduser("~")
+    if home:
+        text = text.replace(home, "~")
+    text = _SECRET_RX.sub(lambda m: m.group(1) + "=[redacted]", text)
+    text = _BARE_SECRET_RX.sub("[redacted]", text)
+    # 极长的 HTML/风控页只留头尾，避免把整页响应灌进上下文。
+    if len(text) > limit:
+        text = text[:limit] + "…[truncated]"
+    return text
+
+
 # ══════════════ 基础 HTTP ══════════════
 
 _YUI_COOKIE_FILE = "yui_cookie.txt"  # 插件目录下的 YUI 专属小号 Cookie 文件（与本机主账号 BILI_COOKIE 完全隔离）
@@ -75,6 +101,123 @@ _main_cookie_file_cache: tuple[float, str] = (0.0, "")
 _visitor_cookie_cache = ""
 _visitor_cookie_ts = 0.0
 _VISITOR_COOKIE_TTL = 6 * 3600
+
+# v0.9.37：Cookie 落盘加密。Windows 用当前用户 DPAPI（CryptProtectData），
+# 换用户/换机器无法解密；非 Windows 无系统级密钥环时降级为 0600 权限明文。
+# 读取兼容旧版明文文件，首次写入/启动迁移时自动转成加密格式。
+_COOKIE_FILE_MAGIC = "NEKO_COOKIE_V1:"
+
+
+def _dpapi(data: bytes, encrypt: bool) -> bytes | None:
+    """Windows DPAPI 加/解密；非 Windows 或调用失败返回 None（调用方降级）。"""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class DATA_BLOB(ctypes.Structure):
+            _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+        crypt32 = ctypes.windll.crypt32
+        kernel32 = ctypes.windll.kernel32
+        buf = ctypes.create_string_buffer(data, len(data))
+        blob_in = DATA_BLOB(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+        blob_out = DATA_BLOB()
+        if encrypt:
+            ok = crypt32.CryptProtectData(
+                ctypes.byref(blob_in), "bili_viewer cookie", None, None, None, 0x1,
+                ctypes.byref(blob_out),
+            )
+        else:
+            ok = crypt32.CryptUnprotectData(
+                ctypes.byref(blob_in), None, None, None, None, 0x1,
+                ctypes.byref(blob_out),
+            )
+        if not ok:
+            return None
+        try:
+            raw = ctypes.string_at(blob_out.pbData, blob_out.cbData)
+        finally:
+            kernel32.LocalFree(blob_out.pbData)
+        return raw
+    except Exception:
+        return None
+
+
+def _encode_cookie_file(cookie: str) -> str:
+    """Cookie 落盘格式：DPAPI 密文；无 DPAPI 时保留明文（仅 chmod 0600）。"""
+    plain = (cookie or "").strip()
+    if not plain:
+        return ""
+    sealed = _dpapi(plain.encode("utf-8"), encrypt=True)
+    if sealed:
+        return _COOKIE_FILE_MAGIC + base64.b64encode(sealed).decode("ascii")
+    return plain
+
+
+def _decode_cookie_file(content: str) -> str:
+    text = (content or "").strip()
+    if not text.startswith(_COOKIE_FILE_MAGIC):
+        return text
+    try:
+        sealed = base64.b64decode(text[len(_COOKIE_FILE_MAGIC):])
+    except (ValueError, TypeError):
+        return ""
+    plain = _dpapi(sealed, encrypt=False)
+    if plain is None:
+        _logger.warning("cookie file decrypt failed (DPAPI unavailable or different user)")
+        return ""
+    return plain.decode("utf-8", "replace").strip()
+
+
+def _read_cookie_file(path: str) -> str:
+    with open(path, "r", encoding="utf-8") as fh:
+        return _decode_cookie_file(fh.read())
+
+
+def _write_cookie_file(path: str, cookie: str) -> None:
+    """原子写入 + 尽量收紧权限；内容按平台能力加密。"""
+    data = _encode_cookie_file(cookie)
+    tmp = f"{path}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(data)
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def migrate_cookie_files() -> bool:
+    """把旧版明文 Cookie 文件迁移为加密格式；返回是否发生过改写。"""
+    changed = False
+    for fn in (_MAIN_COOKIE_FILE, _YUI_COOKIE_FILE):
+        p = os.path.join(_YUI_COOKIE_DIR, fn)
+        try:
+            with open(p, "r", encoding="utf-8") as fh:
+                content = fh.read()
+        except OSError:
+            continue
+        if content.strip().startswith(_COOKIE_FILE_MAGIC):
+            continue
+        plain = _decode_cookie_file(content)
+        if not plain:
+            continue
+        try:
+            _write_cookie_file(p, plain)
+            changed = True
+        except OSError as exc:
+            _logger.warning("migrate cookie file failed: %s", exc)
+    return changed
+
 
 
 def _yui_cookie_from_file() -> str:
@@ -94,8 +237,7 @@ def _yui_cookie_from_file() -> str:
     if cache_ts == mtime and cache_val:
         return cache_val
     try:
-        with open(p, "r", encoding="utf-8") as f:
-            content = f.read().strip()
+        content = _read_cookie_file(p)
     except OSError:
         content = ""
     _yui_cookie_file_cache = (mtime, content)
@@ -115,8 +257,7 @@ def _main_cookie_from_file() -> str:
     if cache_ts == mtime and cache_val:
         return cache_val
     try:
-        with open(p, "r", encoding="utf-8") as f:
-            content = f.read().strip()
+        content = _read_cookie_file(p)
     except OSError:
         content = ""
     _main_cookie_file_cache = (mtime, content)
@@ -130,8 +271,7 @@ def write_main_cookie_file(cookie: str) -> None:
     """
     p = os.path.join(_YUI_COOKIE_DIR, _MAIN_COOKIE_FILE)
     try:
-        with open(p, "w", encoding="utf-8") as f:
-            f.write(cookie.strip())
+        _write_cookie_file(p, cookie)
     except OSError as exc:
         # 写失败不致命（env/配置层仍可生效），但必须留痕，不能静默吞掉。
         _logger.warning("persist main cookie failed: %s", exc)
@@ -143,8 +283,7 @@ def write_yui_cookie_file(cookie: str) -> None:
     _yui_cookie_file_cache = (0.0, "")
     p = os.path.join(_YUI_COOKIE_DIR, _YUI_COOKIE_FILE)
     try:
-        with open(p, "w", encoding="utf-8") as f:
-            f.write(cookie.strip())
+        _write_cookie_file(p, cookie)
     except OSError as exc:
         _logger.warning("persist yui cookie failed: %s", exc)
 
@@ -185,8 +324,7 @@ def _cookie_for_uid(uid: int) -> str:
     for fn in (_MAIN_COOKIE_FILE, _YUI_COOKIE_FILE):
         p = os.path.join(_YUI_COOKIE_DIR, fn)
         try:
-            with open(p, "r", encoding="utf-8", errors="replace") as fh:
-                content = fh.read()
+            content = _read_cookie_file(p)
             if f"DedeUserID={uid}" in content and os.path.getmtime(p) >= best_mtime:
                 best, best_mtime = content, os.path.getmtime(p)
         except OSError:

@@ -275,7 +275,7 @@ def test_llm_tool_live_send_senses_current_live() -> None:
 
     def fake_send(room="", text="", account="main"):
         calls.append(("live", room, text))
-        return {"ok": True, "room_id": int(room), "text": text, "server": ""}
+        return {"ok": True, "room_id": int(room), "text": text, "server": "", "confirmed": True}
 
     orig = bili.live_send_danmaku
     bili.live_send_danmaku = fake_send

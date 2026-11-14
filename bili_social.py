@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -20,6 +21,8 @@ import uuid
 from typing import Any
 
 from . import bili
+
+_logger = logging.getLogger(__name__)
 
 _API = "https://api.bilibili.com"
 _VC_API = "https://api.vc.bilibili.com"
@@ -699,29 +702,39 @@ def dm_send(account: str = "yui", uid: str = "", text: str = "", allow_new: bool
     # 接口接受=已发送，立即记录（无论后续回读结果，60s 内重试都被挡）
     _dm_last_sends[_dup_key] = time.time()
     # 回读验证：最近一条应为我们的内容（真实发送铁律）
-    if not _dm_verified(account, talker, text):
+    verified = _dm_verified(account, talker, text)
+    if verified is False:
         raise bili.BiliError(
             "私信接口已接受发送，但回读未确认到（消息可能已经发出，B站接口同步有延迟）；"
             "严禁重复发送——重复发送会导致对方收到多条相同私信。请告知用户'私信可能已发出，"
             "请在 B站 私信页面确认'，不要再次调用 bili_dm_send。",
             "DM_UNVERIFIED",
         )
+    if verified is None:
+        # v0.9.37：回读接口异常 ≠ 没发出去。不能当成“未命中”诱导重发。
+        raise bili.BiliError(
+            "私信接口已接受发送，但回读接口异常（网络/风控），无法确认对方是否收到；"
+            "消息可能已经发出，严禁重复发送。请让用户在 B站 私信页面确认实际状态。",
+            "DM_UNVERIFIED",
+        )
     record_limit("dm", params, {"ok": True}, account=account)
     return {"uid": talker, "text_len": len(text), "sent": True, "allowed_because": reason or "allow_new"}
 
 
-def _dm_verified(account: str, talker: int, text: str, tries: int = 3) -> bool:
+def _dm_verified(account: str, talker: int, text: str, tries: int = 3) -> bool | None:
     """发送后回读验证：最近一条我发的消息应为我们的内容。
 
-    v0.9.2：tries 从 2 增到 3、间隔从 1.2s 增到 1.5s（B站 fetch_session_msgs 同步有延迟，
-    原 2.4s 总等待不够，导致发送成功但回读未确认 → DM_UNVERIFIED 误报 → YUI 重复发送）。
+    v0.9.37：三态返回——True=确认出现；False=回读正常但未命中；
+    None=回读接口/网络异常，无法判断。绝不把“读不到”当成“没发出去”，
+    否则上层会诱导 YUI 重复发送（用户实证重复私信根因）。
     text 比对忽略首尾空白。
     """
     for i in range(tries):
         try:
             msgs = dm_messages(account, str(talker), 5).get("messages") or []
-        except bili.BiliError:
-            return False
+        except bili.BiliError as exc:
+            _logger.debug("dm readback failed account=%s uid=%s err=%s", account, talker, exc.code)
+            return None
         for m in reversed(msgs):
             if m.get("from") == "me":
                 if (m.get("text") or "").strip() == text.strip():

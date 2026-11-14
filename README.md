@@ -198,6 +198,26 @@
 > 私信白名单（owner/粉丝/对方先发/互关，粉丝全放行满足"适用于所有关注她的粉丝"）、私信 payload（嵌套
 > msg[sender_uid]/msg[dev_id] per-install + wbi query）、动态发布/删除双回读、直播弹幕回读、5 秒风控间隔、
 > 弹幕连发任务（danmaku_loop.json）。
+> v0.9.37 截图复核修复（约 6/10 的 5 个最该修项 + 次要项，320 tests passed）：
+> ① async 阻塞：`video_danmaku` / `video_subtitle` / `video_ai_summary` / `video_comments` /
+>    `live_info` / `user_info` / `user_videos` / `now_watching` / `my_info` / `my_videos` /
+>    `edit_video` / `see_live` / `see_video` / `send_video_danmaku` / `reply_comment` /
+>    `follow_user` / `unfollow_user` / 动态 / 投稿 / 私信 / 粉丝 / 点赞投币收藏 / `like_all`
+>    等全部改为 `asyncio.to_thread`；新增 AST 扫描测试，禁止 async 函数再裸调同步 bili.*。
+> ② 私信回读三态：`_dm_verified` 从 `except BiliError: return False` 改为 `None`；
+>    回读接口异常不再当成“没发出去”，`dm_send` 仍报 `DM_UNVERIFIED`，但文案明确
+>    “可能已发出、严禁重复发送、请到 B站 私信页确认”，避免诱导 YUI 重发。
+> ③ 直播弹幕 `confirmed` 缺省由 `True` 改为 `False`：回读没拿到字段一律
+>    `DANMAKU_UNCONFIRMED`；非 `BiliError` 异常回滚 `_rate_reserve`，连发任务遇异常停止。
+> ④ 面板 `POST /api/queue-command` 增加启动随机 token（`X-Neko-Token`）+ Host/Origin
+>    白名单，堵 CSRF / DNS rebinding；同进程插件工具通过 `BindPanel.token` 携带。
+> ⑤ Cookie 落盘 Windows DPAPI 加密（`NEKO_COOKIE_V1:` 前缀，原子替换 + 0600），
+>    旧明文启动时 `migrate_cookie_files()` 自动迁移；`_wrap_err` 统一走
+>    `bili.redact_text`，脱敏 SESSDATA/bili_jct/buvid3/token/password 等。
+> 次要：`_loop_load/_save` 加锁 + 原子写；`on_startup` 的 Cookie 迁移、面板启动、
+> 音频桥改 `asyncio.to_thread`；删除重复的 `_yui_daily_allow/_yui_daily_bump`。
+> 已知边界：非 Windows 无 DPAPI 时仍降级明文（仅 0600）；私信回读只有 mock 单测，
+> 未做真实账号端到端验证。
 > v0.9.36 收尾复查（v0.9.35 发布后追加）：
 > ① WBI 按官方 `encWbi` 修正为剔除 **value** 中的 `!'()*`；v0.9.35 首版误过滤 key，
 >    值里带这些字符时签名仍会错，现补回归覆盖（310 tests passed）。

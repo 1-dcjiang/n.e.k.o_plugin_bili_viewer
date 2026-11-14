@@ -1321,7 +1321,7 @@ def test_live_send_danmaku_dedup_once(monkeypatch) -> None:
     from plugin.plugins.bili_viewer import BiliViewerPlugin, bili
 
     sent: list[tuple[str, str]] = []
-    monkeypatch.setattr(bili, "live_send_danmaku", lambda room, text, account="main": (sent.append((room, text)), {"dmid": "D1", "server": "ok"})[1])
+    monkeypatch.setattr(bili, "live_send_danmaku", lambda room, text, account="main": (sent.append((room, text)), {"dmid": "D1", "server": "ok", "confirmed": True})[1])
     monkeypatch.delenv("BILLI_SYNC_DISABLE", raising=False)
     inst = object.__new__(BiliViewerPlugin)
     inst._ext_tab = lambda **kw: None
@@ -1346,7 +1346,7 @@ def test_live_send_danmaku_dedup_expires(monkeypatch) -> None:
     from plugin.plugins.bili_viewer import BiliViewerPlugin, bili
 
     sent: list[tuple[str, str]] = []
-    monkeypatch.setattr(bili, "live_send_danmaku", lambda room, text, account="main": (sent.append((room, text)), {"dmid": "D1", "server": "ok"})[1])
+    monkeypatch.setattr(bili, "live_send_danmaku", lambda room, text, account="main": (sent.append((room, text)), {"dmid": "D1", "server": "ok", "confirmed": True})[1])
     monkeypatch.delenv("BILLI_SYNC_DISABLE", raising=False)
     inst = object.__new__(BiliViewerPlugin)
     inst._ext_tab = lambda **kw: None
@@ -1356,6 +1356,26 @@ def test_live_send_danmaku_dedup_expires(monkeypatch) -> None:
     r = asyncio.run(inst.bili_live_send_danmaku(room="1025219", text="过期测试"))
     assert r["is_error"] is False and r["result"].get("dedup") is None
     assert len(sent) == 2
+
+
+def test_live_send_danmaku_missing_confirmed_is_not_success(monkeypatch) -> None:
+    """v0.9.37：回读结果没有 confirmed 字段时不得默认成功，报 DANMAKU_UNCONFIRMED。"""
+    import asyncio
+
+    from plugin.plugins.bili_viewer import BiliViewerPlugin, bili
+
+    monkeypatch.setattr(
+        bili,
+        "live_send_danmaku",
+        lambda room, text, account="main": {"dmid": "D1", "server": "ok"},
+    )
+    monkeypatch.delenv("BILLI_SYNC_DISABLE", raising=False)
+    inst = object.__new__(BiliViewerPlugin)
+    inst._ext_tab = lambda **kw: None
+
+    r = asyncio.run(inst.bili_live_send_danmaku(room="1025219", text="缺字段测试"))
+    assert r["is_error"] is True
+    assert r["error"] == "DANMAKU_UNCONFIRMED"
 
 
 def test_video_send_danmaku_dedup_once(monkeypatch) -> None:
@@ -1924,3 +1944,33 @@ def test_dm_send_short_window_dedup(monkeypatch) -> None:
     # 不同对象同内容可发
     bili_social._dm_last_sends.clear()
     assert bili_social.dm_send("yui", uid="3333", text="你好喵", allow_new=True)["sent"] is True
+
+# ══════════ v0.9.37：错误脱敏 / Cookie 落盘加密 ══════════
+
+
+def test_redact_text_masks_cookie_and_tokens() -> None:
+    from plugin.plugins.bili_viewer import bili
+
+    raw = (
+        "SESSDATA=abc123secret; bili_jct=csrf456; buvid3=buv789; "
+        "access_key=ak000; token: tok111; password=pwd222"
+    )
+    out = bili.redact_text(raw)
+    for secret in ("abc123secret", "csrf456", "buv789", "ak000", "tok111", "pwd222"):
+        assert secret not in out
+    assert "SESSDATA=[redacted]" in out
+
+
+def test_cookie_file_roundtrip_and_encrypted_at_rest(tmp_path) -> None:
+    from plugin.plugins.bili_viewer import bili
+
+    path = str(tmp_path / "yui_cookie.txt")
+    cookie = "SESSDATA=plain-secret; DedeUserID=222; bili_jct=csrf"
+    bili._write_cookie_file(path, cookie)
+    assert bili._read_cookie_file(path) == cookie
+
+    raw = (tmp_path / "yui_cookie.txt").read_text(encoding="utf-8")
+    if bili._dpapi(b"probe", encrypt=True):
+        assert raw.startswith(bili._COOKIE_FILE_MAGIC)
+        assert "plain-secret" not in raw
+        assert "SESSDATA" not in raw
