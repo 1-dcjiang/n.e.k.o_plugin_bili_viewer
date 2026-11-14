@@ -14,6 +14,7 @@ import difflib
 import gzip
 import hashlib
 import json
+import logging
 import os
 import random
 import re
@@ -34,6 +35,8 @@ _UA = (
 _API = "https://api.bilibili.com"
 _LIVE_API = "https://api.live.bilibili.com"
 _TIMEOUT = 12.0
+
+_logger = logging.getLogger(__name__)
 
 # wbi 签名：mixin key 字符打乱表（公开算法）
 _MIXIN_TABLE = [
@@ -129,8 +132,9 @@ def write_main_cookie_file(cookie: str) -> None:
     try:
         with open(p, "w", encoding="utf-8") as f:
             f.write(cookie.strip())
-    except OSError:
-        pass  # 文件写失败不致命（env/配置层仍可生效）
+    except OSError as exc:
+        # 写失败不致命（env/配置层仍可生效），但必须留痕，不能静默吞掉。
+        _logger.warning("persist main cookie failed: %s", exc)
 
 
 def write_yui_cookie_file(cookie: str) -> None:
@@ -141,8 +145,8 @@ def write_yui_cookie_file(cookie: str) -> None:
     try:
         with open(p, "w", encoding="utf-8") as f:
             f.write(cookie.strip())
-    except OSError:
-        pass
+    except OSError as exc:
+        _logger.warning("persist yui cookie failed: %s", exc)
 
 
 def cookie_uid(cookie: str) -> int | None:

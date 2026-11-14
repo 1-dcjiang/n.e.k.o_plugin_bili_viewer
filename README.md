@@ -198,6 +198,13 @@
 > 私信白名单（owner/粉丝/对方先发/互关，粉丝全放行满足"适用于所有关注她的粉丝"）、私信 payload（嵌套
 > msg[sender_uid]/msg[dev_id] per-install + wbi query）、动态发布/删除双回读、直播弹幕回读、5 秒风控间隔、
 > 弹幕连发任务（danmaku_loop.json）。
+> v0.9.36 收尾复查（v0.9.35 发布后追加）：
+> ① WBI 按官方 `encWbi` 修正为剔除 **value** 中的 `!'()*`；v0.9.35 首版误过滤 key，
+>    值里带这些字符时签名仍会错，现补回归覆盖（310 tests passed）。
+> ② 配置热读：启动后每 30 秒重读 `settings.bili_cookie`，运行中改配置无需重启；
+>    仅在当前 Cookie 由配置/自动接入产生时覆盖，手动绑定态不会被旧配置悄悄换掉。
+> ③ `write_main_cookie_file` / `write_yui_cookie_file` 的 `except OSError: pass`
+>    改为 warning，落盘失败有日志可查。
 > v0.9.35 全仓复查修复（三个最可疑点 + 次要项）：
 > ① 6 个 async 工具（bili_search / bili_video_info / bili_enter_live / bili_live_danmaku /
 >    bili_live_viewers / bili_unfollow_all）原本在事件循环里直接调同步 urllib，现全部
@@ -208,8 +215,10 @@
 > ③ WBI/风控：签名查询串改用 quote（空格 %20）并剔除 value 中含 `!'()*` 的字符；密钥失效
 >    （FORBIDDEN/WBI_KEY）清缓存重取一次；HTTP 412/429 映射 RISK_CONTROL；匿名请求自动
 >    申请/携带游客 buvid3/buvid4（6h 缓存，失败本地 UUID 兜底）。
-> 次要项：on_shutdown 置位并 join watcher（防重载后双 watcher）；`_yui_cool/_yui_daily/
-> _yui_rate` 超阈值清理过期键；bili_live_danmaku_loop 的 times/interval 非法返回 BAD_PARAMS；
+> 次要项：on_shutdown 置位并 join watcher（防重载后双 watcher）；启动后每 30 秒
+> 重读 settings.bili_cookie（运行中改配置无需重启，手动绑定态不被覆盖）；
+> cookie 落盘失败改 warning 不再静默；`_yui_cool/_yui_daily/_yui_rate` 超阈值清理过期键；
+> bili_live_danmaku_loop 的 times/interval 非法返回 BAD_PARAMS；
 > 连发首条 tick 放线程；watcher 各分支异常改为记录日志而非静默 pass。
 > 测试：新增 WBI 空格/特殊键、密钥失效重取、回读异常重试 3 个回归；conftest 隔离真实
 > Cookie 与扩展共享缓冲；全量 309 passed，ruff 通过。

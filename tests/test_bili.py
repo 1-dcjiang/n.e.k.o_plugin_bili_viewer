@@ -1109,6 +1109,15 @@ def test_cookie_empty_when_unset() -> None:
     assert _apply_cookie_from_config({"settings": {}}, {"BILI_COOKIE": ""}) == ""
 
 
+def test_config_cookie_value_ignores_env() -> None:
+    """热读只看配置值，不受环境变量旧值影响，才能发现运行时配置变化。"""
+    from plugin.plugins.bili_viewer import _config_cookie_value
+
+    assert _config_cookie_value({}) == ""
+    assert _config_cookie_value({"settings": {"bili_cookie": "   "}}) == ""
+    assert _config_cookie_value({"settings": {"bili_cookie": "cfg=SESSDATA_CFG"}}) == "cfg=SESSDATA_CFG"
+
+
 # ══════════ 自动绑定（allow_cookie_scan / cookie_auto） ══════════
 
 

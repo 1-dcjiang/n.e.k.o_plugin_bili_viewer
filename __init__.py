@@ -230,6 +230,16 @@ def _apply_cookie_from_config(cfg: dict, env: dict) -> str:
     return ""
 
 
+def _config_cookie_value(cfg: dict) -> str:
+    """只读插件配置里的 settings.bili_cookie（不看环境变量）。"""
+    section = cfg.get(_CONFIG_SECTION) if isinstance(cfg, dict) else None
+    if isinstance(section, dict):
+        val = section.get(_CONFIG_COOKIE_KEY)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return ""
+
+
 def _allow_cookie_scan(cfg: dict) -> bool:
     """用户是否已授权自动读取浏览器 Cookie（settings.allow_cookie_scan）。"""
     section = cfg.get(_CONFIG_SECTION) if isinstance(cfg, dict) else None
@@ -321,6 +331,10 @@ class BiliViewerPlugin(NekoPluginBase):
         self._sync_lock = threading.Lock()
         # 后台 watcher 停止信号：插件重载/关闭时置位并 join，避免旧线程继续跑出第二份 watcher
         self._sync_stop = threading.Event()
+        # 配置热读（v0.9.35）：启动后每 30s 重读 settings.bili_cookie，运行中改配置无需重启
+        self._config_stop = threading.Event()
+        self._config_task: asyncio.Task | None = None
+        self._config_cookie = ""
         # 弹幕发送幂等去重：key=(kind,target,text) -> 上次发送时间戳。
         # 防止 LLM/宿主对同一指令重复触发发送工具/兜底入口导致同一条弹幕发两次（v0.6.38）。
         self._danmaku_sent: dict[str, float] = {}
@@ -367,6 +381,57 @@ class BiliViewerPlugin(NekoPluginBase):
                 daemon=True,
             )
             self._sync_thread.start()
+
+    def _start_config_watcher(self) -> None:
+        """启动配置热读任务；宿主不提供 config.dump 或测试环境时跳过。"""
+        if os.environ.get(_SYNC_DISABLE_ENV, "").strip() not in ("", "0"):
+            return
+        if not callable(getattr(getattr(self, "config", None), "dump", None)):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if self._config_task is not None and not self._config_task.done():
+            return
+        self._config_stop.clear()
+        self._config_task = loop.create_task(self._config_watch_loop())
+
+    async def _config_watch_loop(self) -> None:
+        """每 30s 重读插件配置，让运行时修改的 bili_cookie 即时生效。
+
+        只在“当前 Cookie 由配置/自动接入产生”时覆盖，避免把用户手动绑定的登录态
+        悄悄换成配置里的旧值；配置被清空且当前值正是配置注入的，也会一并撤回。
+        """
+        while not self._config_stop.is_set():
+            try:
+                cfg = await self.config.dump(timeout=2.0)
+                cfg = cfg if isinstance(cfg, dict) else {}
+                new = _config_cookie_value(cfg)
+                if new != self._config_cookie:
+                    current = os.environ.get("BILI_COOKIE", "").strip()
+                    source = getattr(self, "_cookie_source", _COOKIE_SOURCE_NONE)
+                    if (
+                        not current
+                        or current == self._config_cookie
+                        or source in (_COOKIE_SOURCE_NONE, _COOKIE_SOURCE_AUTO)
+                    ):
+                        if new:
+                            os.environ["BILI_COOKIE"] = new
+                            self._cookie_source = _COOKIE_SOURCE_MANUAL
+                        else:
+                            os.environ.pop("BILI_COOKIE", None)
+                            self._cookie_source = _COOKIE_SOURCE_NONE
+                        _logger.info("bili cookie refreshed from plugin config")
+                    self._config_cookie = new
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                _logger.debug("config refresh failed", exc_info=True)
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                break
 
     def _sync_watcher_loop(self) -> None:
         """轮询窗口，内容变化且稳定后向 YUI 推送（B站内容主动触发，其余静默注入）。"""
@@ -1135,6 +1200,7 @@ class BiliViewerPlugin(NekoPluginBase):
             cfg = {}
         cookie = _apply_cookie_from_config(cfg, os.environ)
         source = _COOKIE_SOURCE_MANUAL if cookie else _COOKIE_SOURCE_NONE
+        self._config_cookie = _config_cookie_value(cfg)
         # 2) 未手动配置且用户已授权 → 后台异步自动接入（startup 立即返回，绝不等待网络）
         if not cookie and _allow_cookie_scan(cfg):
             self._bg_bind()
@@ -1142,6 +1208,7 @@ class BiliViewerPlugin(NekoPluginBase):
             os.environ["BILI_COOKIE"] = cookie
         self._cookie_source = source
         self._start_sync_watcher()
+        self._start_config_watcher()
         # 2.5) 系统音频桥常驻：启动即拉起 WASAPI loopback 采集（全自动、无需浏览器授权），
         #      让 YUI 随时能听到，而不是等 bili_listen_audio 被调用才冷启动。
         try:
@@ -1165,6 +1232,21 @@ class BiliViewerPlugin(NekoPluginBase):
                     _logger.warning("sync watcher did not stop within 2s; daemon thread left to exit")
         except Exception:
             _logger.exception("stop sync watcher failed")
+        # 停配置热读任务，避免旧实例继续把旧配置写回环境变量
+        try:
+            self._config_stop.set()
+            task = self._config_task
+            self._config_task = None
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    _logger.debug("config watcher stopped with error", exc_info=True)
+        except Exception:
+            _logger.exception("stop config watcher failed")
         # 关闭常驻面板，释放 8765 端口（线程化避免阻塞关闭流程）
         try:
             panel = getattr(self, "_bind_panel", None)
