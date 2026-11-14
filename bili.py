@@ -390,14 +390,15 @@ def _wbi_sign(params: dict, mixin_key: str) -> dict:
 
     v0.9.35：按 B站 官方 WBI 算法修正两处——
     1. 查询串必须用 quote（空格编码为 %20），不能用 urlencode 默认的 quote_plus（空格变 +）；
-    2. 键名含 !'()* 的参数必须剔除，否则签名与服务端计算不一致。
+    2. value 中的 !'()* 必须剔除（官方 encWbi 的实现），否则签名与服务端计算不一致。
     """
     params = dict(params)
     params["wts"] = int(time.time())
-    items = sorted(
-        ((str(k), v) for k, v in params.items() if not any(c in str(k) for c in "!'()*")),
-        key=lambda kv: kv[0],
-    )
+    params = {
+        k: ("".join(ch for ch in v if ch not in "!'()*") if isinstance(v, str) else v)
+        for k, v in params.items()
+    }
+    items = sorted(params.items(), key=lambda kv: str(kv[0]))
     query = urllib.parse.urlencode(items, quote_via=urllib.parse.quote)
     params["w_rid"] = hashlib.md5((query + mixin_key).encode()).hexdigest()
     return params

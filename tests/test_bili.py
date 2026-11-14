@@ -72,26 +72,24 @@ def test_wbi_sign() -> None:
 
 
 def test_wbi_sign_spaces_and_special_keys() -> None:
-    """v0.9.35：空格按 %20 编码，含 !'()* 的键不参与签名。"""
+    """v0.9.35：空格按 %20 编码，value 中 !'()* 剔除后参与签名。"""
     import urllib.parse
 
     from plugin.plugins.bili_viewer.bili import _wbi_sign
 
     mixin = "b" * 32
-    params = {"keyword": "hello world", "bad!key": "x", "page": 1}
+    params = {"keyword": "hello world!", "page": 1}
     signed = _wbi_sign(params, mixin)
-    items = sorted(
-        (str(k), str(v))
-        for k, v in signed.items()
-        if k != "w_rid" and not any(c in str(k) for c in "!'()*")
-    )
+    assert signed["keyword"] == "hello world"  # ! 被剔除
+    items = sorted((str(k), str(v)) for k, v in signed.items() if k != "w_rid")
     query = urllib.parse.urlencode(items, quote_via=urllib.parse.quote)
     expect = hashlib.md5((query + mixin).encode()).hexdigest()
     assert signed["w_rid"] == expect
     assert "%20" in query and "+" not in query
-    assert "bad!key" not in query
-    # 旧算法（quote_plus 空格变 +）必须算出不同签名，证明修复真实生效
-    old = urllib.parse.urlencode([(str(k), str(v)) for k, v in signed.items() if k != "w_rid"])
+    assert "!" not in query
+    # 旧算法（quote_plus 空格变 +，且不过滤 value）必须算出不同签名，证明修复真实生效
+    old_params = {"keyword": "hello world!", "page": 1, "wts": signed["wts"]}
+    old = urllib.parse.urlencode(sorted((str(k), str(v)) for k, v in old_params.items()))
     assert signed["w_rid"] != hashlib.md5((old + mixin).encode()).hexdigest()
 
 
