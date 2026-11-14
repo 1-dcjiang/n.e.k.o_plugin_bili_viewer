@@ -205,7 +205,7 @@
 > ② 弹幕回读异常不再当成“未命中”：网络/接口异常时保留 pending 并写
 >    DANMAKU_READBACK_RETRY，3 秒后重试；连续 3 次失败才 DANMAKU_READBACK_FAILED 停止，
 >    绝不误报 DANMAKU_UNCONFIRMED（只有成功回读且确实没找到才判未确认）；
-> ③ WBI/风控：签名查询串改用 quote（空格 %20）并剔除键名含 `!'()*` 的参数；密钥失效
+> ③ WBI/风控：签名查询串改用 quote（空格 %20）并剔除 value 中含 `!'()*` 的字符；密钥失效
 >    （FORBIDDEN/WBI_KEY）清缓存重取一次；HTTP 412/429 映射 RISK_CONTROL；匿名请求自动
 >    申请/携带游客 buvid3/buvid4（6h 缓存，失败本地 UUID 兜底）。
 > 次要项：on_shutdown 置位并 join watcher（防重载后双 watcher）；`_yui_cool/_yui_daily/
