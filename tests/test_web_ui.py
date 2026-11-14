@@ -28,10 +28,14 @@ def _free_port() -> int:
     return port
 
 
-def _http_json(url: str, method: str = "GET", body: dict | None = None) -> dict:
+def _http_json(url: str, method: str = "GET", body: dict | None = None, token: str = "", origin: str = "") -> dict:
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Content-Type", "application/json")
+    if token:
+        req.add_header("X-Neko-Token", token)
+    if origin:
+        req.add_header("Origin", origin)
     with urllib.request.urlopen(req, timeout=10) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
@@ -68,6 +72,7 @@ def test_panel_serves_page(monkeypatch, tmp_path):
             html = resp.read().decode("utf-8")
         assert "一键接入" in html
         assert "B站接入面板" in html
+        assert "__PANEL_TOKEN__" not in html
     finally:
         panel._server.shutdown()
 
@@ -75,9 +80,12 @@ def test_panel_serves_page(monkeypatch, tmp_path):
 def test_panel_bind_endpoint(monkeypatch, tmp_path):
     panel, url = _start_panel(lambda *_: {"ok": True})
     try:
-        result = _http_json(url + "api/bind", method="POST")
+        result = _http_json(url + "api/bind", method="POST", token=panel.token)
         assert result["ok"] is True
         assert result["bound"] is True
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _http_json(url + "api/bind", method="POST")
+        assert exc.value.code == 403
     finally:
         panel._server.shutdown()
 
@@ -87,7 +95,8 @@ def test_extension_cookie_endpoint(monkeypatch, tmp_path):
     panel, url = _start_panel(lambda cookie, at, source="": (received.append((cookie, at, source)) or {"ok": True, "bound": True}))
     try:
         body = {"cookie": "SESSDATA=abc; bili_jct=xyz", "at": int(time.time() * 1000), "source": "bili-bridge-extension"}
-        result = _http_json(url + "api/extension-cookie", method="POST", body=body)
+        result = _http_json(url + "api/extension-cookie", method="POST", body=body,
+                            origin=_web_ui()._EXTENSION_ORIGIN)
         assert result["ok"] is True
         assert received and received[0][0] == "SESSDATA=abc; bili_jct=xyz"
         assert received[0][1] == body["at"]
@@ -158,6 +167,7 @@ def test_panel_extension_tab_endpoint(monkeypatch, tmp_path):
             f"http://127.0.0.1:{port}/api/extension-tab",
             "POST",
             {"url": "https://www.bilibili.com/video/BV1GJ411x7h7", "title": "测试_哔哩哔哩", "at": 123456, "source": "bili-bridge-chrome-extension"},
+            origin=_web_ui()._EXTENSION_ORIGIN,
         )
         assert r.get("ok") is True
         assert received == [("https://www.bilibili.com/video/BV1GJ411x7h7", "测试_哔哩哔哩", 123456, "bili-bridge-chrome-extension")]
@@ -184,11 +194,14 @@ def test_panel_post_origin_blocked(monkeypatch, tmp_path):
     panel.ensure_started()
     port = panel._port
 
-    def _post_with_origin(path: str, payload: dict, origin: str):
+    def _post_with_origin(path: str, payload: dict, origin: str, token: str = ""):
         data = json.dumps(payload).encode()
         req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, method="POST")
         req.add_header("Content-Type", "application/json")
-        req.add_header("Origin", origin)
+        if origin:
+            req.add_header("Origin", origin)
+        if token:
+            req.add_header("X-Neko-Token", token)
         return urllib.request.urlopen(req, timeout=10)
 
     try:
@@ -199,19 +212,41 @@ def test_panel_post_origin_blocked(monkeypatch, tmp_path):
         except urllib.error.HTTPError as exc:
             assert exc.code == 403
         assert received == []
-        # 扩展 Origin → 200 且回调触发
+        # 任意其它扩展 ID → 403（v0.9.38 只绑定固定扩展 ID）
+        try:
+            with _post_with_origin(
+                "/api/extension-tab",
+                {"url": "https://evil.example/ext", "title": "x", "at": 1},
+                "chrome-extension://abcdefghijklmnopabcdefghijklmnop",
+            ):
+                assert False, "未绑定扩展 ID 应被拒绝"
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 403
+        assert received == []
+        # 固定扩展 Origin → 200 且回调触发
         with _post_with_origin(
             "/api/extension-tab",
             {"url": "https://www.bilibili.com/video/BV1GJ411x7h7", "title": "t", "at": 2},
-            "chrome-extension://abcdefgh",
+            _web_ui()._EXTENSION_ORIGIN,
         ) as resp:
             assert resp.status == 200
         assert received == ["https://www.bilibili.com/video/BV1GJ411x7h7"]
-        # 无 Origin（本地进程/curl）→ 放行
+        # 无 Origin 且无 token → 403
+        try:
+            with _post_with_origin(
+                "/api/extension-tab",
+                {"url": "https://live.bilibili.com/666", "title": "live", "at": 3},
+                "",
+            ):
+                assert False, "无 Origin 无 token 应被拒绝"
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 403
+        # 无 Origin + 面板 token → 200
         with _post_with_origin(
             "/api/extension-tab",
             {"url": "https://live.bilibili.com/666", "title": "live", "at": 3},
             "",
+            panel.token,
         ) as resp:
             assert resp.status == 200
         assert len(received) == 2
@@ -242,6 +277,7 @@ def test_extension_shot_accepts_large_body(monkeypatch, tmp_path):
         data = json.dumps({"image": big, "url": "https://live.bilibili.com/1025219", "title": "t", "at": 1}).encode()
         req = urllib.request.Request(f"http://127.0.0.1:{port}/api/extension-shot", data=data, method="POST")
         req.add_header("Content-Type", "application/json")
+        req.add_header("Origin", _web_ui()._EXTENSION_ORIGIN)
         with urllib.request.urlopen(req, timeout=10) as resp:
             assert resp.status == 200
         assert received and received[0] == big
@@ -270,6 +306,7 @@ def test_extension_cookie_body_still_limited(monkeypatch, tmp_path):
         data = json.dumps({"cookie": "SESSDATA=" + "x" * 100_000, "at": 1}).encode()
         req = urllib.request.Request(f"http://127.0.0.1:{port}/api/extension-cookie", data=data, method="POST")
         req.add_header("Content-Type", "application/json")
+        req.add_header("Origin", _web_ui()._EXTENSION_ORIGIN)
         with urllib.request.urlopen(req, timeout=10) as resp:
             assert resp.status == 200
         assert received and received[0][0] == ""  # body 超限 → 空 payload，未解析到 cookie
@@ -296,6 +333,54 @@ def test_panel_get_origin_blocked(monkeypatch, tmp_path):
             assert resp.status == 200
     finally:
         panel.stop()
+
+def test_pending_command_requires_token_or_extension(monkeypatch):
+    """v0.9.38：pending-command 读取/ack 也必须鉴权，扩展只认固定 ID。"""
+    panel, url = _start_panel(lambda *_: {"ok": True})
+    web_ui = _web_ui()
+    web_ui._CMD_QUEUE.clear()
+    try:
+        for kwargs in ({}, {"token": "wrong"}):
+            with pytest.raises(urllib.error.HTTPError) as exc:
+                _http_json(url + "api/pending-command", **kwargs)
+            assert exc.value.code == 403
+
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _http_json(
+                url + "api/pending-command",
+                origin="chrome-extension://abcdefghijklmnopabcdefghijklmnop",
+            )
+        assert exc.value.code == 403
+
+        result = _http_json(url + "api/pending-command", token=panel.token)
+        assert result.get("id") is None
+        result = _http_json(url + "api/pending-command", origin=web_ui._EXTENSION_ORIGIN)
+        assert result.get("id") is None
+
+        ack = _http_json(
+            url + "api/pending-command",
+            method="POST",
+            body={"ack": 1},
+            origin=web_ui._EXTENSION_ORIGIN,
+        )
+        assert ack.get("ok") is True
+    finally:
+        web_ui._CMD_QUEUE.clear()
+        panel.stop()
+
+
+def test_status_does_not_expose_account(monkeypatch):
+    """v0.9.38：/api/status 不再返回账号名/uid；扩展 Origin 也读不到状态。"""
+    panel, url = _start_panel(lambda *_: {"ok": True})
+    try:
+        result = _http_json(url + "api/status")
+        assert "uname" not in result
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _http_json(url + "api/status", origin=_web_ui()._EXTENSION_ORIGIN)
+        assert exc.value.code == 403
+    finally:
+        panel.stop()
+
 
 def test_queue_command_requires_panel_token(monkeypatch):
     """v0.9.37：/api/queue-command 必须带启动时随机 token，否则 403。"""

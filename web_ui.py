@@ -28,6 +28,11 @@ _logger = logging.getLogger("N.E.K.O.Plugin_bili_viewer.plugin.bili_viewer")
 _PANEL_HOST = "127.0.0.1"
 _PANEL_PORT = 8765
 _PANEL_TOKEN_HEADER = "X-Neko-Token"
+# v0.9.38：三个扩展的 manifest 共用固定公钥，Origin 只能是这个扩展 ID。
+# 旧版任意 chrome-extension:// 放行等于把本机写接口交给任意扩展，必须收紧。
+_EXTENSION_ID = "dafbbcelkodnlgmpjdaabcblddgicjhp"
+_EXTENSION_ORIGIN = f"chrome-extension://{_EXTENSION_ID}"
+_EXTENSION_API_PREFIXES = ("/api/extension-", "/api/pending-command")
 
 _EXT_ONLINE_WINDOW = 120.0  # 扩展最近一次推送超过该秒数视为离线
 _PANEL_URL = f"http://{_PANEL_HOST}:{_PANEL_PORT}/"
@@ -47,6 +52,7 @@ _YUI_NICKNAMES = ("yui小猫娘", "小猫娘", "yui")  # 弹幕 @ 匹配昵称�
 # v0.7.35：扩展指令队列——插件工具把"进入直播间"等命令写入，扩展 alarm 轮询拉取执行
 _CMD_QUEUE: list = []          # [{id, type, room, created}]
 _CMD_SEQ: int = 0
+_CMD_LOCK = threading.Lock()
 
 
 # v0.2.18：扩展推送的登录态按 uid 自保鲜（框架仅首次落盘，之后登录态变化时插件仍读旧文件
@@ -188,7 +194,6 @@ _PAGE = """<!DOCTYPE html>
   <div class="row"><span>浏览器调试实例</span><span id="browser" class="warn">检测中…</span></div>
   <div class="row"><span>B站登录态</span><span id="bili" class="warn">检测中…</span></div>
   <div class="row"><span>写权限(CSRF)</span><span id="csrf" class="warn">—</span></div>
-  <div class="row"><span>登录账号</span><span id="uname">—</span></div>
   <div class="row"><span>当前标签</span><span id="curtab" class="tip">—</span></div>
 </div>
 <button id="btn" onclick="doBind()">一键接入（启动调试浏览器并读取 B站登录态）</button>
@@ -196,9 +201,11 @@ _PAGE = """<!DOCTYPE html>
 优先使用"B站接入桥"扩展通道（扩展随浏览器自动同步登录态），或刷新本页查看扩展通道状态即可。</div>
 <div id="log"></div>
 <script>
+const PANEL_TOKEN = "__PANEL_TOKEN__";
+const AUTH_HEADERS = {'X-Neko-Token': PANEL_TOKEN};
 async function refresh(){
   try{
-    const r = await fetch('/api/status'); const s = await r.json();
+    const r = await fetch('/api/status', {headers: AUTH_HEADERS}); const s = await r.json();
     document.getElementById('browser').textContent = s.browser || '未接入';
     document.getElementById('browser').className = s.browser_ok ? 'ok' : 'warn';
     document.getElementById('bili').textContent = s.bound ? '已绑定（自动接入）' : (s.cookie_manual ? '已绑定（手动配置）' : '未绑定');
@@ -207,7 +214,6 @@ async function refresh(){
     if (s.has_csrf === true) { c.textContent = '就绪（可发弹幕）'; c.className = 'ok'; }
     else if (s.has_csrf === false) { c.textContent = '缺失，需重新登录 B站'; c.className = 'bad'; }
     else { c.textContent = '—'; c.className = 'warn'; }
-    document.getElementById('uname').textContent = s.uname || '—';
     const t = s.current_tab && s.current_tab.url;
     document.getElementById('curtab').textContent = t ? (s.current_tab.title || s.current_tab.url).slice(0, 40) : '—';
   }catch(e){ document.getElementById('log').textContent = '状态刷新失败：' + e; }
@@ -216,7 +222,7 @@ async function doBind(){
   const btn = document.getElementById('btn'); btn.disabled = true;
   document.getElementById('log').textContent = '正在接入…（启动调试浏览器，最多约 10 秒）';
   try{
-    const r = await fetch('/api/bind', {method:'POST'}); const s = await r.json();
+    const r = await fetch('/api/bind', {method:'POST', headers: AUTH_HEADERS}); const s = await r.json();
     document.getElementById('log').textContent = s.detail || JSON.stringify(s);
   }catch(e){ document.getElementById('log').textContent = '接入失败：' + e; }
   btn.disabled = false; refresh();
@@ -260,29 +266,40 @@ class _PanelHandler(BaseHTTPRequestHandler):
         except Exception:
             return {}
 
-    def _origin_allowed(self) -> bool:
-        """来源校验：只接受本机面板、浏览器扩展与无来源（本地进程/curl）。
+    def _origin_kind(self) -> str:
+        """把请求来源分类为 panel / extension / none / bad（v0.9.38）。
 
-        恶意网页可通过 text/plain 的简单请求把伪造 cookie/tab 推送到本机
-        127.0.0.1:8765（CSRF 式覆盖绑定），因此有 Origin/Referer 时必须放行
-        可信来源，其余一律拒绝。
+        只认本面板 Origin 与固定扩展 ID，不再放行任意 chrome-extension://；
+        无 Origin/Referer 的本地进程请求保留，但写操作必须再带面板 token。
         """
         origin = (self.headers.get("Origin") or "").strip().rstrip("/")
+        port = self.server.server_address[1]
+        panel_origin = f"http://{_PANEL_HOST}:{port}"
         if origin:
-            panel_origin = f"http://{_PANEL_HOST}:{self.server.server_address[1]}"
             if origin == panel_origin:
-                return True
-            if origin.startswith("chrome-extension://") or origin.startswith("edge-extension://"):
-                return True
-            return False
+                return "panel"
+            if origin == _EXTENSION_ORIGIN:
+                return "extension"
+            return "bad"
         referer = (self.headers.get("Referer") or "").strip()
         if referer:
-            if referer.startswith(f"http://{_PANEL_HOST}:{self.server.server_address[1]}/"):
-                return True
-            if referer.startswith("chrome-extension://") or referer.startswith("edge-extension://"):
-                return True
+            if referer == panel_origin or referer.startswith(panel_origin + "/"):
+                return "panel"
+            if referer == _EXTENSION_ORIGIN or referer.startswith(_EXTENSION_ORIGIN + "/"):
+                return "extension"
+            return "bad"
+        return "none"
+
+    def _request_trusted(self, allow_extension: bool = False, require_token: bool = False) -> bool:
+        """统一来源 + 写操作 token 校验；扩展只允许访问扩展专属端点。"""
+        kind = self._origin_kind()
+        if kind == "bad":
             return False
-        return True  # 无来源（本地进程/脚本）视为可信
+        if kind == "extension" and not allow_extension:
+            return False
+        if require_token and kind != "extension" and not self._queue_token_ok():
+            return False
+        return True
 
     def _host_allowed(self) -> bool:
         """Host 校验：只接受本机面板地址，阻断 DNS rebinding（v0.9.37）。
@@ -295,19 +312,26 @@ class _PanelHandler(BaseHTTPRequestHandler):
         return host in {f"127.0.0.1:{port}", f"localhost:{port}"}
 
     def _queue_token_ok(self) -> bool:
-        """队列指令鉴权：必须携带面板启动时生成的随机 token（v0.9.37）。"""
+        """写操作鉴权：必须携带面板启动时生成的随机 token（v0.9.38）。"""
         expected = str(getattr(self.server, "queue_token", "") or "")
         supplied = str(self.headers.get(_PANEL_TOKEN_HEADER) or "")
         return bool(expected) and secrets.compare_digest(supplied, expected)
 
+    def _extension_path(self) -> bool:
+        return self.path.startswith(_EXTENSION_API_PREFIXES)
+
     # -- routes --
     def do_GET(self) -> None:
-        if not self._host_allowed() or not self._origin_allowed():
+        if not self._host_allowed() or self._origin_kind() == "bad":
             self._json(403, {"error": "host/origin not allowed"})
             return
         status_fn = self.server.status_fn
         if self.path.startswith("/api/status"):
+            if self._origin_kind() == "extension":
+                self._json(403, {"error": "extension cannot read panel status"})
+                return
             payload = dict(status_fn() or {})
+            payload.pop("uname", None)  # 账号名/uid 不上面板接口（v0.9.38）
             self._json(200, payload)
             return
         if self.path.startswith("/api/extension-status"):
@@ -319,16 +343,23 @@ class _PanelHandler(BaseHTTPRequestHandler):
             })
             return
         if self.path.startswith("/api/pending-command"):
-            now = time.time()
-            _CMD_QUEUE[:] = [c for c in _CMD_QUEUE if now - (c.get("created") or now) < 600]
-            cmd = _CMD_QUEUE[0] if _CMD_QUEUE else {}
+            if not self._request_trusted(allow_extension=True, require_token=True):
+                self._json(403, {"error": "queue token required"})
+                return
+            with _CMD_LOCK:
+                now = time.time()
+                _CMD_QUEUE[:] = [c for c in _CMD_QUEUE if now - (c.get("created") or now) < 600]
+                cmd = _CMD_QUEUE[0] if _CMD_QUEUE else {}
             self._json(200, cmd or {"id": None})
             return
-        self._send(200, "text/html; charset=utf-8", _PAGE.encode("utf-8"))
+        self._send(200, "text/html; charset=utf-8", _PAGE.replace("__PANEL_TOKEN__", self.server.queue_token).encode("utf-8"))
 
     def do_POST(self) -> None:
-        if not self._host_allowed() or not self._origin_allowed():
+        if not self._host_allowed():
             self._json(403, {"error": "host/origin not allowed"})
+            return
+        if not self._request_trusted(allow_extension=self._extension_path(), require_token=True):
+            self._json(403, {"error": "queue token required"})
             return
         if self.path.startswith("/api/bind"):
             try:
@@ -347,10 +378,12 @@ class _PanelHandler(BaseHTTPRequestHandler):
             room = body.get("room") or ""
             browser = str(body.get("browser") or "").strip().lower()
             if cmd_type == "enter-live" and str(room).isdigit():
-                _CMD_SEQ += 1
-                _CMD_QUEUE.append({"id": _CMD_SEQ, "type": "enter-live", "room": str(room),
-                                   "browser": browser or None, "created": time.time()})
-                self._json(200, {"queued": True, "id": _CMD_SEQ})
+                with _CMD_LOCK:
+                    _CMD_SEQ += 1
+                    _CMD_QUEUE.append({"id": _CMD_SEQ, "type": "enter-live", "room": str(room),
+                                       "browser": browser or None, "created": time.time()})
+                    cmd_id = _CMD_SEQ
+                self._json(200, {"queued": True, "id": cmd_id})
             else:
                 self._json(400, {"error": "bad command"})
             return
@@ -358,7 +391,8 @@ class _PanelHandler(BaseHTTPRequestHandler):
             body = self._read_json_body()
             ack = body.get("ack")
             if ack is not None:
-                _CMD_QUEUE[:] = [c for c in _CMD_QUEUE if c.get("id") != ack]
+                with _CMD_LOCK:
+                    _CMD_QUEUE[:] = [c for c in _CMD_QUEUE if c.get("id") != ack]
             self._json(200, {"ok": True})
             return
         if self.path.startswith("/api/extension-cookie"):

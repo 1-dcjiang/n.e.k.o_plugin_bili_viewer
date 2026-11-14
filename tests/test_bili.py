@@ -11,6 +11,8 @@ import os
 import struct
 import zlib
 
+import pytest
+
 # ══════════ BV 号解析 ══════════
 
 
@@ -1747,7 +1749,7 @@ def test_danmaku_loop_tick_send_and_finish(monkeypatch) -> None:
         "next_due": 0, "account": "yui", "pending": None,
     }
     monkeypatch.setattr(inst, "_loop_load", lambda: st)
-    monkeypatch.setattr(inst, "_loop_save", lambda s: st.update(s))
+    monkeypatch.setattr(inst, "_loop_merge_save", lambda s: st.update(s))
     inst._danmaku_loop_tick()  # 发送#1 → pending
     assert st["pending"] is not None and st["sent"] == 0
     st["pending"]["verify_due"] = 0  # 模拟 3 秒后
@@ -1780,7 +1782,7 @@ def test_danmaku_loop_tick_unconfirmed_stops(monkeypatch) -> None:
         "next_due": 0, "account": "yui", "pending": None,
     }
     monkeypatch.setattr(inst, "_loop_load", lambda: st)
-    monkeypatch.setattr(inst, "_loop_save", lambda s: st.update(s))
+    monkeypatch.setattr(inst, "_loop_merge_save", lambda s: st.update(s))
     inst._danmaku_loop_tick()  # 发送 → pending
     st["pending"]["verify_due"] = 0  # 模拟 3 秒后
     st["next_due"] = 0
@@ -1808,7 +1810,7 @@ def test_danmaku_loop_readback_exception_retries(monkeypatch) -> None:
         "pending": {"room": "1", "text": "666", "verify_due": 0},
     }
     monkeypatch.setattr(inst, "_loop_load", lambda: st)
-    monkeypatch.setattr(inst, "_loop_save", lambda s: st.update(s))
+    monkeypatch.setattr(inst, "_loop_merge_save", lambda s: st.update(s))
     inst._danmaku_loop_tick()
     assert st["active"] is True
     assert st["pending"] is not None
@@ -1841,6 +1843,20 @@ def test_danmaku_loop_interval_min_is_5(monkeypatch) -> None:
     assert saved["interval"] == 5.0  # 请求 1 秒被钳到 5 秒
 
 
+def test_loop_merge_save_does_not_revive_stopped_task(monkeypatch) -> None:
+    """v0.9.38：tick 拿着旧快照写回时，不能把已停止的任务改回 active。"""
+    from plugin.plugins.bili_viewer import BiliViewerPlugin
+
+    inst = object.__new__(BiliViewerPlugin)
+    state = {"active": False, "stopped_reason": "用户停止", "sent": 1}
+    inst._loop_load_unlocked = lambda: dict(state)
+    inst._loop_save_unlocked = lambda s: (state.clear(), state.update(s))
+    inst._loop_merge_save({"active": True, "sent": 99, "stopped_reason": ""})
+    assert state["active"] is False
+    assert state["sent"] == 1
+    assert state["stopped_reason"] == "用户停止"
+
+
 def test_danmaku_loop_tick_stop_on_fail(monkeypatch) -> None:
     """弹幕连发任务：连续 3 次真失败自动停止（v0.9.15）。"""
     from plugin.plugins.bili_viewer import BiliViewerPlugin, bili
@@ -1857,7 +1873,7 @@ def test_danmaku_loop_tick_stop_on_fail(monkeypatch) -> None:
         "next_due": 0, "account": "yui",
     }
     monkeypatch.setattr(inst, "_loop_load", lambda: st)
-    monkeypatch.setattr(inst, "_loop_save", lambda s: st.update(s))
+    monkeypatch.setattr(inst, "_loop_merge_save", lambda s: st.update(s))
     for _ in range(3):
         st["next_due"] = 0
         inst._danmaku_loop_tick()
@@ -1929,7 +1945,7 @@ def test_dm_send_short_window_dedup(monkeypatch) -> None:
         return {"code": 0, "data": {}}
 
     monkeypatch.setattr(bili, "_http_post", fake_post)
-    monkeypatch.setattr(bili_social, "_dm_verified", lambda account, talker, text: True)
+    monkeypatch.setattr(bili_social, "_dm_verified", lambda account, talker, text, **_kw: True)
     r = bili_social.dm_send("yui", uid="2222", text="你好喵", allow_new=True)
     assert r["sent"] is True
     # 接口接受后立即记录：60s 内同内容 → DM_DUP
@@ -1959,6 +1975,50 @@ def test_redact_text_masks_cookie_and_tokens() -> None:
     for secret in ("abc123secret", "csrf456", "buv789", "ak000", "tok111", "pwd222"):
         assert secret not in out
     assert "SESSDATA=[redacted]" in out
+
+
+def test_redact_text_covers_json_and_urlencoded() -> None:
+    """v0.9.38：JSON 与 %3D 两种形态也必须脱敏。"""
+    from plugin.plugins.bili_viewer import bili
+
+    raw_json = '{"SESSDATA":"json-secret","bili_jct":"json-csrf","DedeUserID":123}'
+    out = bili.redact_text(raw_json)
+    assert "json-secret" not in out
+    assert "json-csrf" not in out
+    assert "[redacted]" in out
+
+    raw_url = "https://example.com/cb?SESSDATA%3Durl-secret%26bili_jct%3Durl-csrf&x=1"
+    out = bili.redact_text(raw_url)
+    assert "url-secret" not in out
+    assert "url-csrf" not in out
+
+
+def test_cookie_file_plaintext_fallback_is_marked(monkeypatch) -> None:
+    """v0.9.38：DPAPI 不可用时不再写裸明文，而是显式降级标记。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setattr(bili, "_dpapi", lambda *_a, **_kw: None)
+    encoded = bili._encode_cookie_file("SESSDATA=x; bili_jct=y")
+    assert encoded.startswith(bili._COOKIE_FILE_PLAIN_MAGIC)
+    assert bili._decode_cookie_file(encoded) == "SESSDATA=x; bili_jct=y"
+
+
+def test_cookie_decrypt_error_not_looked_like_logged_out(monkeypatch) -> None:
+    """v0.9.38：DPAPI 解密失败抛 CookieDecryptError，而不是静默返回空串。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setattr(bili, "_dpapi", lambda *_a, **_kw: None)
+    sealed = bili._COOKIE_FILE_MAGIC + "AAAA"
+    with pytest.raises(bili.CookieDecryptError):
+        bili._decode_cookie_file(sealed)
+
+
+def test_cookie_corrupt_ciphertext_not_looked_like_logged_out() -> None:
+    """v0.9.38：坏掉的 base64 密文也要报解密失败，不能当“没登录”。"""
+    from plugin.plugins.bili_viewer import bili
+
+    with pytest.raises(bili.CookieDecryptError):
+        bili._decode_cookie_file(bili._COOKIE_FILE_MAGIC + "not-base64!!")
 
 
 def test_cookie_file_roundtrip_and_encrypted_at_rest(tmp_path) -> None:

@@ -8,11 +8,17 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import time
 
 import pytest
+
+
+def _ext_id_from_key(key_b64: str) -> str:
+    digest = hashlib.sha256(base64.b64decode(key_b64)).hexdigest()[:32]
+    return "".join(chr(97 + int(ch, 16)) for ch in digest)
 
 
 def _wav_base64(seconds: float = 1.0, rate: int = 16000) -> str:
@@ -278,7 +284,10 @@ def test_ext_package_has_all_six_files(pkg_name):
 @pytest.mark.parametrize("pkg_name", ["bili-bridge-chrome", "bili-bridge-edge", "bili-bridge-360"])
 def test_ext_manifest_has_audio_permissions(pkg_name):
     manifest = json.loads(_read_ext(pkg_name, "manifest.json"))
-    assert manifest["version"] == "0.2.25"
+    assert manifest["version"] == "0.2.26"
+    # v0.9.38：固定扩展 ID 的公钥必须存在，且等价于面板唯一信任的 ID
+    assert manifest.get("key")
+    assert _ext_id_from_key(manifest["key"]) == "dafbbcelkodnlgmpjdaabcblddgicjhp"
     assert "tabCapture" in manifest["permissions"]
     assert "offscreen" in manifest["permissions"]
 

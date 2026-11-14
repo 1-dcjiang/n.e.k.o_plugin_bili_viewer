@@ -109,6 +109,18 @@ _SYNC_STABLE_COUNT = 2
 _SYNC_MIN_INTERVAL = 15.0  # 两次推送的最小间隔（秒），避免频繁切内容时刷屏
 _SYNC_DISABLE_ENV = "BILLI_SYNC_DISABLE"
 _BROWSER_MONITOR_EVERY = 24  # 浏览器接入监控刷新频率：约每 24 次轮询（≈60s）一次
+_ENV_LOCK = threading.Lock()  # os.environ 写入锁：面板线程与 watcher 可能同时刷新 Cookie
+
+
+def _set_env(name: str, value: str) -> None:
+    with _ENV_LOCK:
+        os.environ[name] = str(value)
+
+
+def _del_env(name: str) -> None:
+    with _ENV_LOCK:
+        os.environ.pop(name, None)
+
 
 # 自主查看私信（v0.8.2）：低频轮询小号未读 + 注入冷却，防止刷屏打扰
 _UNREAD_POLL_INTERVAL = 180.0       # 每 3 分钟轮询一次小号未读数（轻量接口）
@@ -419,10 +431,10 @@ class BiliViewerPlugin(NekoPluginBase):
                         or source in (_COOKIE_SOURCE_NONE, _COOKIE_SOURCE_AUTO)
                     ):
                         if new:
-                            os.environ["BILI_COOKIE"] = new
+                            _set_env("BILI_COOKIE", new)
                             self._cookie_source = _COOKIE_SOURCE_MANUAL
                         else:
-                            os.environ.pop("BILI_COOKIE", None)
+                            _del_env("BILI_COOKIE")
                             self._cookie_source = _COOKIE_SOURCE_NONE
                         _logger.info("bili cookie refreshed from plugin config")
                     self._config_cookie = new
@@ -617,29 +629,56 @@ class BiliViewerPlugin(NekoPluginBase):
             pass
         return os.path.join(d, self._DM_LOOP_FILE)
 
+    def _loop_load_unlocked(self) -> dict:
+        try:
+            with open(self._loop_path(), "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
     def _loop_load(self) -> dict:
         with _LOOP_FILE_LOCK:
-            try:
-                with open(self._loop_path(), "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                return {}
+            return self._loop_load_unlocked()
+
+    def _loop_save_unlocked(self, st: dict) -> None:
+        tmp = ""
+        try:
+            path = self._loop_path()
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(st, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, path)
+        except OSError:
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
 
     def _loop_save(self, st: dict) -> None:
         with _LOOP_FILE_LOCK:
-            tmp = ""
-            try:
-                path = self._loop_path()
-                tmp = path + ".tmp"
-                with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump(st, f, ensure_ascii=False, indent=2)
-                os.replace(tmp, path)
-            except OSError:
-                if tmp:
-                    try:
-                        os.unlink(tmp)
-                    except OSError:
-                        pass
+            self._loop_save_unlocked(st)
+
+    def _loop_update(self, mutate) -> tuple[dict, bool]:
+        """同一把锁内完成读-改-写，避免停止命令与 watcher 互相覆盖（v0.9.38）。"""
+        with _LOOP_FILE_LOCK:
+            st = self._loop_load_unlocked()
+            changed = bool(mutate(st))
+            if changed:
+                self._loop_save_unlocked(st)
+            return st, changed
+
+    def _loop_merge_save(self, st: dict) -> None:
+        """tick 写回时若外部已停止则放弃本次写，避免把 stop 覆盖回 active（v0.9.38）。"""
+        def mutate(cur: dict) -> bool:
+            if not cur.get("active") and st.get("active"):
+                return False
+            changed = cur != st
+            cur.clear()
+            cur.update(st)
+            return changed
+
+        self._loop_update(mutate)
 
     def _danmaku_loop_tick(self) -> None:
         """弹幕连发任务推进：sync 轮询里调用（v0.9.15）。
@@ -660,7 +699,7 @@ class BiliViewerPlugin(NekoPluginBase):
         account = str(st.get("account") or "yui")
         if not room or not text:
             st.update({"active": False, "last_error": "任务参数缺失", "updated_at": time.strftime("%H:%M:%S")})
-            self._loop_save(st)
+            self._loop_merge_save(st)
             return
         # 1) 回读上一条（v0.9.18）：确认才计入 sent
         pending = st.get("pending")
@@ -683,7 +722,7 @@ class BiliViewerPlugin(NekoPluginBase):
                     st["stopped_reason"] = "连续 3 次回读失败（网络/接口异常），无法确认弹幕是否发出，已停止且未计入成功"
                     st["last_error"] = f"DANMAKU_READBACK_FAILED: {type(exc).__name__}"
                     st["updated_at"] = time.strftime("%H:%M:%S")
-                    self._loop_save(st)
+                    self._loop_merge_save(st)
                     _logger.exception("danmaku loop stopped: readback failed 3x room=%s", room)
                     return
                 st["last_error"] = (
@@ -692,7 +731,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 )
                 st["next_due"] = time.time() + 3.0
                 st["updated_at"] = time.strftime("%H:%M:%S")
-                self._loop_save(st)
+                self._loop_merge_save(st)
                 _logger.exception("danmaku loop readback failed room=%s retry=%s", room, retries)
                 return
             st["pending"] = None
@@ -707,17 +746,17 @@ class BiliViewerPlugin(NekoPluginBase):
                 st["stopped_reason"] = "弹幕未在直播间出现（接口已接受但回读无此条，疑似被 B站 拦截），已停止"
                 st["last_error"] = "DANMAKU_UNCONFIRMED: 接口已接受但直播间未出现"
                 st["updated_at"] = time.strftime("%H:%M:%S")
-                self._loop_save(st)
+                self._loop_merge_save(st)
                 _logger.warning("danmaku loop stopped: unconfirmed room=%s text=%r", room, text[:20])
                 return
             if int(st.get("sent") or 0) >= int(st.get("total") or 0):
                 st["active"] = False
                 st["stopped_reason"] = "已完成全部次数"
                 st["updated_at"] = time.strftime("%H:%M:%S")
-                self._loop_save(st)
+                self._loop_merge_save(st)
                 return
         if time.time() < float(st.get("next_due") or 0):
-            self._loop_save(st)
+            self._loop_merge_save(st)
             return
         # 2) 发送下一条（verify=False，立即返回，回读交给下一轮）
         try:
@@ -742,7 +781,7 @@ class BiliViewerPlugin(NekoPluginBase):
             st["stopped_reason"] = "发送出现非接口异常，已停止"
             _logger.exception("danmaku loop send crashed room=%s", room)
         st["updated_at"] = time.strftime("%H:%M:%S")
-        self._loop_save(st)
+        self._loop_merge_save(st)
 
     def _bridge_reply_tick(self) -> None:
         """豆包指令桥回执就绪自动唤醒（v0.9.31）。
@@ -1214,7 +1253,7 @@ class BiliViewerPlugin(NekoPluginBase):
         if not cookie and _allow_cookie_scan(cfg):
             self._bg_bind()
         if cookie:
-            os.environ["BILI_COOKIE"] = cookie
+            _set_env("BILI_COOKIE", cookie)
         self._cookie_source = source
         self._start_sync_watcher()
         self._start_config_watcher()
@@ -2368,13 +2407,17 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=10.0,
     )
     async def bili_live_danmaku_stop(self, **_):
-        st = self._loop_load()
-        if not st.get("active"):
+        def _mutate(st: dict) -> bool:
+            if not st.get("active"):
+                return False
+            st["active"] = False
+            st["stopped_reason"] = "用户停止"
+            st["updated_at"] = time.strftime("%H:%M:%S")
+            return True
+
+        st, changed = self._loop_update(_mutate)
+        if not changed:
             return {"output": "当前没有运行中的弹幕连发任务。", "is_error": False, "result": st}
-        st["active"] = False
-        st["stopped_reason"] = "用户停止"
-        st["updated_at"] = time.strftime("%H:%M:%S")
-        self._loop_save(st)
         left = int(st.get("total") or 0) - int(st.get("sent") or 0)
         return {"output": f"弹幕连发已停止：已发 {st.get('sent', 0)}/{st.get('total', 0)} 条，剩余 {left} 条。", "is_error": False, "result": st}
 
@@ -2607,10 +2650,9 @@ class BiliViewerPlugin(NekoPluginBase):
         try:
             res = await asyncio.to_thread(bili.add_reply, oid, type_id, text, account=account)
         except bili.BiliError as exc:
-            if account == "yui":
-                self._yui_rate_rollback("comment", key)
             kind_name = "video" if type_id == 1 else ("live" if type_id == 11 else f"type{type_id}")
             if exc.code == "REPLY_UNVERIFIED":
+                # v0.9.38：接口已接受但回读未确认，保留限流占用，禁止诱导重试造成重复评论
                 _logger.info(
                     "comment send result: kind=%s ok=False error=REPLY_UNVERIFIED target=%s:%s account=%s",
                     kind_name, type_id, oid, account,
@@ -2621,14 +2663,15 @@ class BiliViewerPlugin(NekoPluginBase):
                     "error": "REPLY_UNVERIFIED",
                     "meta": {"agent": {"delivery": "silent"}},
                 }
+            if account == "yui":
+                self._yui_rate_rollback("comment", key)
             _logger.info(
                 "comment send result: kind=%s ok=False error=%s target=%s:%s account=%s",
                 kind_name, type_id, oid, exc.code, account,
             )
             return self._wrap_auth(exc, "发送评论")
         except Exception as exc:
-            if account == "yui":
-                self._yui_rate_rollback("comment", key)
+            # 结果未知：保留限流占用，宁可 120 秒后再试，也不冒重复评论的风险
             _logger.exception("comment send crashed target=%s:%s", type_id, oid)
             return {"output": f"评论发送异常：{bili.redact_text(exc)}", "is_error": True, "error": "SEND_EXCEPTION"}
         kind_name = "video" if type_id == 1 else ("live" if type_id == 11 else f"type{type_id}")
@@ -2795,6 +2838,11 @@ class BiliViewerPlugin(NekoPluginBase):
             self._yui_daily_release("dynamic")
             _logger.warning("yui dynamic post failed: code=%s msg=%s text_len=%d", exc.code, exc.message, len(text))
             return self._wrap_auth(exc, "发布动态")
+        except Exception as exc:
+            # v0.9.38：非 BiliError 异常也要释放日额度，避免一次崩溃吃掉当天名额
+            self._yui_daily_release("dynamic")
+            _logger.exception("yui dynamic post crashed text_len=%d", len(text))
+            return {"output": f"动态发布异常：{bili.redact_text(exc)}", "is_error": True, "error": "SEND_EXCEPTION"}
         _logger.info("yui dynamic posted: dynamic_id=%s text_len=%d", result.get("dynamic_id", ""), len(text))
         return {"output": "动态已发布。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": result}
 
@@ -2907,6 +2955,11 @@ class BiliViewerPlugin(NekoPluginBase):
         except bili.BiliError as exc:
             self._yui_daily_release("upload")
             return self._wrap_auth(exc, "投稿")
+        except Exception as exc:
+            # v0.9.38：非 BiliError 异常也要释放日额度，避免一次崩溃吃掉当天名额
+            self._yui_daily_release("upload")
+            _logger.exception("yui upload crashed file=%s", base)
+            return {"output": f"投稿异常：{bili.redact_text(exc)}", "is_error": True, "error": "SEND_EXCEPTION"}
         finally:
             with self._yui_upload_lock:
                 self._yui_uploading = False
@@ -3284,8 +3337,8 @@ class BiliViewerPlugin(NekoPluginBase):
         main_rec, yui_rec = accounts.get("main") or {}, accounts.get("yui") or {}
         accounts["main"], accounts["yui"] = yui_rec, main_rec
         _write_accounts(accounts)
-        os.environ["BILI_COOKIE"] = bili._main_cookie_from_file()
-        os.environ["BILI_YUI_COOKIE"] = bili._yui_cookie_from_file()
+        _set_env("BILI_COOKIE", bili._main_cookie_from_file())
+        _set_env("BILI_YUI_COOKIE", bili._yui_cookie_from_file())
         if uid and role in ("main", "yui"):
             return {"output": f"已把 uid={uid} 的账号设为{role}（原{role}的账号自动换到另一角色）。", "is_error": False, "result": {"ok": True, "uid": uid, "role": role}}
         return {"output": "已交换大小号：原小号现在是大号，原大号现在是小号（未说明时仍默认操作小号）。", "is_error": False, "result": {"ok": True, "swapped": True}}
@@ -4309,6 +4362,9 @@ class BiliViewerPlugin(NekoPluginBase):
         if "SESSDATA=" not in cookie:
             return {"ok": True, "bound": False, "detail": "扩展已推送，但浏览器中没有有效 B站登录态"}
         uid = bili.cookie_uid(cookie)
+        if uid is None:
+            # v0.9.38：uid 解析失败时绝不猜测角色，避免把新 Cookie 当小号覆盖原绑定。
+            return {"ok": True, "bound": False, "detail": "收到 Cookie，但 uid 解析失败，未写入/未覆盖任何账号；请刷新 B站 登录态后重试"}
         accounts = _read_accounts()
         main_uid = accounts.get("main", {}).get("uid")
         yui_uid = accounts.get("yui", {}).get("uid")
@@ -4317,21 +4373,21 @@ class BiliViewerPlugin(NekoPluginBase):
             # 刷新大号
             accounts["main"] = {"uid": uid, "bound_at": now}  # v0.9.24：同步 uid 防错位
             _write_accounts(accounts)
-            os.environ["BILI_COOKIE"] = cookie
+            _set_env("BILI_COOKIE", cookie)
             self._cookie_source = source
             return {"ok": True, "bound": True, "detail": "已刷新大号（main）登录态"}
         if uid is not None and uid == yui_uid:
             # 刷新小号
             accounts["yui"] = {"uid": uid, "bound_at": now}  # v0.9.24：同步 uid 防错位
             _write_accounts(accounts)
-            os.environ["BILI_YUI_COOKIE"] = cookie
+            _set_env("BILI_YUI_COOKIE", cookie)
             return {"ok": True, "bound": True, "detail": "已刷新小号（yui）登录态"}
         if main_uid is None:
             # 第一个登录的账号 → 大号（持久化到 main_cookie.txt）
             bili.write_main_cookie_file(cookie)
             accounts["main"] = {"uid": uid, "bound_at": now}
             _write_accounts(accounts)
-            os.environ["BILI_COOKIE"] = cookie
+            _set_env("BILI_COOKIE", cookie)
             self._cookie_source = source
             return {"ok": True, "bound": True, "detail": "已绑定大号（第一个登录的账号，main）"}
         # 已有大号且新 uid 不同 → 第二个登录的账号自动成为小号（yui，默认操作账号）
@@ -4339,7 +4395,7 @@ class BiliViewerPlugin(NekoPluginBase):
             bili.write_yui_cookie_file(cookie)
             accounts["yui"] = {"uid": uid, "bound_at": now}
             _write_accounts(accounts)
-            os.environ["BILI_YUI_COOKIE"] = cookie
+            _set_env("BILI_YUI_COOKIE", cookie)
             return {"ok": True, "bound": True, "detail": "已绑定小号（第二个登录的账号，yui），未说明时默认用它操作"}
         return {"ok": True, "bound": False, "detail": "大小号都已绑定；新账号未匹配，如需替换请说明要替换大号还是小号"}
 
@@ -4881,7 +4937,6 @@ class BiliViewerPlugin(NekoPluginBase):
         monitor = getattr(self, "_browser_monitor", None) or {"connected": False, "detail": "未探测", "at": 0}
         ext_online = (time.time() - self._ext_last_seen()) < web_ui._EXT_ONLINE_WINDOW
         tab = self._ext_tab()
-        uid = _cookie_uid(cookie)
         has_csrf = "bili_jct=" in cookie
         return {
             "ok": True,
@@ -4895,7 +4950,6 @@ class BiliViewerPlugin(NekoPluginBase):
             "extension_last_seen": int(self._ext_last_seen()),
             "current_tab": tab,
             "last_send": getattr(self, "_last_send_result", None),
-            "uname": f"uid {uid}" if uid else "",
         }
 
     def _panel_bind(self) -> dict:
@@ -5018,7 +5072,7 @@ class BiliViewerPlugin(NekoPluginBase):
         except Exception:
             status, auto_cookie, detail = cdp_cookie._STATUS_FAIL, "", "CDP 检测超时/异常"
         if auto_cookie and "SESSDATA=" in auto_cookie:
-            os.environ["BILI_COOKIE"] = auto_cookie
+            _set_env("BILI_COOKIE", auto_cookie)
             self._cookie_source = _COOKIE_SOURCE_AUTO
             return {"output": f"已自动绑定 B站账号（{detail}）。", "is_error": False, "bound": True, "source": _COOKIE_SOURCE_AUTO, "browser_connected": True, "browser_detail": detail}
         hint = ""
@@ -5086,7 +5140,7 @@ class BiliViewerPlugin(NekoPluginBase):
         except Exception:
             status, cookie, detail = cdp_cookie._STATUS_FAIL, "", "CDP 接入超时/异常"
         if cookie and "SESSDATA=" in cookie:
-            os.environ["BILI_COOKIE"] = cookie
+            _set_env("BILI_COOKIE", cookie)
             self._cookie_source = _COOKIE_SOURCE_AUTO
             try:
                 self._browser_monitor = self._monitor_browser()
@@ -5100,7 +5154,7 @@ class BiliViewerPlugin(NekoPluginBase):
             except Exception:
                 _file_cookie, _file_detail = "", cookie_auto.STATUS_TEXT[cookie_auto._STATUS_FAIL]
             if _file_cookie and "SESSDATA=" in _file_cookie:
-                os.environ["BILI_COOKIE"] = _file_cookie
+                _set_env("BILI_COOKIE", _file_cookie)
                 self._cookie_source = _COOKIE_SOURCE_AUTO
                 return {"output": f"已授权并绑定 B站账号（{_file_detail}）。", "is_error": False, "bound": True, "source": _COOKIE_SOURCE_AUTO}
         if status == cdp_cookie._STATUS_NOT_LOGGED_IN:

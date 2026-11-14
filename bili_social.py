@@ -553,6 +553,7 @@ def dm_messages(account: str = "yui", uid: str = "", limit: int = 30, mark_read:
             "type": _MSG_TYPES.get(m.get("msg_type"), m.get("msg_type")),
             "text": _dm_content(m),
             "time": _fmt_time(m.get("timestamp")),
+            "ts": m.get("timestamp"),
             "seqno": m.get("msg_seqno"),
         }
         for m in msgs
@@ -691,6 +692,7 @@ def dm_send(account: str = "yui", uid: str = "", text: str = "", allow_new: bool
     }
     try:
         # send_msg 是 wbi:true 接口：query 的 w_sender_uid/w_receiver_id 必须带 wts/w_rid 签名
+        send_started = time.time()
         bili._http_post(
             _SEND_MSG_URL,
             {**payload, "csrf": bili._csrf(account)},
@@ -702,7 +704,7 @@ def dm_send(account: str = "yui", uid: str = "", text: str = "", allow_new: bool
     # 接口接受=已发送，立即记录（无论后续回读结果，60s 内重试都被挡）
     _dm_last_sends[_dup_key] = time.time()
     # 回读验证：最近一条应为我们的内容（真实发送铁律）
-    verified = _dm_verified(account, talker, text)
+    verified = _dm_verified(account, talker, text, since=send_started)
     if verified is False:
         raise bili.BiliError(
             "私信接口已接受发送，但回读未确认到（消息可能已经发出，B站接口同步有延迟）；"
@@ -721,27 +723,44 @@ def dm_send(account: str = "yui", uid: str = "", text: str = "", allow_new: bool
     return {"uid": talker, "text_len": len(text), "sent": True, "allowed_because": reason or "allow_new"}
 
 
-def _dm_verified(account: str, talker: int, text: str, tries: int = 3) -> bool | None:
+def _dm_verified(account: str, talker: int, text: str, tries: int = 3, since: float = 0) -> bool | None:
     """发送后回读验证：最近一条我发的消息应为我们的内容。
 
     v0.9.37：三态返回——True=确认出现；False=回读正常但未命中；
     None=回读接口/网络异常，无法判断。绝不把“读不到”当成“没发出去”，
     否则上层会诱导 YUI 重复发送（用户实证重复私信根因）。
-    text 比对忽略首尾空白。
+
+    v0.9.38：回读异常也重试（此前一次异常就直接 None）；比对范围扩到接口
+    能返回的最多 30 条，并用发送开始时间过滤，避免把历史上的同内容消息
+    误认成本次发送。本函数运行在 asyncio.to_thread 的工作线程里，sleep
+    不阻塞事件循环。
     """
+    saw_read_error = False
     for i in range(tries):
         try:
-            msgs = dm_messages(account, str(talker), 5).get("messages") or []
-        except bili.BiliError as exc:
-            _logger.debug("dm readback failed account=%s uid=%s err=%s", account, talker, exc.code)
-            return None
-        for m in reversed(msgs):
-            if m.get("from") == "me":
-                if (m.get("text") or "").strip() == text.strip():
-                    return True
+            msgs = dm_messages(account, str(talker), 30).get("messages") or []
+        except Exception as exc:  # noqa: BLE001 - 回读任何异常都不能当成“没发出去”
+            saw_read_error = True
+            _logger.debug(
+                "dm readback failed account=%s uid=%s err=%s try=%d",
+                account, talker, bili.redact_text(exc), i + 1,
+            )
+            if i < tries - 1:
+                time.sleep(1.5)
+            continue
+        latest_mine = next((m for m in reversed(msgs) if m.get("from") == "me"), None)
+        if latest_mine is not None and (latest_mine.get("text") or "").strip() == text.strip():
+            ts = latest_mine.get("ts")
+            try:
+                ts_val = float(ts or 0)
+            except (TypeError, ValueError):
+                ts_val = 0.0
+            # 消息时间戳是秒级；允许 5 秒时钟偏差。拿不到 ts 时按内容判定。
+            if not since or not ts_val or ts_val >= since - 5:
+                return True
         if i < tries - 1:
             time.sleep(1.5)
-    return False
+    return None if saw_read_error else False
 
 
 # ══════════════ 表态：点赞 / 投币 / 收藏 / 三连 ══════════════

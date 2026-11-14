@@ -198,6 +198,27 @@
 > 私信白名单（owner/粉丝/对方先发/互关，粉丝全放行满足"适用于所有关注她的粉丝"）、私信 payload（嵌套
 > msg[sender_uid]/msg[dev_id] per-install + wbi query）、动态发布/删除双回读、直播弹幕回读、5 秒风控间隔、
 > 弹幕连发任务（danmaku_loop.json）。
+> v0.9.38 v0.9.37 复核修复（约 7.5/10 的 5 项优先 + 次要项）：
+> ① 面板鉴权补齐：`extension-cookie` / `bind` / `extension-danmaku` 等全部 POST 必须带
+>    `X-Neko-Token`；`pending-command` GET/ack 也需 token 或固定扩展 Origin；
+>    `/api/status` 不再返回账号名/uid。
+> ② 扩展来源收紧：三个 manifest 共用同一 RSA 公钥 `key`，unpacked 扩展 ID 固定为
+>    `dafbbcelkodnlgmpjdaabcblddgicjhp`；只信任 `chrome-extension://<该 ID>`，
+>    任意其它 `chrome-extension://` 一律 403；扩展仅可访问 `/api/extension-*` 与
+>    `/api/pending-command`。**已安装旧扩展需在扩展管理页重新加载/重装一次**，否则 ID
+>    不匹配会被面板拒绝；扩展版本升至 0.2.26。
+> ③ `_assign_cookie`：uid 解析失败时直接返回未绑定，不再把 Cookie 当小号写入
+>    `yui_cookie.txt` 覆盖原绑定。
+> ④ `bili_reply_comment`：`REPLY_UNVERIFIED` 以及结果未知的异常不再释放 120 秒限流槽，
+>    避免重试造成重复评论；明确失败（非未确认的 BiliError）才回退。
+> ⑤ `bili_yui_dynamic` / `bili_yui_upload`：非 `BiliError` 异常也释放每日额度，
+>    一次崩溃不再吃掉当天动态/投稿名额。
+> 次要：`os.environ` 写入统一走 `_set_env` 锁；`danmaku_stop` 读改写改
+> `_loop_update` 同锁原子完成；私信回读异常可重试、比对最近 30 条并按发送时间过滤；
+> `redact_text` 覆盖 JSON 与 `%3D` 形态；DPAPI 不可用时写显式
+> `NEKO_COOKIE_PLAIN_V1:` 标记而非裸明文，解密失败报 `COOKIE_DECRYPT_FAILED`
+> 而不是伪装成未登录。
+> 已知边界：私信三态/扩展开关仍以单测为主；扩展换固定 ID 后需用户重载一次。
 > v0.9.37 截图复核修复（约 6/10 的 5 个最该修项 + 次要项，320 tests passed）：
 > ① async 阻塞：`video_danmaku` / `video_subtitle` / `video_ai_summary` / `video_comments` /
 >    `live_info` / `user_info` / `user_videos` / `now_watching` / `my_info` / `my_videos` /

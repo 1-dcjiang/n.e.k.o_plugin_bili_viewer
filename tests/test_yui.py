@@ -116,6 +116,13 @@ def test_assign_cookie_first_is_main_second_is_yui(monkeypatch, tmp_path) -> Non
     assert bili._cookie("yui") == "SESSDATA=b2; DedeUserID=222; bili_jct=b2b"  # 未被覆盖
     assert bili._cookie("main") == "SESSDATA=a; DedeUserID=111; bili_jct=a1"
 
+    # uid 解析失败 → 不猜测角色、不覆盖任何已有绑定（v0.9.38）
+    r5 = inst._assign_cookie("SESSDATA=bad; bili_jct=bad", 0, "extension")
+    assert r5["bound"] is False
+    assert "uid 解析失败" in r5["detail"]
+    assert bili._cookie("main") == "SESSDATA=a; DedeUserID=111; bili_jct=a1"
+    assert bili._cookie("yui") == "SESSDATA=b2; DedeUserID=222; bili_jct=b2b"
+
 
 def test_set_roles_swap(monkeypatch, tmp_path) -> None:
     """v0.7.10：后期说明修改——交换大小号（文件互换 + 角色映射互换 + env 同步）。"""
@@ -303,6 +310,47 @@ def test_yui_comment_rate_limit(monkeypatch) -> None:
     monkeypatch.setattr(bili, "video_info", lambda bvid, account="main": {"aid": 999, "title": "t2"})
     r3 = asyncio.run(inst.bili_reply_comment(target="BV1xx411c7mE", text="另一个", account="yui"))
     assert r3.get("is_error") is False
+
+
+def test_yui_comment_unverified_keeps_rate_slot(monkeypatch) -> None:
+    """v0.9.38：REPLY_UNVERIFIED 不释放限流槽，避免系统诱导重试造成重复评论。"""
+    from plugin.plugins.bili_viewer import bili
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setattr(bili, "video_info", lambda bvid, account="main": {"aid": 123456, "title": "t"})
+
+    def fake_reply(*_a, **_kw):
+        raise bili.BiliError("已接受但未确认", "REPLY_UNVERIFIED")
+
+    monkeypatch.setattr(bili, "add_reply", fake_reply)
+    inst = _make_inst(monkeypatch)
+    r1 = asyncio.run(inst.bili_reply_comment(target="BV1xx411c7mD", text="未确认", account="yui"))
+    assert r1.get("error") == "REPLY_UNVERIFIED"
+    r2 = asyncio.run(inst.bili_reply_comment(target="BV1xx411c7mD", text="重试", account="yui"))
+    assert r2.get("error") == "RATE_LIMITED"
+
+
+def test_yui_dynamic_non_bili_error_releases_daily_quota(monkeypatch) -> None:
+    """v0.9.38：非 BiliError 异常也要回退每日额度，不能一次崩溃吃掉当天名额。"""
+    from plugin.plugins.bili_viewer import bili, bili_social
+
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setattr(bili_social, "check_limit", lambda *a, **k: None)
+    monkeypatch.setattr(bili_social, "record_limit", lambda *a, **k: None)
+    state = {"fail": True}
+
+    def fake_dyn(text, account="yui"):
+        if state["fail"]:
+            raise RuntimeError("boom")
+        return {"ok": True}
+
+    monkeypatch.setattr(bili, "post_dynamic", fake_dyn)
+    inst = _make_inst(monkeypatch)
+    r1 = asyncio.run(inst.bili_yui_dynamic(text="异常动态"))
+    assert r1.get("error") == "SEND_EXCEPTION"
+    state["fail"] = False
+    r2 = asyncio.run(inst.bili_yui_dynamic(text="重试动态"))
+    assert r2.get("is_error") is False
 
 
 def test_yui_rate_reserve_atomic_blocks_concurrent(monkeypatch) -> None:
