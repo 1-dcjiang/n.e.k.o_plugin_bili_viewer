@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import uuid
 from typing import Any
@@ -60,13 +61,22 @@ _WINDOW_SECONDS = 3600
 _DAY_SECONDS = 24 * 3600
 _DAILY_KEY = "DAILY"
 
+# v0.9.39 深审 M8：check→发送→record 之间原来是"检查完再记账"，并发两个
+# 写请求都能通过间隔/小时/日上限（read-modify-write 竞态）。现在 check_limit
+# 在锁内完成"检查 + 预占时间戳"，record_limit 消费预占（不再重复计数），
+# 失败路径用 release_limit 归还预占。
+_RL_LOCK = threading.RLock()
+_RL_PENDING: dict[tuple[str, str], list[float]] = {}
+
 
 def _state_dir() -> str:
     """限流/审计/设备ID 状态目录（运行时数据，不进插件仓库）。"""
     env = os.environ.get("BILI_SOCIAL_DIR", "").strip()
     if env:
         return env
-    base = os.environ.get("LOCALAPPDATA") or ""
+    # v0.9.39 深审 L4：LOCALAPPDATA 为空时旧实现返回相对路径
+    # "N.E.K.O/bili_viewer/..."，状态会落到当前工作目录（随宿主 cwd 漂移）。
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
     return os.path.join(base, "N.E.K.O", "bili_viewer", "bili_social")
 
 
@@ -98,50 +108,102 @@ def _save_ratelimit(state: dict[str, list[float]]) -> None:
         pass  # 状态目录不可写时降级：只做记录，不阻断操作
 
 
-def check_limit(action: str, units: int = 1, account: str = "yui") -> None:
-    """限流检查（bili-cli guard.py 精华）：间隔 + 小时 + 日上限；超限抛 RATE_LIMITED。"""
+def check_limit(action: str, units: int = 1, account: str = "yui") -> float | None:
+    """限流检查 + 预占（bili-cli guard.py 精华）：间隔 + 小时 + 日上限。
+
+    v0.9.39：整个检查与写入都在 _RL_LOCK 内完成，并立即预占时间戳，
+    并发调用不会同时穿过上限；返回预占戳，供 record_limit 消费。
+    超限抛 RATE_LIMITED。
+    """
     if action not in LIMITS:
-        return
+        return None
     min_interval, per_hour = LIMITS[action]
     now = time.time()
     key = f"{account}:{action}"
-    state = _load_ratelimit()
-    history = [t for t in state.get(key, []) if now - t < _WINDOW_SECONDS]
-    # 日上限（coin）
     daily_key = f"{account}:{action}:{_DAILY_KEY}"
     daily_limit = DAILY_LIMITS.get(action)
-    if daily_limit is not None:
-        today = [t for t in state.get(daily_key, []) if now - t < _DAY_SECONDS]
-        if len(today) + units > daily_limit:
-            wait = int(_DAY_SECONDS - (now - today[0])) + 1 if today else 0
+    with _RL_LOCK:
+        state = _load_ratelimit()
+        history = [t for t in state.get(key, []) if now - t < _WINDOW_SECONDS]
+        # 日上限（coin）
+        if daily_limit is not None:
+            today = [t for t in state.get(daily_key, []) if now - t < _DAY_SECONDS]
+            if len(today) + units > daily_limit:
+                wait = int(_DAY_SECONDS - (now - today[0])) + 1 if today else 0
+                raise bili.BiliError(
+                    f"{action} 24 小时内最多 {daily_limit} 次（已用 {len(today)} 次），"
+                    f"约 {wait // 3600 + 1} 小时后恢复",
+                    "RATE_LIMITED",
+                )
+        if history and now - history[-1] < min_interval:
+            wait = int(min_interval - (now - history[-1])) + 1
             raise bili.BiliError(
-                f"{action} 24 小时内最多 {daily_limit} 次（已用 {len(today)} 次），"
-                f"约 {wait // 3600 + 1} 小时后恢复",
-                "RATE_LIMITED",
+                f"{action} 操作间隔至少 {min_interval} 秒，请等待 {wait} 秒后重试", "RATE_LIMITED"
             )
-    if history and now - history[-1] < min_interval:
-        wait = int(min_interval - (now - history[-1])) + 1
-        raise bili.BiliError(
-            f"{action} 操作间隔至少 {min_interval} 秒，请等待 {wait} 秒后重试", "RATE_LIMITED"
-        )
-    if len(history) + units > per_hour:
-        wait = int(_WINDOW_SECONDS - (now - history[0])) + 1
-        raise bili.BiliError(
-            f"{action} 操作 1 小时内最多 {per_hour} 次，请等待 {wait} 秒后重试", "RATE_LIMITED"
-        )
+        if len(history) + units > per_hour:
+            wait = int(_WINDOW_SECONDS - (now - history[0])) + 1
+            raise bili.BiliError(
+                f"{action} 操作 1 小时内最多 {per_hour} 次，请等待 {wait} 秒后重试", "RATE_LIMITED"
+            )
+        # 锁内预占：检查通过即写入时间戳，后续请求立即看到已占用
+        stamp = now
+        state[key] = history + [stamp] * units
+        if daily_limit is not None:
+            state[daily_key] = today + [stamp] * units
+        _save_ratelimit(state)
+        _RL_PENDING.setdefault((account, action), []).extend([stamp] * units)
+        return stamp
+
+
+def release_limit(action: str, units: int = 1, account: str = "yui") -> None:
+    """释放 check_limit 预占但最终没写成功的额度（v0.9.39）。
+
+    失败/去重路径必须调用；只删本进程预占的时间戳，不会误删已成功记录。
+    """
+    if action not in LIMITS:
+        return
+    key = f"{account}:{action}"
+    daily_key = f"{account}:{action}:{_DAILY_KEY}"
+    with _RL_LOCK:
+        pending = _RL_PENDING.pop((account, action), [])
+        if not pending:
+            return
+        release_stamps = pending[-units:] if units > 0 else pending
+        state = _load_ratelimit()
+        for k in (key, daily_key):
+            arr = state.get(k)
+            if not arr:
+                continue
+            for stamp in release_stamps:
+                try:
+                    arr.remove(stamp)
+                except ValueError:
+                    pass
+            state[k] = arr
+        _save_ratelimit(state)
 
 
 def record_limit(action: str, params: dict[str, Any], result: Any, units: int = 1, account: str = "yui") -> None:
-    """记录一次成功的写操作（限流状态 + 审计日志）。"""
+    """记录一次成功的写操作（限流状态 + 审计日志）。
+
+    v0.9.39：若 check_limit 已预占，则只消费预占、不再追加时间戳；
+    兼容旧调用（未先 check）仍按原行为追加。
+    """
     now = time.time()
-    state = _load_ratelimit()
     key = f"{account}:{action}"
     keep = _DAY_SECONDS if action in DAILY_LIMITS else _WINDOW_SECONDS
-    state[key] = [t for t in state.get(key, []) if now - t < keep] + [now] * units
-    if action in DAILY_LIMITS:
-        daily_key = f"{account}:{action}:{_DAILY_KEY}"
-        state[daily_key] = [t for t in state.get(daily_key, []) if now - t < _DAY_SECONDS] + [now] * units
-    _save_ratelimit(state)
+    with _RL_LOCK:
+        pending = _RL_PENDING.get((account, action), [])
+        if pending:
+            # 预占已在 check_limit 写入，消费后不再重复计数
+            _RL_PENDING.pop((account, action), None)
+        else:
+            state = _load_ratelimit()
+            state[key] = [t for t in state.get(key, []) if now - t < keep] + [now] * units
+            if action in DAILY_LIMITS:
+                daily_key = f"{account}:{action}:{_DAILY_KEY}"
+                state[daily_key] = [t for t in state.get(daily_key, []) if now - t < _DAY_SECONDS] + [now] * units
+            _save_ratelimit(state)
     entry = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "account": account, "action": action, "params": params, "result": result}
     try:
         with open(_state_path(_AUDIT_FILE), "a", encoding="utf-8") as f:
@@ -671,6 +733,7 @@ def dm_send(account: str = "yui", uid: str = "", text: str = "", allow_new: bool
     _now_ts = time.time()
     _last_ts = _dm_last_sends.get(_dup_key)
     if _last_ts and _now_ts - _last_ts < _DM_DUP_WINDOW:
+        release_limit("dm", 1, account)
         raise bili.BiliError(
             f"同一内容 {int(_DM_DUP_WINDOW)} 秒内已给该对象发送过（疑似重复触发），严禁重复发送；"
             "如需再次发送请换新内容或稍后重试。",
@@ -700,9 +763,13 @@ def dm_send(account: str = "yui", uid: str = "", text: str = "", allow_new: bool
             query=_wbi_params({"w_sender_uid": me, "w_receiver_id": talker}),
         )
     except bili.BiliError as exc:
+        release_limit("dm", 1, account)
         raise _guard_exc(exc) from exc
-    # 接口接受=已发送，立即记录（无论后续回读结果，60s 内重试都被挡）
+    # 接口接受=已发送，立即记录（无论后续回读结果，60s 内重试都被挡）。
+    # v0.9.39 深审 M7：额度也必须在接口接受时立即扣，而不是等回读成功；
+    # DM_UNVERIFIED 恰恰是最可能已经发出去的状态，不记账会纵容继续发。
     _dm_last_sends[_dup_key] = time.time()
+    record_limit("dm", params, {"ok": True}, account=account)
     # 回读验证：最近一条应为我们的内容（真实发送铁律）
     verified = _dm_verified(account, talker, text, since=send_started)
     if verified is False:
@@ -719,7 +786,6 @@ def dm_send(account: str = "yui", uid: str = "", text: str = "", allow_new: bool
             "消息可能已经发出，严禁重复发送。请让用户在 B站 私信页面确认实际状态。",
             "DM_UNVERIFIED",
         )
-    record_limit("dm", params, {"ok": True}, account=account)
     return {"uid": talker, "text_len": len(text), "sent": True, "allowed_because": reason or "allow_new"}
 
 
@@ -840,12 +906,15 @@ def video_coin(bvid: str, account: str = "yui", coins: int = 1, with_like: bool 
     try:
         bili._http_post(_COIN_URL, payload, account=account)
     except bili.BiliError as exc:
+        release_limit("coin", coins, account)
         raise _guard_exc(exc) from exc
+    # v0.9.39 深审 M7：接口接受即扣额度，再回读。COIN_UNVERIFIED 时硬币
+    # 很可能已经扣掉，等回读成功才记账会让每日 5 币上限形同虚设。
+    record_limit("coin", params, {"before": before, "accepted": True}, units=coins, account=account)
     # 回读验证：投币数必须增加 coins
     after = int((bili._http_get(_GET_COINS_URL, {"bvid": bvid, "aid": aid}, account=account).get("data") or {}).get("count") or 0)
     if after != before + coins:
         raise bili.BiliError("投币接口返回成功但回读投币数未增加（请勿重复操作）", "COIN_UNVERIFIED")
-    record_limit("coin", params, {"before": before, "after": after}, units=coins, account=account)
     return {"bvid": bvid, "coins": coins, "total_coins": after, "with_like": with_like}
 
 
@@ -866,12 +935,14 @@ def video_fav(bvid: str, account: str = "yui", remove: bool = False, folder: str
     try:
         bili._http_post(_FAV_DEAL_URL, payload, account=account)
     except bili.BiliError as exc:
+        release_limit("favorite", 1, account)
         raise _guard_exc(exc) from exc
+    # v0.9.39 深审 M7：接口接受即记账，回读失败不回滚（FAV_UNVERIFIED 也可能已收藏）
+    record_limit("favorite", params, {"accepted": True}, account=account)
     # 回读验证
     fav = bool((bili._http_get(_HAS_FAV_URL, {"bvid": bvid, "aid": aid}, account=account).get("data") or {}).get("favoured"))
     if fav != (not remove):
         raise bili.BiliError("收藏接口返回成功但回读状态不一致（请勿重复操作）", "FAV_UNVERIFIED")
-    record_limit("favorite", params, {"favoured": fav}, account=account)
     return {"bvid": bvid, "favoured": fav, "folder": target["title"], "removed": remove}
 
 
@@ -893,7 +964,17 @@ def video_triple(bvid: str, account: str = "yui") -> dict[str, Any]:
     try:
         bili._http_post(_TRIPLE_URL, {"bvid": bvid, "csrf": bili._csrf(account)}, account=account)
     except bili.BiliError as exc:
+        if coin_room > 0:
+            release_limit("coin", coin_room, account)
+        release_limit("video_like", 1, account)
+        release_limit("favorite", 1, account)
         raise _guard_exc(exc) from exc
+    # v0.9.39 深审 M7：三连接口接受即按预占额度记账；TRIPLE_UNVERIFIED
+    # 也可能已经生效，回读失败不能把额度退回去。
+    if coin_room > 0:
+        record_limit("coin", {"bvid": bvid, "triple": True}, {"accepted": True}, units=coin_room, account=account)
+    record_limit("video_like", params, {"accepted": True}, account=account)
+    record_limit("favorite", params, {"accepted": True}, account=account)
     # 回读验证
     after = int((bili._http_get(_GET_COINS_URL, {"bvid": bvid, "aid": aid}, account=account).get("data") or {}).get("count") or 0)
     liked = bool((bili._http_get(_HAS_LIKED_URL, {"bvid": bvid, "aid": aid}, account=account).get("data") or {}).get("liked"))
@@ -901,10 +982,6 @@ def video_triple(bvid: str, account: str = "yui") -> dict[str, Any]:
     spent = max(after - before, 0)
     if not (liked and fav):
         raise bili.BiliError("三连接口返回成功但回读点赞/收藏未生效（请勿重复操作）", "TRIPLE_UNVERIFIED")
-    if coin_room > 0 and spent > 0:
-        record_limit("coin", {"bvid": bvid, "triple": True}, {"spent": spent}, units=spent, account=account)
-    record_limit("video_like", params, {"liked": True}, account=account)
-    record_limit("favorite", params, {"favoured": True}, account=account)
     return {"bvid": bvid, "liked": liked, "favorited": fav, "coins_spent": spent, "total_coins": after}
 
 

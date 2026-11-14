@@ -30,8 +30,6 @@ _ALLOWED = {
     "_yui_cookie_from_file",
     "write_main_cookie_file",
     "write_yui_cookie_file",
-    "check_limit",
-    "record_limit",
 }
 
 _THREAD_FUNCS = {"to_thread", "run_in_executor"}

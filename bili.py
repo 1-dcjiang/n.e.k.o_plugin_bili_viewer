@@ -14,6 +14,7 @@ import base64
 import difflib
 import gzip
 import hashlib
+import http.client
 import json
 import logging
 import os
@@ -484,6 +485,24 @@ def _open_with_retry(req, timeout: float, retries: int = 3, jitter: bool = False
 _RETRY_BASE = (0.8, 1.8, 3.6)
 
 
+def _read_response(resp, timeout: float) -> bytes:
+    """读完整响应体，并把读阶段的超时/截断异常转成语义化 BiliError。
+
+    v0.9.39：`urlopen` 成功只代表响应头到了，`resp.read()` 仍可能超时或
+    半包断开（尤其大接口/弱网）。旧实现让它穿透成裸 socket.timeout，
+    上层无法归类，也不会触发任何降级；这里统一兜住。
+    """
+    try:
+        return resp.read()
+    except (socket.timeout, TimeoutError) as exc:
+        raise BiliError(f"读取响应超时（>{timeout:g}s）", "TIMEOUT") from exc
+    except http.client.IncompleteRead as exc:
+        raise BiliError(f"响应被截断（已读 {len(exc.partial)} 字节）", "NETWORK") from exc
+    except (http.client.HTTPException, ConnectionError) as exc:
+        raise BiliError(f"读取响应失败：{exc}", "NETWORK") from exc
+
+
+
 def _http_get(url: str, params: dict | None = None, timeout: float = _TIMEOUT, account: str = "main") -> dict:
     """GET JSON 接口；返回解析后的 dict。"""
     if params:
@@ -501,7 +520,7 @@ def _http_get(url: str, params: dict | None = None, timeout: float = _TIMEOUT, a
     # _open_with_retry 已把 HTTP/网络异常统一转成 BiliError，这里不再重复捕获
     # （旧版 except urllib.error.HTTPError 是死代码：异常在 _open_with_retry 内就被转换了）。
     with _open_with_retry(req, timeout) as resp:
-        raw = resp.read()
+        raw = _read_response(resp, timeout)
     try:
         data = json.loads(raw)
     except ValueError as exc:
@@ -605,7 +624,10 @@ def _wbi_get(url: str, params: dict, timeout: float = _TIMEOUT, account: str = "
             signed = _wbi_sign(params, _get_mixin_key())
             return _http_get(url, signed, timeout=timeout, account=account)
         except BiliError as exc:
-            if attempt == 0 and exc.code in ("FORBIDDEN", "WBI_KEY"):
+            # v0.9.39 深审 M13：-352 在 _http_get 已归为 RISK_CONTROL，但直播/动态
+            # 接口的 -352 真实原因常常就是 wbi 密钥轮换；只认 FORBIDDEN/WBI_KEY
+            # 会让旧签名整小时继续发，越重试越像机器。
+            if attempt == 0 and exc.code in ("FORBIDDEN", "WBI_KEY", "RISK_CONTROL"):
                 _invalidate_mixin_cache()
                 continue
             raise
@@ -1529,8 +1551,11 @@ def _http_post(url: str, form: dict, timeout: float = _TIMEOUT, account: str = "
     if _cookie(account):
         req.add_header("Cookie", _cookie(account))
     try:
-        with _open_with_retry(req, timeout, jitter=True) as resp:
-            raw = resp.read()
+        # 写操作绝不重试（v0.9.39 深审 S2）：POST 已经可能被服务端受理，
+        # 重试 5xx/超时会重复写（弹幕、投币、私信都是不可逆副作用）。
+        # jitter 仅保留发送前的自然抖动，不参与重试。
+        with _open_with_retry(req, timeout, retries=0, jitter=True) as resp:
+            raw = _read_response(resp, timeout)
     except urllib.error.HTTPError as exc:
         raise BiliError(f"接口 HTTP {exc.code}", "HTTP_ERROR") from exc
     except urllib.error.URLError as exc:
@@ -1541,8 +1566,12 @@ def _http_post(url: str, form: dict, timeout: float = _TIMEOUT, account: str = "
         raise BiliError("接口返回非 JSON", "BAD_RESPONSE") from exc
     if data.get("code", 0) != 0:
         code = data.get("code", -1)
-        if code in (-352, -401, -412, -101):
-            raise BiliError("登录态失效或触发风控（请重新配置有效的 BILI_COOKIE）", "AUTH_FAILED")
+        if code == -101:
+            raise BiliError("登录态失效或未登录（请重新配置有效的 BILI_COOKIE）", "AUTH_FAILED")
+        if code in (-352, -401, -412, -509):
+            # v0.9.39 深审 M12：-352/-412 是风控/权限抖动，不是登录态失效；
+            # 混成 AUTH_FAILED 会误导 YUI 反复换 Cookie，却不去等待风控解除。
+            raise BiliError("触发风控限制或权限校验失败，请等待 1-2 分钟后再试", "RISK_CONTROL")
         raise BiliError(data.get("message") or data.get("msg") or "B站接口错误", f"BIZ_{code}")
     return data
 
@@ -2012,6 +2041,55 @@ def _danmaku_text_eq(actual, sent) -> bool:
     return abs(len(a) - len(s)) <= 4 and (a in s or s in a)
 
 
+def _danmaku_identity(m: dict) -> tuple[int, str | None, str]:
+    """一条直播间弹幕的稳定指纹：(uid, 文本, timeline)。
+
+    timeline 是 B站 ajax/msg 返回的发送时间串；同一 uid 连续发同样文本时，
+    旧实现只看 uid+文本 会把历史同文弹幕误当成本次发送成功（深审 M1）。
+    """
+    try:
+        uid = int(m.get("uid") or 0)
+    except (TypeError, ValueError):
+        uid = 0
+    return uid, m.get("text"), str(m.get("timeline") or m.get("ts") or "")
+
+
+def _danmaku_baseline(msgs: list, uid: int, text: str) -> dict:
+    """发送前记录同 uid+文本的已有弹幕，回读时只认新增条目。"""
+    timelines: list[str] = []
+    count = 0
+    for m in msgs or []:
+        muid, mtxt, timeline = _danmaku_identity(m)
+        if muid == uid and _danmaku_text_eq(mtxt, text):
+            count += 1
+            if timeline:
+                timelines.append(timeline)
+    return {"timelines": timelines, "count": count}
+
+
+def _danmaku_is_new(msgs: list, uid: int, text: str, baseline: dict | None) -> bool:
+    """回读是否出现"基线之外"的同 uid+文本弹幕。
+
+    有 timeline 时按时间串去重（最可靠）；接口没给 timeline 时退回出现次数
+    必须大于发送前基线（至少不会把"原来就有一条"直接算成功）。
+    """
+    base = baseline or {}
+    seen = set(base.get("timelines") or [])
+    base_count = int(base.get("count") or 0)
+    matched = 0
+    for m in msgs or []:
+        muid, mtxt, timeline = _danmaku_identity(m)
+        if muid != uid or not _danmaku_text_eq(mtxt, text):
+            continue
+        matched += 1
+        if timeline:
+            if timeline not in seen:
+                return True
+        elif matched > base_count:
+            return True
+    return False
+
+
 def _live_recent_danmaku(room_id: int, account: str = "yui") -> list:
     """回读直播间最近弹幕（v0.9.18）：ajax/msg 返回 data.admin + data.normal 列表。
 
@@ -2070,6 +2148,17 @@ def live_send_danmaku(room: str, text: str, account: str = "yui", verify: bool =
         "web_location": "1550101",
     }
     # 直播弹幕走 /msg/send（xlive/web-room/v1/dms/send 已废弃返回 404，v0.6.29）
+    verify_uid = 0
+    baseline: dict | None = None
+    if verify:
+        # v0.9.39 深审 M1：发送前先记录同 uid+文本的已有弹幕。
+        # 直播间里原本就有一条相同文本时，旧逻辑回读一命中就报成功，
+        # 实际新弹幕可能根本没发出去。
+        try:
+            verify_uid = _yui_uid(account)
+            baseline = _danmaku_baseline(_live_recent_danmaku(int(page_room), account), verify_uid, text)
+        except Exception:
+            baseline = None
     try:
         data = _http_post(_LIVE_API + "/msg/send", form, account=account)
     except BiliError as exc:
@@ -2085,17 +2174,14 @@ def live_send_danmaku(room: str, text: str, account: str = "yui", verify: bool =
     confirm_note = ""
     if verify:
         try:
-            my_uid = _yui_uid(account)
+            if not verify_uid:
+                verify_uid = _yui_uid(account)
             # 首轮 2 秒即可覆盖大多数正常回流；未命中再 4+4 秒，兼顾延迟弹幕。
             # 相比固定 4+4+4，常见路径少等 2 秒，总等待上限也从 12 秒降到 10 秒。
             for wait in (2, 4, 4):
                 time.sleep(wait)
                 msgs = _live_recent_danmaku(int(page_room), account)
-                if any(
-                    int(m.get("uid") or 0) == my_uid
-                    and _danmaku_text_eq(m.get("text"), text)
-                    for m in msgs
-                ):
+                if _danmaku_is_new(msgs, verify_uid, text, baseline):
                     confirmed = True
                     break
             if not confirmed:
@@ -2211,8 +2297,11 @@ def _http_post_json(
     if _cookie(account):
         req.add_header("Cookie", _cookie(account))
     try:
-        with _open_with_retry(req, timeout, jitter=True) as resp:
-            raw = resp.read()
+        # 写操作绝不重试（v0.9.39 深审 S2）：POST 已经可能被服务端受理，
+        # 重试 5xx/超时会重复写（弹幕、投币、私信都是不可逆副作用）。
+        # jitter 仅保留发送前的自然抖动，不参与重试。
+        with _open_with_retry(req, timeout, retries=0, jitter=True) as resp:
+            raw = _read_response(resp, timeout)
     except urllib.error.HTTPError as exc:
         raise BiliError(f"接口 HTTP {exc.code}", "HTTP_ERROR") from exc
     except urllib.error.URLError as exc:
@@ -2223,8 +2312,11 @@ def _http_post_json(
         raise BiliError("接口返回非 JSON", "BAD_RESPONSE") from exc
     if resp_data.get("code", 0) != 0:
         code = resp_data.get("code", -1)
-        if code in (-352, -401, -412, -101):
-            raise BiliError("登录态失效或触发风控（请重新配置 YUI 小号 Cookie）", "AUTH_FAILED")
+        if code == -101:
+            raise BiliError("登录态失效或未登录（请重新配置 YUI 小号 Cookie）", "AUTH_FAILED")
+        if code in (-352, -401, -412, -509):
+            # v0.9.39 深审 M12：风控码不当作登录失效
+            raise BiliError("触发风控限制或权限校验失败，请等待 1-2 分钟后再试", "RISK_CONTROL")
         raise BiliError(resp_data.get("message") or resp_data.get("msg") or "B站接口错误", f"BIZ_{code}")
     return resp_data
 
@@ -2261,7 +2353,7 @@ def add_reply(oid: int, type_id: int, text: str, account: str = "yui", verify: b
         # v0.9.25 对照 bilibili-api comment.send 定义：plat/statistics/gaia_source 是 B站 新版评论
         # 接口的必带字段，缺失时新号评论更易被风控/折叠（bili-cli comment.py 同款 payload）。
         "plat": 1,
-        "statistics": {"appId": 100, "platform": 5},
+        "statistics": json.dumps({"appId": 100, "platform": 5}, separators=(",", ":")),
         "gaia_source": "main_web",
     }
     try:
@@ -2572,8 +2664,11 @@ def _http_multipart(url: str, fields: dict, files: dict, account: str = "yui", t
     if _cookie(account):
         req.add_header("Cookie", _cookie(account))
     try:
-        with _open_with_retry(req, timeout, jitter=True) as resp:
-            raw = resp.read()
+        # 写操作绝不重试（v0.9.39 深审 S2）：POST 已经可能被服务端受理，
+        # 重试 5xx/超时会重复写（弹幕、投币、私信都是不可逆副作用）。
+        # jitter 仅保留发送前的自然抖动，不参与重试。
+        with _open_with_retry(req, timeout, retries=0, jitter=True) as resp:
+            raw = _read_response(resp, timeout)
     except urllib.error.HTTPError as exc:
         raise BiliError(f"接口 HTTP {exc.code}", "HTTP_ERROR") from exc
     except urllib.error.URLError as exc:
@@ -2584,8 +2679,11 @@ def _http_multipart(url: str, fields: dict, files: dict, account: str = "yui", t
         raise BiliError("接口返回非 JSON", "BAD_RESPONSE") from exc
     if resp_data.get("code", 0) != 0:
         code = resp_data.get("code", -1)
-        if code in (-352, -401, -412, -101):
-            raise BiliError("登录态失效或触发风控（请重新配置 YUI 小号 Cookie）", "AUTH_FAILED")
+        if code == -101:
+            raise BiliError("登录态失效或未登录（请重新配置 YUI 小号 Cookie）", "AUTH_FAILED")
+        if code in (-352, -401, -412, -509):
+            # v0.9.39 深审 M12：风控码不当作登录失效
+            raise BiliError("触发风控限制或权限校验失败，请等待 1-2 分钟后再试", "RISK_CONTROL")
         raise BiliError(resp_data.get("message") or resp_data.get("msg") or "B站接口错误", f"BIZ_{code}")
     return resp_data
 
@@ -2750,14 +2848,25 @@ def parse_bili_url(url: str, title: str = "") -> dict | None:
     url = (url or "").strip()
     if not url:
         return None
-    low = url.lower()
-    if "bilibili.com" not in low and "b23.tv" not in low:
+    try:
+        host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return None
+    # v0.9.39 深审 L6：旧实现用 `"bilibili.com" in url` 子串判断，
+    # https://evil.example/?next=bilibili.com 会被当成 B站 页面，进而把任意
+    # 标签页标题注入 YUI 上下文。现在只认真实主机名（含子域）与 b23.tv。
+    if not (
+        host in ("bilibili.com", "b23.tv")
+        or host.endswith(".bilibili.com")
+        or host.endswith(".b23.tv")
+    ):
         return None
     subject = (title or "").strip()
     m = _BILI_TITLE_SUFFIX_RE.match(subject)
     if m and m.group(1).strip():
         subject = m.group(1).strip()
     base = {"app": "browser-ext", "window": title, "is_browser": True, "site": "bilibili", "subject": subject}
+    low = url.lower()
     m = _URL_LIVE_RE.search(low)
     if m:
         return {**base, "kind": "live", "is_bili": True, "room_id": m.group(1)}

@@ -165,34 +165,24 @@ def test_http_get_retries_transient_network_error(monkeypatch):
     assert calls["n"] == 3  # 2 次失败重试 + 1 次成功
 
 
-def test_http_post_jitter_retries_and_passes_business_errors(monkeypatch):
+def test_http_post_no_retry_on_network_error(monkeypatch):
+    """v0.9.39 S2：写操作（POST）不做网络重试，失败一次即如实报 NETWORK。"""
     import plugin.plugins.bili_viewer.bili as bili
 
     calls = {"n": 0}
 
-    class _FakeResp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def read(self):
-            return b'{"code":0,"data":{}}'
-
     def fake_urlopen(req, timeout=12.0):
         calls["n"] += 1
-        if calls["n"] < 3:
-            raise urllib.error.URLError("boom")
-        return _FakeResp()
+        raise urllib.error.URLError("boom")
 
     import urllib.error
 
     monkeypatch.setattr(bili.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(bili, "_cookie", lambda account="main": "")
-    data = bili._http_post("https://api.bilibili.com/x/post", {"a": 1})
-    assert data["code"] == 0
-    assert calls["n"] == 3
+    with pytest.raises(bili.BiliError) as ei:
+        bili._http_post("https://api.bilibili.com/x/post", {"a": 1})
+    assert ei.value.code == "NETWORK"
+    assert calls["n"] == 1
 
     # 业务错误不重试
     calls["n"] = 0

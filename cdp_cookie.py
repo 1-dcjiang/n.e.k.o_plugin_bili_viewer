@@ -216,6 +216,7 @@ def _launch_debug_browser(name: str) -> int | None:
                 "about:blank",
             ],
             creationflags=_POPEN_DETACHED,
+            env={k: v for k, v in os.environ.items() if k not in ("BILI_COOKIE", "BILI_YUI_COOKIE")},
         )
     except Exception:
         return None

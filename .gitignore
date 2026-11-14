@@ -5,3 +5,15 @@ __pycache__/
 store.db
 .ruff_cache/
 yui_uploads/
+
+# v0.9.39 深审 M18：登录态/账号映射/审计与运行时状态绝不进仓库
+*_cookie.txt
+cookie*.txt
+accounts.json
+role*.json
+audit.log
+dm_seen.json
+ratelimit.json
+device_id.txt
+bili_viewer_audio.wav
+bili_viewer_screen.jpg

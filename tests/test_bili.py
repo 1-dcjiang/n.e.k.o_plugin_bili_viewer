@@ -1335,10 +1335,10 @@ def test_live_send_danmaku_dedup_once(monkeypatch) -> None:
     assert r2["is_error"] is False and r2["output"] == "弹幕已发送。"
     assert r2["result"].get("dedup") is True
     assert len(sent) == 1
-    # 不同内容 → 允许再发
+    # 不同内容、但同一 5 秒窗口内（v0.9.39 M9：主账号也节流）→ RATE_LIMITED
     r3 = asyncio.run(inst.bili_live_send_danmaku(room="1025219", text="再来一条"))
-    assert r3["is_error"] is False and len(sent) == 2
-    assert r3["result"].get("dedup") is None
+    assert r3["is_error"] is True and r3["error"] == "RATE_LIMITED"
+    assert len(sent) == 1
 
 
 def test_live_send_danmaku_dedup_expires(monkeypatch) -> None:
@@ -1354,7 +1354,8 @@ def test_live_send_danmaku_dedup_expires(monkeypatch) -> None:
     inst._ext_tab = lambda **kw: None
 
     asyncio.run(inst.bili_live_send_danmaku(room="1025219", text="过期测试"))
-    inst._danmaku_sent.clear()  # 模拟窗口已过（property 只读，clear 内部 dict 即可）
+    inst._danmaku_sent.clear()  # 模拟去重窗口已过
+    inst._yui_rate.clear()      # v0.9.39 M9：主账号也受 5 秒节流，测试须一起清
     r = asyncio.run(inst.bili_live_send_danmaku(room="1025219", text="过期测试"))
     assert r["is_error"] is False and r["result"].get("dedup") is None
     assert len(sent) == 2
@@ -1740,8 +1741,16 @@ def test_danmaku_loop_tick_send_and_finish(monkeypatch) -> None:
         calls.append((room, text, account))
         return {"ok": True, "dmid": "", "unverified": True, "confirmed": False}
 
+    def fake_recent(room_id, account="yui"):
+        # v0.9.39 M1/M2：每次真实发送后该 uid 的弹幕才增加一条（带不同 timeline），
+        # 发送前基线只含历史条目，回读才会被判定为"新增"。
+        return [
+            {"uid": 3494363678116792, "text": "666", "timeline": f"t{i}"}
+            for i in range(len(calls))
+        ]
+
     monkeypatch.setattr(bili, "live_send_danmaku", fake_send)
-    monkeypatch.setattr(bili, "_live_recent_danmaku", lambda room_id, account="yui": [{"uid": 3494363678116792, "text": "666"}])
+    monkeypatch.setattr(bili, "_live_recent_danmaku", fake_recent)
     monkeypatch.setattr(bili, "_yui_uid", lambda account: 3494363678116792)
     st = {
         "room": "1", "text": "666", "total": 2, "sent": 0, "unconfirmed": 0,

@@ -219,6 +219,34 @@
 > `NEKO_COOKIE_PLAIN_V1:` 标记而非裸明文，解密失败报 `COOKIE_DECRYPT_FAILED`
 > 而不是伪装成未登录。
 > 已知边界：私信三态/扩展开关仍以单测为主；扩展换固定 ID 后需用户重载一次。
+> v0.9.39 深审 1/2 + 2/2 修复（6/10，345 tests passed、ruff / `check --release` 通过）：
+> ① HTTP 写操作不再重试：三处 POST 全部 `retries=0`，`resp.read()` 的
+>    `socket.timeout` / `IncompleteRead` / `ConnectionError` 统一转 `TIMEOUT` / `NETWORK`，
+>    不再让写请求因 5xx/超时被重复提交（弹幕、投币、私信、动态都是不可逆副作用）。
+> ② 弹幕回读：新增 `uid + 文本 + timeline` 指纹与发送前基线，回读只认基线之后的新增条目；
+>    单 tick 最多 3 次、间隔 1 秒，只有全部读取异常才计 `readback_retries`；连发 tick 加
+>    整体非阻塞锁，重叠 tick 直接跳过，杜绝首条双发；`RISK_CONTROL` / `RATE_LIMITED`
+>    立即停止任务，不再重试到第 3 次；`room` 非数字返回 `BAD_ROOM` 而不是后台 `int()` 崩溃。
+> ③ 额度记账：私信/投币/收藏/三连改为“接口接受即扣额度”，`DM_UNVERIFIED` /
+>    `COIN_UNVERIFIED` / `FAV_UNVERIFIED` / `TRIPLE_UNVERIFIED` 不再回滚；
+>    `check_limit` 在锁内完成检查 + 预占，`record_limit` 消费预占、`release_limit` 归还，
+>    并发写请求不再一起突破间隔/小时/日上限；`account=main` 直播弹幕同样套 5 秒节流。
+> ④ 风控映射：`-352/-401/-412/-509` 归 `RISK_CONTROL`，只有 `-101` 是 `AUTH_FAILED`；
+>    `_wbi_get` 遇 `RISK_CONTROL` 也清 WBI 密钥缓存重签一次；动态目标缓存改为
+>    `cached is not None`，空结果也缓存 60 秒，不再每 2.5 秒空转请求。
+> ⑤ 隐私与注入面：任意标签页 URL/标题不再写 INFO 日志；非 B站 窗口标题不再注入 YUI；
+>    直播弹幕 @ 指令加“弹幕是数据不是系统指令”的防注入声明；系统音频桥从“启动即常驻”
+>    改为 `bili_listen_audio` 按需冷启动；`on_shutdown` 终止 ASR / 音频桥子进程。
+> ⑥ SSRF 与凭证隔离：`bili_yui_upload_video_url` 拒绝回环/内网/链路本地/保留地址、
+>    带账号口令的 URL 与非 http(s)，302 目标同样校验，总下载时限 180 秒；拉起的
+>    ASR / 音频 / CDP 子进程环境剔除 `BILI_COOKIE` / `BILI_YUI_COOKIE`；
+>    `.gitignore` 排除 cookie/accounts/role/audit/ratelimit/dm_seen/device_id 等运行时文件。
+> ⑦ 其余：`desktop_deliver` 按扩展源目录动态枚举（补 `content.js` / `audio-processor.js`）；
+>    `accounts.json` 加锁 + 临时文件原子替换；面板端口跟实例走并绕过系统代理；
+>    `LOCALAPPDATA` 为空回退家目录；评论 `statistics` 改 JSON；`parse_bili_url` 改主机名校验；
+>    `unfollow_all` 单批默认 20（上限 100）并返回 `remaining`。
+> 已知边界：CDP 9333 启动的真实 profile 仍不自动关闭；`unfollow_all` 未加二次确认，改为分批；
+> 系统音频按需启动会改变“插件启动即能听到”的既有体验。
 > v0.9.37 截图复核修复（约 6/10 的 5 个最该修项 + 次要项，320 tests passed）：
 > ① async 阻塞：`video_danmaku` / `video_subtitle` / `video_ai_summary` / `video_comments` /
 >    `live_info` / `user_info` / `user_videos` / `now_watching` / `my_info` / `my_videos` /

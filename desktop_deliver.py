@@ -21,7 +21,25 @@ import zipfile
 
 _DELIVERY_DIRNAME = "B站接入桥扩展"
 _VERSION_MARK = ".delivered_version"
-_REQUIRED_EXT_FILES = ("manifest.json", "background.js", "popup.html", "popup.js", "offscreen.html", "offscreen.js")
+# v0.9.39 深审 S3：不再硬编码 6 个文件。扩展源目录现有 8 个（还缺 content.js /
+# audio-processor.js），硬编码列表会让投放包和 zip 少文件，用户装上是残废扩展。
+# 现在以源目录为准动态枚举，manifest.json 必须存在。
+_REQUIRED_MANIFEST = "manifest.json"
+
+
+def _list_ext_files(src_ext: str) -> list[str]:
+    """列出扩展源目录里应投放的全部文件（忽略子目录），按名称排序保证幂等。"""
+    try:
+        names = [
+            n for n in os.listdir(src_ext)
+            if os.path.isfile(os.path.join(src_ext, n)) and not n.startswith(".")
+        ]
+    except OSError:
+        return []
+    if _REQUIRED_MANIFEST not in names:
+        return []
+    return sorted(names)
+
 
 # 三浏览器扩展包：ext_dir 为源码目录名，name 为浏览器名，
 # dst 为目标目录（用户文档下），page 为扩展管理页，exes 为可执行文件候选路径
@@ -271,18 +289,20 @@ def _plugin_version(plugin_dir: str) -> str:
     return "0.0.0"
 
 
-def _mark_ok(delivery_dir: str, version: str) -> bool:
+def _mark_ok(delivery_dir: str, version: str, src_root: str) -> bool:
     mark = os.path.join(delivery_dir, _VERSION_MARK)
     try:
         if open(mark, encoding="utf-8").read().strip() != version:
             return False
     except Exception:
         return False
-    return all(
-        os.path.isfile(os.path.join(delivery_dir, pkg["ext_dir"], f))
-        for pkg in _EXT_PACKAGES
-        for f in _REQUIRED_EXT_FILES
-    )
+    for pkg in _EXT_PACKAGES:
+        expected = _list_ext_files(os.path.join(src_root, pkg["ext_dir"]))
+        if not expected:
+            return False
+        if any(not os.path.isfile(os.path.join(delivery_dir, pkg["ext_dir"], f)) for f in expected):
+            return False
+    return True
 
 
 def _zip_delivered(zip_path: str, version: str) -> bool:
@@ -294,7 +314,7 @@ def _zip_delivered(zip_path: str, version: str) -> bool:
         return False
 
 
-def _write_delivery_zip(delivery: str, target_root: str, version: str) -> str | None:
+def _write_delivery_zip(delivery: str, target_root: str, version: str, src_root: str) -> str | None:
     """把投放目录整体压成单个 zip（含三扩展各自独立文件夹+名字），返回 zip 路径。
 
     同一版本已打过 zip 则跳过；打包在投放目录内容落盘之后进行。
@@ -307,7 +327,7 @@ def _write_delivery_zip(delivery: str, target_root: str, version: str) -> str | 
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.write(os.path.join(delivery, _VERSION_MARK), ".delivered_version")
             for pkg in _EXT_PACKAGES:
-                for f in _REQUIRED_EXT_FILES:
+                for f in _list_ext_files(os.path.join(src_root, pkg["ext_dir"])):
                     zf.write(
                         os.path.join(delivery, pkg["ext_dir"], f),
                         f"{pkg['ext_dir']}/{f}",
@@ -342,8 +362,8 @@ def ensure_desktop_package(plugin_dir: str, version: str | None = None, desktop:
         ver = version or _plugin_version(plugin_dir)
         target_root = desktop or _desktop_dir()
         delivery = os.path.join(target_root, _DELIVERY_DIRNAME)
-        if _mark_ok(delivery, ver):
-            _write_delivery_zip(delivery, target_root, ver)
+        if _mark_ok(delivery, ver, src_root):
+            _write_delivery_zip(delivery, target_root, ver, src_root)
             return delivery
 
         os.makedirs(delivery, exist_ok=True)
@@ -351,8 +371,12 @@ def ensure_desktop_package(plugin_dir: str, version: str | None = None, desktop:
             # 1) 扩展本体（覆盖更新）
             src_ext = os.path.join(src_root, pkg["ext_dir"])
             dst_ext = os.path.join(delivery, pkg["ext_dir"])
+            files = _list_ext_files(src_ext)
+            if not files:
+                # 源目录不完整时不要投放半成品；让下次版本更新重新触发
+                return None
             os.makedirs(dst_ext, exist_ok=True)
-            for f in _REQUIRED_EXT_FILES:
+            for f in files:
                 shutil.copy2(os.path.join(src_ext, f), os.path.join(dst_ext, f))
             # 2) 一键安装 bat（CRLF + GBK）
             bat_path = os.path.join(delivery, f"一键安装B站接入桥({pkg['name']}).bat")
@@ -366,7 +390,7 @@ def ensure_desktop_package(plugin_dir: str, version: str | None = None, desktop:
         with open(os.path.join(delivery, _VERSION_MARK), "w", encoding="utf-8") as fh:
             fh.write(ver)
         # 5) 三扩展压缩包（下载/分享用，独立文件夹+名字，版本更新自动重打）
-        _write_delivery_zip(delivery, target_root, ver)
+        _write_delivery_zip(delivery, target_root, ver, src_root)
         return delivery
     except Exception:
         return None

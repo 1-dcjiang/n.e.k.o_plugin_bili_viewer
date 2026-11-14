@@ -272,10 +272,10 @@ def test_default_account_uses_yui_when_configured(monkeypatch) -> None:
     assert captured == ["yui"]  # 配置了小号 → 默认小号
 
 
-# ══════════ 节流：同目标 60s 内限 1 条弹幕（小号维度） ══════════
+# ══════════ 节流：同目标 5 秒内限 1 条弹幕（大小号统一） ══════════
 
 
-def test_yui_danmaku_rate_limit(monkeypatch) -> None:
+def test_danmaku_rate_limit_applies_to_all_accounts(monkeypatch) -> None:
     from plugin.plugins.bili_viewer import bili
 
     monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
@@ -290,9 +290,9 @@ def test_yui_danmaku_rate_limit(monkeypatch) -> None:
     r2 = asyncio.run(inst.bili_live_send_danmaku(room="12345", text="第二条", account="yui"))
     assert r2.get("is_error") is True
     assert r2.get("error") == "RATE_LIMITED"
-    # 主账号不受小号节流影响
+    # v0.9.39 M9：主账号也在同一房间 5 秒窗口内，同样被本地节流挡住
     r3 = asyncio.run(inst.bili_live_send_danmaku(room="12345", text="主号", account="main"))
-    assert r3.get("is_error") is False
+    assert r3.get("is_error") is True and r3.get("error") == "RATE_LIMITED"
 
 
 def test_yui_comment_rate_limit(monkeypatch) -> None:
@@ -584,7 +584,16 @@ def test_upload_video_url_delegates_to_upload(monkeypatch) -> None:
         def __exit__(self, *a):
             return False
 
-    monkeypatch.setattr(_ur, "urlopen", lambda req, timeout=30: _FakeResp())
+        def geturl(self):
+            return "https://cdn.example.com/video.mp4"
+
+    class _FakeOpener:
+        def open(self, req, timeout=30):
+            return _FakeResp()
+
+    monkeypatch.setattr(_ur, "build_opener", lambda *a, **k: _FakeOpener())
+    import plugin.plugins.bili_viewer as bv
+    monkeypatch.setattr(bv, "_is_public_http_url", lambda u: True)
     monkeypatch.setattr(bili_social, "check_limit", lambda *a, **k: None)
     monkeypatch.setattr(bili_social, "record_limit", lambda *a, **k: None)
     from plugin.plugins.bili_viewer import bili as _bili
@@ -625,7 +634,12 @@ def test_upload_video_url_download_failure_cleans_up(monkeypatch) -> None:
     def boom(req, timeout=30):
         raise OSError("connection refused")
 
-    monkeypatch.setattr(_ur, "urlopen", boom)
+    class _FakeOpener:
+        open = staticmethod(boom)
+
+    monkeypatch.setattr(_ur, "build_opener", lambda *a, **k: _FakeOpener())
+    import plugin.plugins.bili_viewer as bv
+    monkeypatch.setattr(bv, "_is_public_http_url", lambda u: True)
     upload_dir = os.path.join(os.path.dirname(os.path.abspath(bili.__file__)), "yui_uploads")
     before = set(os.listdir(upload_dir)) if os.path.isdir(upload_dir) else set()
     inst = _make_inst(monkeypatch)
@@ -677,7 +691,16 @@ def test_upload_video_url_bad_content_rejected(monkeypatch) -> None:
         def __exit__(self, *a):
             return False
 
-    monkeypatch.setattr(_ur, "urlopen", lambda req, timeout=30: _FakeResp())
+        def geturl(self):
+            return "https://cdn.example.com/video.mp4"
+
+    class _FakeOpener:
+        def open(self, req, timeout=30):
+            return _FakeResp()
+
+    monkeypatch.setattr(_ur, "build_opener", lambda *a, **k: _FakeOpener())
+    import plugin.plugins.bili_viewer as bv
+    monkeypatch.setattr(bv, "_is_public_http_url", lambda u: True)
     upload_dir = os.path.join(os.path.dirname(os.path.abspath(bili.__file__)), "yui_uploads")
     before = set(os.listdir(upload_dir)) if os.path.isdir(upload_dir) else set()
     inst = _make_inst(monkeypatch)
