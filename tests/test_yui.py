@@ -75,6 +75,32 @@ def _pkg() -> "object":
     return _pkg_mod
 
 
+def test_assign_cookie_rejects_cookie_that_fails_nav(monkeypatch, tmp_path) -> None:
+    """v0.9.40：伪造 SESSDATA+DedeUserID 不能覆盖已绑定小号（nav 验真失败即拒绝）。"""
+    from plugin.plugins.bili_viewer import bili
+
+    pkg = _pkg()
+    monkeypatch.delenv("BILI_COOKIE", raising=False)
+    monkeypatch.delenv("BILI_YUI_COOKIE", raising=False)
+    monkeypatch.setattr(bili, "_YUI_COOKIE_DIR", str(tmp_path))
+    monkeypatch.setattr(pkg, "_accounts_path", lambda: str(tmp_path / "accounts.json"))
+    inst = _make_inst(monkeypatch)
+
+    inst._assign_cookie("SESSDATA=main; DedeUserID=111; bili_jct=m", 0, "extension")
+    inst._assign_cookie("SESSDATA=real; DedeUserID=222; bili_jct=ok", 0, "extension")
+    assert bili._cookie("yui") == "SESSDATA=real; DedeUserID=222; bili_jct=ok"
+
+    def reject(_cookie, timeout=6.0):
+        raise bili.BiliError("nav 未返回该 uid", "BAD_COOKIE")
+
+    monkeypatch.setattr(bili, "validate_cookie", reject)
+    r = inst._assign_cookie("SESSDATA=evil; DedeUserID=222; bili_jct=evil", 0, "extension")
+    assert r["bound"] is False
+    assert "nav 验真" in r["detail"]
+    assert bili._cookie("yui") == "SESSDATA=real; DedeUserID=222; bili_jct=ok"
+    assert bili._cookie("main") == "SESSDATA=main; DedeUserID=111; bili_jct=m"
+
+
 def test_assign_cookie_first_is_main_second_is_yui(monkeypatch, tmp_path) -> None:
     """v0.7.10：按登录顺序归位——第一个登录的账号=大号，第二个=小号（默认操作账号）。"""
     from plugin.plugins.bili_viewer import bili

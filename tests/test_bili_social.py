@@ -70,6 +70,57 @@ def test_record_limit_writes_audit(social_dir):
     assert lines[0]["params"] == {"uid": 42}
 
 
+def test_limit_pending_consumed_by_units_not_whole_queue(social_dir):
+    """v0.9.40：并发预占只按 units 消费，不再整体 pop 串账。"""
+    bili_social = _social()
+    stamp1, stamp2 = 1000.0, 1001.0
+    key = "yui:dm"
+    bili_social._RL_PENDING[("yui", "dm")] = [stamp1, stamp2]
+    bili_social._save_ratelimit({key: [stamp1, stamp2]})
+
+    # 请求 A 成功：只吃掉自己的 stamp1，请求 B 的 stamp2 必须留在队列里。
+    # 状态里两条都是 check_limit 写入的预占，A 成功不删 B 的预占；B 失败才由 release 删除。
+    bili_social.record_limit("dm", {"uid": 1}, {"ok": True}, account="yui")
+    assert bili_social._RL_PENDING[("yui", "dm")] == [stamp2]
+    state = bili_social._load_ratelimit()
+    assert state[key] == [stamp1, stamp2]
+
+    # 请求 B 释放：消费剩下的 stamp2，状态只剩 A 的成功记录
+    bili_social.release_limit("dm", 1, "yui")
+    assert ("yui", "dm") not in bili_social._RL_PENDING
+    assert bili_social._load_ratelimit().get(key, []) == [stamp1]
+
+
+def test_video_like_timeout_keeps_reservation(social_dir, monkeypatch):
+    """v0.9.40：点赞超时可能已生效，不能退额度诱导重试。"""
+    bili_social = _social()
+    bili = _bili()
+    monkeypatch.setattr(bili, "_require_login", lambda account: None)
+    monkeypatch.setattr(bili_social, "_bvid_aid", lambda bvid, account: (bvid, 1))
+    monkeypatch.setattr(bili, "_http_post", lambda *a, **k: (_ for _ in ()).throw(bili.BiliError("t", "TIMEOUT")))
+
+    with pytest.raises(bili.BiliError) as ei:
+        bili_social.video_like("BV1x", account="yui")
+    assert ei.value.code == "LIKE_MAYBE_SENT"
+    assert bili_social._RL_PENDING.get(("yui", "video_like"))
+
+
+def test_video_coin_timeout_keeps_real_money_reservation(social_dir, monkeypatch):
+    """v0.9.40：投币超时可能已扣币，必须保留 coins 个预占。"""
+    bili_social = _social()
+    bili = _bili()
+    monkeypatch.setattr(bili, "_require_login", lambda account: None)
+    monkeypatch.setattr(bili_social, "_bvid_aid", lambda bvid, account: (bvid, 1))
+    monkeypatch.setattr(bili, "_http_get", lambda *a, **k: {"code": 0, "data": {"count": 0}})
+    monkeypatch.setattr(bili, "_csrf", lambda account: "csrf")
+    monkeypatch.setattr(bili, "_http_post", lambda *a, **k: (_ for _ in ()).throw(bili.BiliError("t", "TIMEOUT")))
+
+    with pytest.raises(bili.BiliError) as ei:
+        bili_social.video_coin("BV1x", account="yui", coins=2)
+    assert ei.value.code == "COIN_MAYBE_SENT"
+    assert len(bili_social._RL_PENDING.get(("yui", "coin"), [])) == 2
+
+
 def test_device_id_stable(social_dir):
     bili_social = _social()
     a = bili_social._device_id()

@@ -85,6 +85,37 @@ def test_danmaku_is_new_ignores_pre_existing_same_text():
     assert bili._danmaku_is_new(history, uid, "666", baseline) is False
     after = history + [{"uid": uid, "text": "666", "timeline": "new"}]
     assert bili._danmaku_is_new(after, uid, "666", baseline) is True
+    # v0.9.40：基线读取失败（None）时不能把历史同文当成本次成功
+    assert bili._danmaku_is_new(after, uid, "666", None) is False
+
+
+def test_write_outcome_ambiguous_codes():
+    from plugin.plugins.bili_viewer import bili
+
+    assert bili.write_outcome_ambiguous(bili.BiliError("t", "TIMEOUT")) is True
+    assert bili.write_outcome_ambiguous(bili.BiliError("t", "SEND_FAILED:TIMEOUT")) is True
+    assert bili.write_outcome_ambiguous(bili.BiliError("n", "NETWORK")) is True
+    assert bili.write_outcome_ambiguous(bili.BiliError("r", "RISK_CONTROL")) is False
+    assert bili.write_outcome_ambiguous(bili.BiliError("b", "SEND_FAILED:BIZ_ERROR")) is False
+
+
+@pytest.mark.real_cookie_validation
+def test_validate_cookie_requires_nav_uid_match(monkeypatch):
+    from plugin.plugins.bili_viewer import bili
+
+    def nav(mid):
+        return lambda *_a, **_k: {"code": 0, "data": {"mid": mid}}
+
+    monkeypatch.setattr(bili, "_http_get", nav(222))
+    assert bili.validate_cookie("SESSDATA=x; DedeUserID=222; bili_jct=y") == 222
+    with pytest.raises(bili.BiliError) as ei:
+        bili.validate_cookie("SESSDATA=x; DedeUserID=111; bili_jct=y")
+    assert ei.value.code == "BAD_COOKIE"
+    # nav 返回 0（未登录）也必须拒绝，不能只看 DedeUserID
+    monkeypatch.setattr(bili, "_http_get", nav(0))
+    with pytest.raises(bili.BiliError) as ei3:
+        bili.validate_cookie("SESSDATA=x; DedeUserID=222; bili_jct=y")
+    assert ei3.value.code == "BAD_COOKIE"
 
 
 @pytest.mark.parametrize(

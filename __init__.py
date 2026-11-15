@@ -38,6 +38,10 @@ from plugin.sdk.plugin import NekoPluginBase, lifecycle, llm_tool, neko_plugin, 
 
 from . import bili, bili_social, cdp_cookie, cookie_auto, desktop_deliver, web_ui
 
+# 纯判定函数不碰 IO/网络；提到模块级别名供 async 工具直接调用，
+# 避免 AST 检查把同步的 bili.* 调用误判成 async 阻塞。
+_write_outcome_ambiguous = bili.write_outcome_ambiguous
+
 _logger = logging.getLogger("N.E.K.O.Plugin_bili_viewer.plugin.bili_viewer")
 
 # 扩展截屏落盘位置（仅本地保存，供 YUI 读取画面实况）
@@ -815,9 +819,17 @@ class BiliViewerPlugin(NekoPluginBase):
             return
         # 1) 回读上一条（v0.9.18）：确认才计入 sent
         pending = st.get("pending")
-        if isinstance(pending, dict) and pending.get("verify_due", 0) <= now:
-            # v0.9.39 深审 M2：单次回读窗口只有 3 秒，弹幕回流稍慢就误判"未出现"并停任务。
-            # 同一 tick 内做最多 3 次短间隔读取（1s/1s），命中即停。
+        if isinstance(pending, dict):
+            verify_due = float(pending.get("verify_due") or 0)
+            if verify_due > now:
+                # v0.9.40：回读未到期前绝不下一条；旧实现只靠 next_due 兜底，
+                # 回读重试时 next_due 可能已过期，会把"待确认"直接当"已确认"继续发。
+                self._loop_merge_save(st)
+                return
+            # v0.9.40 深审 M2：不再在 tick 锁内 sleep。每个 tick 只读一次，
+            # 用 verify_deadline 把总窗口拉到约 15 秒；忙房间回流慢时由后续 tick
+            # 继续轮询，既不误停任务，也不阻塞 watcher 线程里的其他感知逻辑。
+            deadline = float(pending.get("verify_deadline", verify_due + 12.0))
             my_uid = 0
             hit = False
             saw_read = False
@@ -828,20 +840,24 @@ class BiliViewerPlugin(NekoPluginBase):
             except Exception as exc:
                 last_exc = exc
             if my_uid:
-                for attempt in range(3):
-                    try:
-                        msgs = bili._live_recent_danmaku(int(room), account)
-                        saw_read = True
-                        last_exc = None
-                        # v0.9.39 深审 M1：只认基线之外的新弹幕，历史同文不算成功
-                        if bili._danmaku_is_new(msgs, my_uid, pending.get("text"), baseline):
-                            hit = True
-                            break
-                    except Exception as exc:
-                        last_exc = exc
-                    if attempt < 2:
-                        time.sleep(1.0)
-            if not saw_read:
+                try:
+                    msgs = bili._live_recent_danmaku(int(room), account)
+                    saw_read = True
+                    last_exc = None
+                    # v0.9.39 深审 M1：只认基线之外的新弹幕，历史同文不算成功
+                    # v0.9.40：baseline=None（发送前基线读取失败）时返回 False，
+                    # 不会再拿历史同文冒充"本次已发出"。
+                    if bili._danmaku_is_new(msgs, my_uid, pending.get("text"), baseline):
+                        hit = True
+                except Exception as exc:
+                    last_exc = exc
+            if hit:
+                st["pending"] = None
+                st["readback_retries"] = 0
+                st["sent"] = int(st.get("sent") or 0) + 1
+                st["fail_streak"] = 0
+                st["last_error"] = ""
+            elif not saw_read:
                 # v0.9.35：回读失败 ≠ 弹幕没出现。网络/接口异常时既不能计入成功，
                 # 也不能误报 DANMAKU_UNCONFIRMED；保留 pending 重试，连续失败才停止。
                 retries = int(st.get("readback_retries") or 0) + 1
@@ -852,31 +868,38 @@ class BiliViewerPlugin(NekoPluginBase):
                     st["last_error"] = f"DANMAKU_READBACK_FAILED: {type(last_exc).__name__ if last_exc else 'UNKNOWN'}"
                     st["updated_at"] = time.strftime("%H:%M:%S")
                     self._loop_merge_save(st)
-                    _logger.exception("danmaku loop stopped: readback failed 3x room=%s", room)
+                    _logger.warning(
+                        "danmaku loop stopped: readback failed 3x room=%s exc=%s",
+                        room, type(last_exc).__name__ if last_exc else "UNKNOWN",
+                        exc_info=last_exc,
+                    )
                     return
+                pending["verify_due"] = time.time() + 3.0
                 st["last_error"] = (
                     f"DANMAKU_READBACK_RETRY: 回读异常（{type(last_exc).__name__ if last_exc else 'UNKNOWN'}），"
                     "未判定成功/失败，稍后重试"
                 )
-                st["next_due"] = time.time() + 3.0
                 st["updated_at"] = time.strftime("%H:%M:%S")
                 self._loop_merge_save(st)
                 _logger.warning("danmaku loop readback failed room=%s retry=%s", room, retries)
                 return
-            st["pending"] = None
-            st["readback_retries"] = 0
-            if hit:
-                st["sent"] = int(st.get("sent") or 0) + 1
-                st["fail_streak"] = 0
-                st["last_error"] = ""
-            else:
-                # 接口接受但直播间未出现：继续发大概率也被吞——停止连发，如实上报
+            elif now >= deadline:
+                # 回读正常但整个窗口都没看到本条：接口接受≠直播间可见，停止并如实上报
+                st["pending"] = None
                 st["active"] = False
                 st["stopped_reason"] = "弹幕未在直播间出现（接口已接受但回读无此条，疑似被 B站 拦截），已停止"
                 st["last_error"] = "DANMAKU_UNCONFIRMED: 接口已接受但直播间未出现"
                 st["updated_at"] = time.strftime("%H:%M:%S")
                 self._loop_merge_save(st)
                 _logger.warning("danmaku loop stopped: unconfirmed room=%s text=%r", room, text[:20])
+                return
+            else:
+                # 还有时间：保留 pending，下一次 tick 继续读；不 sleep、不提前判失败
+                st["readback_retries"] = 0
+                pending["verify_due"] = time.time() + 2.0
+                st["last_error"] = "DANMAKU_READBACK_WAIT: 回读窗口内暂未出现，继续等待下一轮"
+                st["updated_at"] = time.strftime("%H:%M:%S")
+                self._loop_merge_save(st)
                 return
             if int(st.get("sent") or 0) >= int(st.get("total") or 0):
                 st["active"] = False
@@ -889,16 +912,19 @@ class BiliViewerPlugin(NekoPluginBase):
             return
         # 2) 发送下一条（verify=False，立即返回，回读交给下一轮）
         try:
-            # 发送前记录基线：直播间里原本就有同 uid+同文本时，回读命中旧条不能算本次成功
-            baseline: dict = {"timelines": [], "count": 0}
+            # 发送前记录基线：直播间里原本就有同 uid+同文本时，回读命中旧条不能算本次成功。
+            # v0.9.40：基线读取失败时必须是 None（无法确认），不能退化成"已知空基线"——
+            # 空基线会让历史同文弹幕被 _danmaku_is_new 判成"本次新弹幕"，直接假成功。
+            baseline: dict | None = None
             try:
                 base_uid = bili._yui_uid(account)
                 baseline = bili._danmaku_baseline(bili._live_recent_danmaku(int(room), account), base_uid, text)
             except Exception:
-                baseline = {"timelines": [], "count": 0}
+                baseline = None
             bili.live_send_danmaku(room, text, account=account, verify=False)
             st["pending"] = {
                 "room": room, "text": text, "verify_due": time.time() + 3.0,
+                "verify_deadline": time.time() + 15.0,
                 "baseline": baseline,
             }
             st["readback_retries"] = 0
@@ -907,6 +933,21 @@ class BiliViewerPlugin(NekoPluginBase):
             st["last_error"] = ""
         except bili.BiliError as exc:
             code = str(exc.code or "")
+            if _write_outcome_ambiguous(exc):
+                # v0.9.40：发送 POST 超时/网络中断可能已被受理。不要 fail_streak 重试
+                # （重试=重复弹幕），改为建立 pending，让回读窗口去确认；确认不到就停止。
+                st["pending"] = {
+                    "room": room, "text": text, "verify_due": time.time() + 3.0,
+                    "verify_deadline": time.time() + 15.0,
+                    "baseline": baseline,
+                }
+                st["readback_retries"] = 0
+                st["fail_streak"] = 0
+                st["last_error"] = f"DANMAKU_MAYBE_SENT: {bili.redact_text(exc.message, 80)}"
+                st["updated_at"] = time.strftime("%H:%M:%S")
+                self._loop_merge_save(st)
+                _logger.warning("danmaku loop send MAYBE_SENT room=%s code=%s", room, code)
+                return
             st["last_error"] = f"{code}: {bili.redact_text(exc.message, 80)}"
             # v0.9.39 深审 M5：风控/限流不是"网络抖动"，重试到第 3 次只会加重风控。
             # 立即停止任务，并如实告诉用户是风控导致的失败。
@@ -2467,6 +2508,18 @@ class BiliViewerPlugin(NekoPluginBase):
         try:
             result = await asyncio.to_thread(bili.live_send_danmaku, room, text, account=account)
         except bili.BiliError as exc:
+            if _write_outcome_ambiguous(exc):
+                # v0.9.40：POST 不重试后，超时/网络中断仍可能已受理。此时退节流窗口
+                # 会诱导 LLM 立刻重发同一条弹幕；保留窗口并标记"可能已发"。
+                self._mark_danmaku_sent("live", room, text, 0)
+                self._record_send_result("live", False, "DANMAKU_MAYBE_SENT", exc.message, room)
+                _logger.warning("live danmaku MAYBE_SENT room=%s text=%r code=%s", room, text[:20], exc.code)
+                return {
+                    "output": "弹幕请求超时/网络中断，可能已发出但未确认；已保留发送窗口，严禁立刻重发。",
+                    "is_error": True,
+                    "error": "DANMAKU_MAYBE_SENT",
+                    "result": {"room": room, "text": text, "ambiguous": True},
+                }
             self._yui_rate_rollback("danmaku", f"live:{room}")
             self._record_send_result("live", False, exc.code, exc.message, room)
             return self._wrap_auth(exc, "发送弹幕")
@@ -2721,6 +2774,17 @@ class BiliViewerPlugin(NekoPluginBase):
                 bili.send_video_danmaku, bvid, text, progress_ms=progress * 1000, account=account
             )
         except bili.BiliError as exc:
+            if _write_outcome_ambiguous(exc):
+                # v0.9.40：超时/网络中断可能已受理，保留 60 秒窗口并记入去重
+                self._mark_danmaku_sent("video", bvid, text, progress)
+                self._record_send_result("video", False, "DANMAKU_MAYBE_SENT", exc.message, bvid)
+                _logger.warning("video danmaku MAYBE_SENT bvid=%s progress=%s code=%s", bvid, progress, exc.code)
+                return {
+                    "output": "弹幕请求超时/网络中断，可能已发出但未确认；已保留发送窗口，严禁立刻重发。",
+                    "is_error": True,
+                    "error": "DANMAKU_MAYBE_SENT",
+                    "result": {"bvid": bvid, "progress": progress, "ambiguous": True},
+                }
             if account == "yui":
                 self._yui_rate_rollback("danmaku", f"video:{bvid}")
             self._record_send_result("video", False, exc.code, exc.message, bvid)
@@ -2829,6 +2893,18 @@ class BiliViewerPlugin(NekoPluginBase):
             res = await asyncio.to_thread(bili.add_reply, oid, type_id, text, account=account)
         except bili.BiliError as exc:
             kind_name = "video" if type_id == 1 else ("live" if type_id == 11 else f"type{type_id}")
+            if _write_outcome_ambiguous(exc):
+                # v0.9.40：评论 POST 超时/网络中断可能已受理，保留 120 秒占用，禁止立刻重试
+                _logger.warning(
+                    "comment MAYBE_SENT kind=%s target=%s:%s account=%s code=%s",
+                    kind_name, type_id, oid, account, exc.code,
+                )
+                return {
+                    "output": "评论请求超时/网络中断，可能已发出但未确认；已保留限流窗口，严禁立刻重发。",
+                    "is_error": True,
+                    "error": "COMMENT_MAYBE_SENT",
+                    "meta": {"agent": {"delivery": "silent"}},
+                }
             if exc.code == "REPLY_UNVERIFIED":
                 # v0.9.38：接口已接受但回读未确认，保留限流占用，禁止诱导重试造成重复评论
                 _logger.info(
@@ -3014,9 +3090,10 @@ class BiliViewerPlugin(NekoPluginBase):
             result = await asyncio.to_thread(bili.post_dynamic, text, account="yui")
             await asyncio.to_thread(bili_social.record_limit, "dynamic", {"text_len": len(text)}, result, account="yui")
         except bili.BiliError as exc:
-            if exc.code not in ("DYN_UNVERIFIED", "DYN_INVISIBLE"):
+            if exc.code not in ("DYN_UNVERIFIED", "DYN_INVISIBLE") and not _write_outcome_ambiguous(exc):
                 # v0.9.39 深审 M6：只有明确失败才退日额度；DYN_UNVERIFIED/INVISIBLE
-                # 是"可能已发出"，退额度会诱导重发，重复动态比少发一条更糟。
+                # 是"可能已发出"，超时/网络中断也可能已受理，退额度会诱导重发，
+                # 重复动态比少发一条更糟。
                 self._yui_daily_release("dynamic")
                 await asyncio.to_thread(bili_social.release_limit, "dynamic", 1, "yui")
             _logger.warning("yui dynamic post failed: code=%s msg=%s text_len=%d", exc.code, exc.message, len(text))
@@ -4569,6 +4646,35 @@ class BiliViewerPlugin(NekoPluginBase):
         if uid is None:
             # v0.9.38：uid 解析失败时绝不猜测角色，避免把新 Cookie 当小号覆盖原绑定。
             return {"ok": True, "bound": False, "detail": "收到 Cookie，但 uid 解析失败，未写入/未覆盖任何账号；请刷新 B站 登录态后重试"}
+        # v0.9.40：落盘前用 nav 验真，服务端 uid 必须与 Cookie 里声明的 DedeUserID 一致。
+        # 旧逻辑只查 SESSDATA= 并解析 DedeUserID，本机进程伪造一份带 YUI uid 的假 Cookie
+        # 就能覆盖小号登录态。验真结果按 Cookie 缓存 10 分钟，避免扩展每次心跳都打 nav。
+        cache = getattr(self, "_cookie_verify_cache", None)
+        if cache is None:
+            cache = {}
+            self._cookie_verify_cache = cache
+        now = time.time()
+        verified = cache.get(cookie)
+        if not verified or now - verified[1] >= 600.0:
+            try:
+                verified = (int(bili.validate_cookie(cookie)), now)
+            except bili.BiliError as exc:
+                return {
+                    "ok": True,
+                    "bound": False,
+                    "detail": f"Cookie 未通过 B站 nav 验真（{exc.code}），未写入/未覆盖任何账号；请刷新 B站 登录态后重试",
+                }
+            cache[cookie] = verified
+            if len(cache) > 32:
+                # 只保留最近 32 份验真结果，防止长时间运行内存无界增长
+                for old in sorted(cache, key=lambda k: cache[k][1])[:-32]:
+                    cache.pop(old, None)
+        if int(verified[0]) != int(uid):
+            return {
+                "ok": True,
+                "bound": False,
+                "detail": "Cookie 未通过 B站 nav 验真（服务端 uid 与 DedeUserID 不一致），未写入/未覆盖任何账号",
+            }
         accounts = _read_accounts()
         main_uid = accounts.get("main", {}).get("uid")
         yui_uid = accounts.get("yui", {}).get("uid")
@@ -5204,15 +5310,16 @@ class BiliViewerPlugin(NekoPluginBase):
     )
     async def bili_bind_web(self, **_):
         url, started = self._ensure_panel()
+        page_url = self._bind_panel.page_url() if self._bind_panel is not None else url
         # 顺带触发一次后台静默接入（仅复用已开启的调试端口，不启动浏览器）
         self._bg_bind()
         return {
             "output": (
-                f"已打开 B站接入面板：{url}。请在浏览器打开该地址，点'一键接入'完成绑定；"
+                f"已打开 B站接入面板：{page_url}。请在浏览器打开该地址，点'一键接入'完成绑定；"
                 "若浏览器已开启接入端口则已自动绑定，刷新面板可见状态。"
             ),
             "is_error": False,
-            "panel_url": url,
+            "panel_url": page_url,
             "started_now": started,
         }
 

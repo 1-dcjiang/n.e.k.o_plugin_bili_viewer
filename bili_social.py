@@ -155,26 +155,48 @@ def check_limit(action: str, units: int = 1, account: str = "yui") -> float | No
         return stamp
 
 
+def _consume_pending(account: str, action: str, units: int) -> list[float]:
+    """从预占队列消费最多 units 个时间戳，返回实际消费的戳（v0.9.40）。
+
+    旧实现 record_limit/release_limit 都会把整个 (account, action) 队列 pop 掉。
+    当两个请求先后 check_limit、再交错完成时，先完成的一方会吃掉后一方尚未结算
+    的预占，后一方只能再追加一个时间戳，计数多记；反过来 release 会漏释放。
+    这里只消费本次需要的 units 个，剩下的预占留给另一个请求。
+    """
+    key = (account, action)
+    pending = _RL_PENDING.get(key) or []
+    take = min(max(int(units), 0), len(pending))
+    if take <= 0:
+        return []
+    consumed = pending[:take]
+    rest = pending[take:]
+    if rest:
+        _RL_PENDING[key] = rest
+    else:
+        _RL_PENDING.pop(key, None)
+    return consumed
+
+
 def release_limit(action: str, units: int = 1, account: str = "yui") -> None:
     """释放 check_limit 预占但最终没写成功的额度（v0.9.39）。
 
-    失败/去重路径必须调用；只删本进程预占的时间戳，不会误删已成功记录。
+    失败/去重路径必须调用；只删本次需要的 units 个预占时间戳，不会误删
+    同一 (account, action) 下另一个并发请求尚未结算的预占。
     """
     if action not in LIMITS:
         return
     key = f"{account}:{action}"
     daily_key = f"{account}:{action}:{_DAILY_KEY}"
     with _RL_LOCK:
-        pending = _RL_PENDING.pop((account, action), [])
-        if not pending:
+        consumed = _consume_pending(account, action, units)
+        if not consumed:
             return
-        release_stamps = pending[-units:] if units > 0 else pending
         state = _load_ratelimit()
         for k in (key, daily_key):
             arr = state.get(k)
             if not arr:
                 continue
-            for stamp in release_stamps:
+            for stamp in consumed:
                 try:
                     arr.remove(stamp)
                 except ValueError:
@@ -186,23 +208,21 @@ def release_limit(action: str, units: int = 1, account: str = "yui") -> None:
 def record_limit(action: str, params: dict[str, Any], result: Any, units: int = 1, account: str = "yui") -> None:
     """记录一次成功的写操作（限流状态 + 审计日志）。
 
-    v0.9.39：若 check_limit 已预占，则只消费预占、不再追加时间戳；
+    v0.9.40：只消费本次 units 个预占，不再 pop 整个队列；预占不足时补记差额，
     兼容旧调用（未先 check）仍按原行为追加。
     """
     now = time.time()
     key = f"{account}:{action}"
     keep = _DAY_SECONDS if action in DAILY_LIMITS else _WINDOW_SECONDS
     with _RL_LOCK:
-        pending = _RL_PENDING.get((account, action), [])
-        if pending:
-            # 预占已在 check_limit 写入，消费后不再重复计数
-            _RL_PENDING.pop((account, action), None)
-        else:
+        covered = len(_consume_pending(account, action, units))
+        if covered < units:
+            # 未预占/预占不足（旧调用或异常路径）：把差额补记到状态里
             state = _load_ratelimit()
-            state[key] = [t for t in state.get(key, []) if now - t < keep] + [now] * units
+            state[key] = [t for t in state.get(key, []) if now - t < keep] + [now] * (units - covered)
             if action in DAILY_LIMITS:
                 daily_key = f"{account}:{action}:{_DAILY_KEY}"
-                state[daily_key] = [t for t in state.get(daily_key, []) if now - t < _DAY_SECONDS] + [now] * units
+                state[daily_key] = [t for t in state.get(daily_key, []) if now - t < _DAY_SECONDS] + [now] * (units - covered)
             _save_ratelimit(state)
     entry = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "account": account, "action": action, "params": params, "result": result}
     try:
@@ -763,6 +783,14 @@ def dm_send(account: str = "yui", uid: str = "", text: str = "", allow_new: bool
             query=_wbi_params({"w_sender_uid": me, "w_receiver_id": talker}),
         )
     except bili.BiliError as exc:
+        if bili.write_outcome_ambiguous(exc):
+            # 超时/网络中断可能已被服务端受理：保留预占并记入短窗去重，禁止诱导重试
+            _dm_last_sends[_dup_key] = time.time()
+            raise bili.BiliError(
+                "私信请求超时/网络中断，消息可能已经发出但未确认；已保留限流窗口，"
+                "严禁重复发送，请先在 B站 私信页面确认。",
+                "DM_MAYBE_SENT",
+            ) from exc
         release_limit("dm", 1, account)
         raise _guard_exc(exc) from exc
     # 接口接受=已发送，立即记录（无论后续回读结果，60s 内重试都被挡）。
@@ -874,6 +902,14 @@ def video_like(bvid: str, account: str = "yui", undo: bool = False) -> dict[str,
     try:
         bili._http_post(_LIKE_URL, {**params, "csrf": bili._csrf(account)}, account=account)
     except bili.BiliError as exc:
+        if bili.write_outcome_ambiguous(exc):
+            # v0.9.40：点赞 POST 超时仍可能已被受理；保留预占，禁止诱导重试
+            raise bili.BiliError(
+                "点赞请求超时/网络中断，可能已经生效但未确认；已保留操作窗口，"
+                "严禁重复点赞，请先刷新视频页确认。",
+                "LIKE_MAYBE_SENT",
+            ) from exc
+        release_limit("video_like", 1, account)
         raise _guard_exc(exc) from exc
     # 回读验证
     try:
@@ -906,6 +942,13 @@ def video_coin(bvid: str, account: str = "yui", coins: int = 1, with_like: bool 
     try:
         bili._http_post(_COIN_URL, payload, account=account)
     except bili.BiliError as exc:
+        if bili.write_outcome_ambiguous(exc):
+            # 硬币是真实花费：超时可能已扣币，保留预占，绝不能让 LLM 重投
+            raise bili.BiliError(
+                "投币请求超时/网络中断，硬币可能已经扣除但未确认；已保留额度，"
+                "严禁重复投币，请先打开视频页确认硬币数。",
+                "COIN_MAYBE_SENT",
+            ) from exc
         release_limit("coin", coins, account)
         raise _guard_exc(exc) from exc
     # v0.9.39 深审 M7：接口接受即扣额度，再回读。COIN_UNVERIFIED 时硬币
@@ -935,6 +978,13 @@ def video_fav(bvid: str, account: str = "yui", remove: bool = False, folder: str
     try:
         bili._http_post(_FAV_DEAL_URL, payload, account=account)
     except bili.BiliError as exc:
+        if bili.write_outcome_ambiguous(exc):
+            # 收藏 POST 超时可能已写入，保留预占，禁止立即重试
+            raise bili.BiliError(
+                "收藏请求超时/网络中断，可能已经生效但未确认；已保留操作窗口，"
+                "严禁重复收藏，请先刷新视频页确认。",
+                "FAVORITE_MAYBE_SENT",
+            ) from exc
         release_limit("favorite", 1, account)
         raise _guard_exc(exc) from exc
     # v0.9.39 深审 M7：接口接受即记账，回读失败不回滚（FAV_UNVERIFIED 也可能已收藏）
@@ -964,6 +1014,13 @@ def video_triple(bvid: str, account: str = "yui") -> dict[str, Any]:
     try:
         bili._http_post(_TRIPLE_URL, {"bvid": bvid, "csrf": bili._csrf(account)}, account=account)
     except bili.BiliError as exc:
+        if bili.write_outcome_ambiguous(exc):
+            # 三连含真实投币：超时可能已部分/全部生效，保留三项预占，禁止重试
+            raise bili.BiliError(
+                "三连请求超时/网络中断，点赞/收藏/投币可能已经生效但未确认；"
+                "已保留操作额度，严禁重复三连，请先打开视频页确认状态。",
+                "TRIPLE_MAYBE_SENT",
+            ) from exc
         if coin_room > 0:
             release_limit("coin", coin_room, account)
         release_limit("video_like", 1, account)

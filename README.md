@@ -219,6 +219,27 @@
 > `NEKO_COOKIE_PLAIN_V1:` 标记而非裸明文，解密失败报 `COOKIE_DECRYPT_FAILED`
 > 而不是伪装成未登录。
 > 已知边界：私信三态/扩展开关仍以单测为主；扩展换固定 ID 后需用户重载一次。
+> v0.9.40 增量复审收口（7.5/10 → 修复 S1 残留 + M2 + 6 个新问题，352 tests passed、ruff 通过）：
+> ① S1 面板鉴权：`GET /` 不再把 `queue_token` 内嵌进 HTML；改为插件工具返回
+>    `?k=<bootstrap>` 链接，首次访问才下发 `HttpOnly; SameSite=Strict` 会话 Cookie；
+>    `/api/status` 也要求 token/Cookie，本机无凭据裸请求 403。
+> ② 扩展 Cookie 验真：`/api/extension-cookie` 改为先 nav 验真、服务端 `data.mid`
+>    与 Cookie 的 `DedeUserID` 一致且归位成功后才 `_refresh_ext_cookie`；验真按
+>    完整 Cookie 缓存 10 分钟，避免扩展心跳反复打 nav。伪造 Cookie 不再能覆盖真实登录态。
+> ③ M2 回读窗口：优先 `gethistory`（更长历史、带 timeline），失败回退 `ajax/msg`；
+>    每个 tick 只读一次，`verify_deadline` 约 15 秒跨 tick 轮询，不再在 tick 锁内
+>    `sleep(1.0)`；回读未到期前绝不下一条，忙房间不再因 5 秒窗口误停。
+> ④ 写请求歧义：`TIMEOUT` / `NETWORK`（含 `SEND_FAILED:TIMEOUT`）归为“可能已受理”。
+>    直播/视频弹幕、评论、私信、动态、点赞、投币、收藏、三连都不退限流/额度，
+>    返回 `*_MAYBE_SENT` 并明确要求先确认；只有明确失败才回退。硬币等真实花费不再被诱导重试。
+> ⑤ 基线失败：发送前基线读不到时记 `None`，`_danmaku_is_new` 返回 False（无法确认），
+>    不再退化成空基线把历史同文当成本次成功。
+> ⑥ 限流预占：`_consume_pending` 只消费本次 `units` 个预占，`record_limit` 不再
+>    整体 pop；两个交错请求不会多记/少记。`_get_mixin_key` 改用 `_read_response`；
+>    连发回读日志改 `warning(exc_info=...)`，不再在 `except` 外调 `_logger.exception`。
+> 已知边界：SSRF 仍是“先解析再交给 urllib”，存在 DNS 重绑时间差（本机插件低风险）；
+>    扩展来源仍免 token，但扩展专属端点已收窄、Cookie 端点加 nav 验真；
+>    本机进程若拿到带 bootstrap 的完整 URL 仍可换会话 Cookie（与 v0.9.39 相同的本机信任边界）。
 > v0.9.39 深审 1/2 + 2/2 修复（6/10，345 tests passed、ruff / `check --release` 通过）：
 > ① HTTP 写操作不再重试：三处 POST 全部 `retries=0`，`resp.read()` 的
 >    `socket.timeout` / `IncompleteRead` / `ConnectionError` 统一转 `TIMEOUT` / `NETWORK`，

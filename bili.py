@@ -67,6 +67,21 @@ class BiliError(Exception):
         self.code = code
 
 
+_AMBIGUOUS_WRITE_CODES = ("TIMEOUT", "NETWORK")
+
+
+def write_outcome_ambiguous(exc: BaseException) -> bool:
+    """写请求失败是否属于"可能已被服务端受理"的歧义错误（v0.9.40）。
+
+    写操作 POST 已改为 retries=0；但读取响应阶段超时/半包断开时，请求可能
+    已经到达 B站 并受理。上层不能把这类错误当成"确定没发出去"去退节流窗口，
+    否则 LLM 立刻重试就可能重复弹幕/评论/私信。
+    兼容 live_send_danmaku 的 `SEND_FAILED:TIMEOUT` 包装码。
+    """
+    code = str(getattr(exc, "code", "") or "")
+    return code.split(":")[-1] in _AMBIGUOUS_WRITE_CODES
+
+
 # v0.9.37：异常原文回给 LLM 前统一脱敏。B站 的 412/风控响应、urllib 异常里
 # 可能带完整 Cookie、csrf、ticket、代理 URL 与账号 uid；_wrap_err 之前直接
 # 原样透传，等于把凭证明文写进模型上下文。这里只保留可读原因，凭证一律打码。
@@ -503,8 +518,18 @@ def _read_response(resp, timeout: float) -> bytes:
 
 
 
-def _http_get(url: str, params: dict | None = None, timeout: float = _TIMEOUT, account: str = "main") -> dict:
-    """GET JSON 接口；返回解析后的 dict。"""
+def _http_get(
+    url: str,
+    params: dict | None = None,
+    timeout: float = _TIMEOUT,
+    account: str = "main",
+    cookie_override: str | None = None,
+) -> dict:
+    """GET JSON 接口；返回解析后的 dict。
+
+    cookie_override：用调用方给的一次性 Cookie 发请求，不读环境变量/账号文件。
+    用于扩展推送落盘前的 nav 验真——验真前绝不能把待验证 Cookie 写进运行态。
+    """
     if params:
         url = url + "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={
@@ -512,8 +537,8 @@ def _http_get(url: str, params: dict | None = None, timeout: float = _TIMEOUT, a
         "Referer": "https://www.bilibili.com/",
         "Accept": "application/json, text/plain, */*",
     })
-    cookie = _cookie(account)
-    if not cookie:
+    cookie = cookie_override if cookie_override is not None else _cookie(account)
+    if not cookie and cookie_override is None:
         cookie = _visitor_cookie()
     if cookie:
         req.add_header("Cookie", cookie)
@@ -570,7 +595,7 @@ def _get_mixin_key() -> str:
     if cookie:
         req.add_header("Cookie", cookie)
     with _open_with_retry(req, _TIMEOUT) as resp:
-        raw = resp.read()
+        raw = _read_response(resp, _TIMEOUT)
     try:
         data = json.loads(raw)
     except ValueError as exc:
@@ -1576,6 +1601,39 @@ def _http_post(url: str, form: dict, timeout: float = _TIMEOUT, account: str = "
     return data
 
 
+def validate_cookie(cookie: str, timeout: float = 6.0) -> int:
+    """用 B站 nav 接口验证一份 Cookie 是否真实有效，返回服务端认定的 uid。
+
+    v0.9.40：扩展推送的 Cookie 在落盘前必须先过这里。旧逻辑只解析 DedeUserID
+    并检查 SESSDATA=，本机进程伪造一份 `SESSDATA=x; DedeUserID=<YUI uid>` 就能
+    把假 Cookie 绑到小号并覆盖真实登录态。nav 返回的 data.mid 必须与 Cookie 里
+    声明的 DedeUserID 一致，否则拒绝。
+    """
+    cookie = str(cookie or "").strip()
+    declared = cookie_uid(cookie)
+    if not cookie or "SESSDATA=" not in cookie or declared is None:
+        raise BiliError("Cookie 缺少 SESSDATA 或 DedeUserID", "BAD_COOKIE")
+    data = _http_get(
+        _API + "/x/web-interface/nav",
+        timeout=timeout,
+        account="main",
+        cookie_override=cookie,
+    ).get("data") or {}
+    mid = data.get("mid")
+    try:
+        mid_int = int(mid or 0)
+    except (TypeError, ValueError):
+        mid_int = 0
+    if not mid_int:
+        raise BiliError("Cookie 未通过 B站 nav 验真（未返回账号 uid）", "BAD_COOKIE")
+    if mid_int != int(declared):
+        raise BiliError(
+            "Cookie 未通过 B站 nav 验真（服务端 uid 与 DedeUserID 不一致）",
+            "BAD_COOKIE",
+        )
+    return mid_int
+
+
 def my_info(account: str = "yui") -> dict:
     """指定账号信息：昵称/uid/等级/硬币/大会员。account=main 主账号 / yui 小号（默认）。"""
     _require_login(account)
@@ -2072,7 +2130,12 @@ def _danmaku_is_new(msgs: list, uid: int, text: str, baseline: dict | None) -> b
 
     有 timeline 时按时间串去重（最可靠）；接口没给 timeline 时退回出现次数
     必须大于发送前基线（至少不会把"原来就有一条"直接算成功）。
+
+    v0.9.40：baseline=None 表示发送前基线读取失败，不是"确认没有历史同文"。
+    这时返回 False（无法确认），绝不能把任意历史同文弹幕当成本次发送成功。
     """
+    if baseline is None:
+        return False
     base = baseline or {}
     seen = set(base.get("timelines") or [])
     base_count = int(base.get("count") or 0)
@@ -2091,10 +2154,27 @@ def _danmaku_is_new(msgs: list, uid: int, text: str, baseline: dict | None) -> b
 
 
 def _live_recent_danmaku(room_id: int, account: str = "yui") -> list:
-    """回读直播间最近弹幕（v0.9.18）：ajax/msg 返回 data.admin + data.normal 列表。
+    """回读直播间最近弹幕（v0.9.40）：优先用更长历史的 gethistory，失败再退回 ajax/msg。
 
     用途：发送弹幕后验证是否真的出现在直播间——B站 /msg/send 会返回 code=0 但静默丢弃
-    弹幕（实测 2026-10-23：接口接受、无 dmid，但直播间不显示，疑似防刷屏/屏蔽词过滤）。"""
+    弹幕（实测 2026-10-23：接口接受、无 dmid，但直播间不显示，疑似防刷屏/屏蔽词过滤）。
+
+    ajax/msg 只返回最近一小段，忙房间回流稍慢就会漏；gethistory 返回的列表更长、
+    带 timeline，能显著降低"弹幕已发出但回读窗口内没抓到"的误判。
+    """
+    try:
+        h = _http_get(
+            _LIVE_API + "/xlive/web-room/v1/dM/gethistory",
+            {"roomid": str(room_id), "room_type": "0"},
+            timeout=_TIMEOUT,
+            account=account,
+        )
+        room_msgs = (h.get("data") or {}).get("room") or []
+        if room_msgs:
+            return room_msgs
+    except BiliError:
+        # gethistory 需要登录态/被风控时退回公开的 ajax/msg，不让验证直接失败
+        pass
     d = _http_get(
         "https://api.live.bilibili.com/ajax/msg",
         {"roomid": str(room_id), "token": "", "page": 1},

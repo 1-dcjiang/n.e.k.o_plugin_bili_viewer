@@ -16,6 +16,7 @@ import re
 import secrets
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
@@ -28,6 +29,7 @@ _logger = logging.getLogger("N.E.K.O.Plugin_bili_viewer.plugin.bili_viewer")
 _PANEL_HOST = "127.0.0.1"
 _PANEL_PORT = 8765
 _PANEL_TOKEN_HEADER = "X-Neko-Token"
+_PANEL_COOKIE = "neko_panel_session"
 # v0.9.38：三个扩展的 manifest 共用固定公钥，Origin 只能是这个扩展 ID。
 # 旧版任意 chrome-extension:// 放行等于把本机写接口交给任意扩展，必须收紧。
 _EXTENSION_ID = "dafbbcelkodnlgmpjdaabcblddgicjhp"
@@ -201,8 +203,7 @@ _PAGE = """<!DOCTYPE html>
 优先使用"B站接入桥"扩展通道（扩展随浏览器自动同步登录态），或刷新本页查看扩展通道状态即可。</div>
 <div id="log"></div>
 <script>
-const PANEL_TOKEN = "__PANEL_TOKEN__";
-const AUTH_HEADERS = {'X-Neko-Token': PANEL_TOKEN};
+const AUTH_HEADERS = {};  // v0.9.40：面板改 HttpOnly 会话 Cookie，页面里不再内嵌 token
 async function refresh(){
   try{
     const r = await fetch('/api/status', {headers: AUTH_HEADERS}); const s = await r.json();
@@ -241,11 +242,13 @@ class _PanelHandler(BaseHTTPRequestHandler):
         pass
 
     # -- helpers --
-    def _send(self, code: int, ctype: str, body: bytes) -> None:
+    def _send(self, code: int, ctype: str, body: bytes, headers: dict | None = None) -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -312,10 +315,27 @@ class _PanelHandler(BaseHTTPRequestHandler):
         return host in {f"127.0.0.1:{port}", f"localhost:{port}"}
 
     def _queue_token_ok(self) -> bool:
-        """写操作鉴权：必须携带面板启动时生成的随机 token（v0.9.38）。"""
+        """写操作鉴权：面板 token，可用 HttpOnly 会话 Cookie 或 X-Neko-Token 头（v0.9.40）。
+
+        v0.9.38 把 token 直接替换进 GET / 的 HTML，任何本机进程 GET / 就能拿到；
+        v0.9.40 改成：GET / 必须带 bind 时返回的 bootstrap token（?k=）才会下发
+        HttpOnly 会话 Cookie；页面 JS 不再持有 token，Cookie 也不会被 JS 读取。
+        """
         expected = str(getattr(self.server, "queue_token", "") or "")
+        if not expected:
+            return False
         supplied = str(self.headers.get(_PANEL_TOKEN_HEADER) or "")
-        return bool(expected) and secrets.compare_digest(supplied, expected)
+        if supplied and secrets.compare_digest(supplied, expected):
+            return True
+        for part in str(self.headers.get("Cookie") or "").split(";"):
+            name, sep, value = part.strip().partition("=")
+            if sep and name == _PANEL_COOKIE and secrets.compare_digest(value, expected):
+                return True
+        return False
+
+    def _bootstrap_ok(self, supplied: str) -> bool:
+        expected = str(getattr(self.server, "bootstrap_token", "") or "")
+        return bool(expected) and bool(supplied) and secrets.compare_digest(supplied, expected)
 
     def _extension_path(self) -> bool:
         return self.path.startswith(_EXTENSION_API_PREFIXES)
@@ -329,6 +349,10 @@ class _PanelHandler(BaseHTTPRequestHandler):
         if self.path.startswith("/api/status"):
             if self._origin_kind() == "extension":
                 self._json(403, {"error": "extension cannot read panel status"})
+                return
+            # v0.9.40：状态接口也要求鉴权，本机任意进程不能再直接读面板状态
+            if not self._request_trusted(require_token=True):
+                self._json(403, {"error": "panel token required"})
                 return
             payload = dict(status_fn() or {})
             payload.pop("uname", None)  # 账号名/uid 不上面板接口（v0.9.38）
@@ -352,7 +376,27 @@ class _PanelHandler(BaseHTTPRequestHandler):
                 cmd = _CMD_QUEUE[0] if _CMD_QUEUE else {}
             self._json(200, cmd or {"id": None})
             return
-        self._send(200, "text/html; charset=utf-8", _PAGE.replace("__PANEL_TOKEN__", self.server.queue_token).encode("utf-8"))
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path in ("/", "/index.html"):
+            supplied = (urllib.parse.parse_qs(parsed.query).get("k") or [""])[0]
+            has_session = self._queue_token_ok()
+            if not has_session and not self._bootstrap_ok(supplied):
+                self._json(403, {"error": "panel token required"})
+                return
+            headers = {}
+            if not has_session:
+                # 只在 bootstrap token 正确时下发会话 Cookie；token 本身不出现在 HTML 里
+                headers["Set-Cookie"] = (
+                    f"{_PANEL_COOKIE}={self.server.queue_token}; HttpOnly; SameSite=Strict; Path=/"
+                )
+            self._send(
+                200,
+                "text/html; charset=utf-8",
+                _PAGE.encode("utf-8"),
+                headers=headers,
+            )
+            return
+        self._json(404, {"error": "not found"})
 
     def do_POST(self) -> None:
         if not self._host_allowed():
@@ -397,17 +441,22 @@ class _PanelHandler(BaseHTTPRequestHandler):
             return
         if self.path.startswith("/api/extension-cookie"):
             body = self._read_json_body()
+            cookie = str(body.get("cookie", "") or "")
             try:
-                _refresh_ext_cookie(body.get("cookie", ""))  # v0.2.18 插件侧登录态自保鲜
+                # v0.9.40：先验真/归位，只有 nav 验真通过并成功归位后才刷新 cookie 文件。
+                # 旧顺序先 _refresh_ext_cookie 再 ext_fn，会让伪造 Cookie 在验真失败前
+                # 就覆盖真实登录态。
                 payload = dict(
                     self.server.ext_fn(
-                        body.get("cookie", ""),
+                        cookie,
                         int(body.get("at", 0) or 0),
                         str(body.get("source", "") or ""),
                     )
                     or {}
                 )
-                _logger.info("ext cookie: cookie_len=%s at=%s source=%s ok=%s", len(str(body.get("cookie", "") or "")), body.get("at"), body.get("source"), payload.get("ok"))
+                if payload.get("ok") and payload.get("bound"):
+                    _refresh_ext_cookie(cookie)
+                _logger.info("ext cookie: cookie_len=%s at=%s source=%s ok=%s", len(cookie), body.get("at"), body.get("source"), payload.get("ok"))
             except Exception as exc:
                 payload = {"ok": False, "detail": f"扩展推送处理异常：{exc}"}
                 _logger.info("ext cookie: ERROR %s", exc)
@@ -522,9 +571,12 @@ class BindPanel:
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
-        # 面板启动时生成一次性随机 token：只给同进程的插件工具使用，
-        # 网页/扩展/其他本地进程都拿不到；避免任意本机请求排队进入直播间指令。
+        # 面板启动时生成两个 token：
+        # - panel_token：HttpOnly 会话 Cookie / X-Neko-Token 头，只有插件工具和已 bootstrap 的页面能用；
+        # - bootstrap_token：只出现在插件工具返回的打开链接里，GET / 凭它换会话 Cookie。
+        # v0.9.40：不再把 panel_token 内嵌进 GET / 的 HTML（旧版本本机任意进程 GET / 就能拿到）。
         self._panel_token = secrets.token_urlsafe(24)
+        self._bootstrap_token = secrets.token_urlsafe(32)
 
     @property
     def token(self) -> str:
@@ -535,6 +587,8 @@ class BindPanel:
             if self._server is not None:
                 return self.url(), False
             server = ThreadingHTTPServer((_PANEL_HOST, self._port), _PanelHandler)
+            # port=0 时由系统分配；把实际端口写回，url()/page_url() 才能给出可访问地址
+            self._port = int(server.server_address[1])
             # 回调挂到 server 实例属性（每请求 handler 通过 self.server 取，避免类属性 self 绑定）
             server.status_fn = self._status_fn
             server.bind_fn = self._bind_fn
@@ -545,6 +599,7 @@ class BindPanel:
             server.audio_fn = self._audio_fn
             server.audio_state_fn = self._audio_state_fn
             server.queue_token = self._panel_token
+            server.bootstrap_token = self._bootstrap_token
             thread = threading.Thread(target=server.serve_forever, name="bili-bind-panel", daemon=True)
             thread.start()
             self._server = server
@@ -553,6 +608,10 @@ class BindPanel:
 
     def url(self) -> str:
         return f"http://{_PANEL_HOST}:{self._port}/"
+
+    def page_url(self) -> str:
+        """给用户打开的页面地址：带 bootstrap token，用来换 HttpOnly 会话 Cookie。"""
+        return f"{self.url()}?k={self._bootstrap_token}"
 
     def stop(self) -> None:
         """关闭面板服务并释放端口（插件重载/关闭时调用，避免旧线程占住 8765）。"""

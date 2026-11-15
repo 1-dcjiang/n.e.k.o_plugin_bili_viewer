@@ -1794,6 +1794,7 @@ def test_danmaku_loop_tick_unconfirmed_stops(monkeypatch) -> None:
     monkeypatch.setattr(inst, "_loop_merge_save", lambda s: st.update(s))
     inst._danmaku_loop_tick()  # 发送 → pending
     st["pending"]["verify_due"] = 0  # 模拟 3 秒后
+    st["pending"]["verify_deadline"] = 0  # v0.9.40：跨 tick 回读窗口结束
     st["next_due"] = 0
     inst._danmaku_loop_tick()  # 回读未命中 → 停止
     assert st["active"] is False

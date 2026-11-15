@@ -30,6 +30,23 @@ def _no_background_sync(monkeypatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _stub_cookie_validation(request, monkeypatch) -> None:
+    """v0.9.40：_assign_cookie 落盘前会调 bili.validate_cookie（真实 nav 网络请求）。
+
+    绝大多数测试用假 Cookie 验证归位/覆盖逻辑，不应该走真实网络。默认把验真
+    桩成"DedeUserID 即服务端 uid"；需要验证拒绝路径的用例在自己的用例里覆盖此桩，
+    需要验证 validate_cookie 本体的用例加 @pytest.mark.real_cookie_validation。
+    """
+    if request.node.get_closest_marker("real_cookie_validation"):
+        return
+    try:
+        from plugin.plugins.bili_viewer import bili
+    except Exception:
+        return
+    monkeypatch.setattr(bili, "validate_cookie", lambda cookie, timeout=6.0: bili.cookie_uid(cookie))
+
+
+@pytest.fixture(autouse=True)
 def _isolate_bili_runtime_state(monkeypatch) -> None:
     """隔离真实账号 Cookie 与扩展共享缓冲，避免本机运行态污染单元测试。
 

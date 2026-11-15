@@ -28,6 +28,23 @@ def _free_port() -> int:
     return port
 
 
+def test_panel_port_zero_reports_real_port():
+    """v0.9.40：port=0 时 url() 必须回填系统分配端口，不能返回 :0/。"""
+    web_ui = _web_ui()
+    panel = web_ui.BindPanel(status_fn=lambda: {}, bind_fn=lambda: {"ok": True}, port=0)
+    url, started = panel.ensure_started()
+    try:
+        assert started is True
+        assert ":0/" not in url
+        try:
+            urllib.request.urlopen(url, timeout=5)
+            raise AssertionError("bare GET should be 403")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 403
+    finally:
+        panel.stop()
+
+
 def _http_json(url: str, method: str = "GET", body: dict | None = None, token: str = "", origin: str = "") -> dict:
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
@@ -66,13 +83,21 @@ def _start_panel(ext_fn):
 
 
 def test_panel_serves_page(monkeypatch, tmp_path):
-    panel, url = _start_panel(lambda *_: {"ok": True})
+    panel, _url = _start_panel(lambda *_: {"ok": True})
     try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
+        req = urllib.request.Request(panel.page_url())
+        with urllib.request.urlopen(req, timeout=10) as resp:
             html = resp.read().decode("utf-8")
+            cookie = resp.headers.get("Set-Cookie") or ""
         assert "一键接入" in html
         assert "B站接入面板" in html
         assert "__PANEL_TOKEN__" not in html
+        assert panel.token not in html
+        assert "HttpOnly" in cookie and "neko_panel_session=" in cookie
+        # 无 bootstrap token 的裸 GET / 不再泄露页面/会话
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(panel.url(), timeout=10)
+        assert exc.value.code == 403
     finally:
         panel._server.shutdown()
 
@@ -139,6 +164,7 @@ def test_panel_stop_releases_port(monkeypatch, tmp_path):
     try:
         assert started2 is True
         assert url2 == f"http://127.0.0.1:{port}/"
+        assert panel2.page_url().startswith(url2 + "?k=")
     finally:
         panel2.stop()
 
@@ -326,11 +352,16 @@ def test_panel_get_origin_blocked(monkeypatch, tmp_path):
                 assert False, "恶意 Origin 的 GET 应被拒绝"
         except urllib.error.HTTPError as exc:
             assert exc.code == 403
-        # 面板自身 Origin 放行
+        # 面板自身 Origin + 面板 token 放行（v0.9.40：状态接口也要鉴权）
         req2 = urllib.request.Request(f"http://127.0.0.1:{port}/api/status")
         req2.add_header("Origin", f"http://127.0.0.1:{port}")
+        req2.add_header("X-Neko-Token", panel.token)
         with urllib.request.urlopen(req2, timeout=10) as resp:
             assert resp.status == 200
+        # 本机无 Origin、无 token 的裸请求同样 403
+        with pytest.raises(urllib.error.HTTPError) as exc2:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status", timeout=10)
+        assert exc2.value.code == 403
     finally:
         panel.stop()
 
@@ -373,10 +404,10 @@ def test_status_does_not_expose_account(monkeypatch):
     """v0.9.38：/api/status 不再返回账号名/uid；扩展 Origin 也读不到状态。"""
     panel, url = _start_panel(lambda *_: {"ok": True})
     try:
-        result = _http_json(url + "api/status")
+        result = _http_json(url + "api/status", token=panel.token)
         assert "uname" not in result
         with pytest.raises(urllib.error.HTTPError) as exc:
-            _http_json(url + "api/status", origin=_web_ui()._EXTENSION_ORIGIN)
+            _http_json(url + "api/status", origin=_web_ui()._EXTENSION_ORIGIN, token=panel.token)
         assert exc.value.code == 403
     finally:
         panel.stop()
