@@ -90,22 +90,44 @@ def _state_path(name: str) -> str:
 
 
 def _load_ratelimit() -> dict[str, list[float]]:
+    """读取高危写操作的限流状态；除文件尚不存在外一律 fail-closed。"""
     try:
         with open(_state_path(_RATELIMIT_FILE), "r", encoding="utf-8") as f:
-            return json.load(f) or {}
-    except (OSError, ValueError):
+            state = json.load(f) or {}
+        if not isinstance(state, dict):
+            raise ValueError("ratelimit root is not an object")
+        for key, values in state.items():
+            if not isinstance(key, str) or not isinstance(values, list):
+                raise ValueError("invalid ratelimit entry")
+            if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in values):
+                raise ValueError("invalid ratelimit timestamp")
+        return state
+    except FileNotFoundError:
         return {}
+    except (OSError, ValueError, TypeError) as exc:
+        raise bili.BiliError(
+            "本地限流状态读取失败，已阻止本次写操作；请修复或移走损坏的 ratelimit.json 后重试",
+            "RATE_STATE_UNAVAILABLE",
+        ) from exc
 
 
 def _save_ratelimit(state: dict[str, list[float]]) -> None:
+    """限流预占必须可靠落盘；目录不可写时不得直接放行投币/私信等操作。"""
     p = _state_path(_RATELIMIT_FILE)
+    tmp = p + ".tmp"
     try:
-        tmp = p + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False)
         os.replace(tmp, p)
-    except OSError:
-        pass  # 状态目录不可写时降级：只做记录，不阻断操作
+    except (OSError, ValueError, TypeError) as exc:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise bili.BiliError(
+            "本地限流状态写入失败，已阻止本次写操作；请检查状态目录权限后重试",
+            "RATE_STATE_UNAVAILABLE",
+        ) from exc
 
 
 def check_limit(action: str, units: int = 1, account: str = "yui") -> float | None:

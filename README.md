@@ -13,7 +13,7 @@
 | `bili_video_ai_summary` | B站官方 AI 视频概要（部分视频提供） |
 | `bili_video_comments` | 视频评论（热门/最新、分页） |
 | `bili_live_info` | 直播间信息：标题、主播、状态、在线人数、分区、简介 |
-| `bili_live_danmaku` | 直播间实时弹幕（匿名采集数秒） |
+| `bili_live_danmaku` | 直播间实时弹幕（扩展优先；WS 回退采集数秒，使用 `uid=0` 游客握手） |
 | `bili_user_info` | UP主信息：粉丝、关注、视频数、等级、签名 |
 | `bili_user_videos` | UP主的投稿视频列表 |
 | `bili_now_watching` | **感知当前正在看/用的内容**：识别前台窗口的应用/站点/页面主题；B站视频/直播页自动匹配详情 |
@@ -219,6 +219,28 @@
 > `NEKO_COOKIE_PLAIN_V1:` 标记而非裸明文，解密失败报 `COOKIE_DECRYPT_FAILED`
 > 而不是伪装成未登录。
 > 已知边界：私信三态/扩展开关仍以单测为主；扩展换固定 ID 后需用户重载一次。
+> v0.9.41 增量深审修复（387 项离线测试通过）：
+> ① 写请求传输歧义：`RemoteDisconnected` / `BadStatusLine` / reset / abort 等异常统一归为
+>    `WRITE_OUTCOME_UNKNOWN`；POST 仍绝不重试，高危写操作保留限流预占并要求人工核实。
+> ② 评论目标与文案：显式视频 target 查询失败时不再改投浏览器当前内容；主账号评论结果未知时
+>    不再谎称存在 120 秒限流窗口。
+> ③ Cookie 验真架构拆分为 `cookie_validation.py`：成功缓存 600 秒、明确拒绝缓存 300 秒、
+>    风控/网络暂时失败只负缓存 30 秒；最多一次短重试，同 Cookie 单飞，网络与等待不持有全局账号锁，
+>    缓存键改用 SHA-256 摘要，暂时不可验真不再误判 Cookie 失效。
+> ④ 角色与文件一致性：`accounts.json` 是角色权威来源，旧 `role.json` 仅兼容回退；账号刷新同步
+>    更新对应 Cookie 文件。Cookie/角色文件使用唯一临时文件原子替换，双角色刷新有独立锁，
+>    避免固定 `.tmp` 竞争和大小号串号。
+> ⑤ 高危写操作 fail-closed：限流 JSON 损坏、结构异常或状态不可写时返回
+>    `RATE_STATE_UNAVAILABLE`，不再清空历史或静默放行；弹幕连发状态复用同一 `BILI_SOCIAL_DIR`
+>    路径规则，`LOCALAPPDATA` 为空时回退用户主目录。
+> ⑥ 本机 Web / CDP 安全：所有 token 比较统一 UTF-8 bytes，非 ASCII 输入只返回 403；
+>    超限请求体有界分块排空，避免 Windows 10053；CDP WebSocket 只接受 `localhost`、字面值
+>    `127.0.0.1` / `::1`，并检查 localhost 解析结果，拒绝外网、userinfo、前缀与数值 IP 欺骗。
+> ⑦ 隐私与资源管理：弹幕 INFO/WARNING 日志只保留房间、长度等元数据，不再记录昵称与原文；
+>    三种 POST helper 每次只解析一次 Cookie，角色 JSON 读取补上下文管理器。
+> 验证边界：全部网络与 nav 验真使用 fake/mock；真实 B站、真实 Cookie、浏览器 CDP、扩展实机及
+> 真实写操作未执行。保留的产品边界：固定扩展来源免 token、bootstrap 链接长期有效、直播弹幕
+> 房间号可覆盖标签页房间；大文件职责拆分仅完成 Cookie 验真编排，未宣称消除全部架构债。
 > v0.9.40 增量复审收口（7.5/10 → 修复 S1 残留 + M2 + 6 个新问题，352 tests passed、ruff 通过）：
 > ① S1 面板鉴权：`GET /` 不再把 `queue_token` 内嵌进 HTML；改为插件工具返回
 >    `?k=<bootstrap>` 链接，首次访问才下发 `HttpOnly; SameSite=Strict` 会话 Cookie；
@@ -409,15 +431,23 @@
 配置 BILI_COOKIE 后可正常获取。
 **稿件管理与直播发弹幕**为写操作，必须配置 BILI_COOKIE（含 `bili_jct`），
 且只作用于当前账号自己的内容，请仅在明确确认后使用。
-插件绝不把 Cookie 写入磁盘或对外发送。
+通过网页、扩展或 CDP 绑定时，主账号与小号 Cookie 会分别持久化到 `main_cookie.txt` 与
+`yui_cookie.txt`：Windows 使用当前用户 DPAPI 加密；非 Windows 无 DPAPI 时使用显式
+`NEKO_COOKIE_PLAIN_V1:` 明文标记并尽量设置 `0600` 权限。Cookie 只用于本机存储及向 B站
+对应接口鉴权，不应写入日志或发送给无关第三方。
 
 ## 安全说明
 
-- 读操作只访问公开内容；写操作（改稿件、发弹幕）仅限当前账号自己的内容，需登录态与用户明确确认
-- 感知功能仅读取前台窗口标题与进程名（本地、无网络传输）
-- 直播弹幕为匿名游客采集，不做刷屏/干扰；发送弹幕限长 30 字
-- 网络受限或触发风控时返回明确提示，不重试轰炸
-- 纯标准库实现（urllib + socket + ssl + zlib + gzip + ctypes），无第三方依赖
+- 读操作只访问公开内容；写操作（改稿件、发弹幕、评论、私信、投币等）需登录态与用户明确确认
+- 未使用浏览器扩展时，通用窗口感知只读取窗口标题与进程名；启用扩展后，还会按功能采集当前
+  标签页 URL/标题、B站页面 DOM、可见区域截屏及标签页音频，并推送到本机回环面板
+- 直播实时弹幕优先来自扩展；WS 回退虽然以 `uid=0` 游客握手，但获取弹幕服务器信息的辅助
+  HTTP 请求可能携带已配置 Cookie，不能再笼统宣称整条链路绝不使用登录态。发送弹幕限长 30 字
+- 网络受限或触发风控时返回明确提示；只读 GET 有限重试，写请求 POST 不自动重试
+- 核心浏览/互动链路使用 Python 标准库；可选声音功能并非零依赖：`audio_bridge.py` 需要
+  `soundcard`，`asr_bridge.py` 及进程内转写路径需要可选的 `faster-whisper` 与对应模型资源
+- 本机信任边界：固定扩展 Origin 访问扩展专属端点时免面板 token；bootstrap 链接长期有效，
+  拿到完整链接的本机进程可换会话；直播弹幕流的真实房间号会覆盖扩展标签页中的房间号
 
 ## 内容"看"的边界
 

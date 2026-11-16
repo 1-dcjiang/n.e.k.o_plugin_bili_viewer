@@ -36,7 +36,7 @@ from pathlib import Path
 
 from plugin.sdk.plugin import NekoPluginBase, lifecycle, llm_tool, neko_plugin, plugin_entry
 
-from . import bili, bili_social, cdp_cookie, cookie_auto, desktop_deliver, web_ui
+from . import bili, bili_social, cdp_cookie, cookie_auto, cookie_validation, desktop_deliver, web_ui
 
 # 纯判定函数不碰 IO/网络；提到模块级别名供 async 工具直接调用，
 # 避免 AST 检查把同步的 bili.* 调用误判成 async 阻塞。
@@ -460,6 +460,10 @@ class BiliViewerPlugin(NekoPluginBase):
         # 豆包指令桥回执唤醒状态（v0.9.31）：已通知的 request_id 集合 + 轮询时间戳
         self._bridge_notified: set[str] = set()
         self._bridge_poll_ts = 0.0
+        # Cookie 网络验真与全局账号锁解耦；lambda 保持运行时 monkeypatch/热替换语义。
+        self._cookie_verifier = cookie_validation.CookieVerifier(
+            lambda cookie, timeout=6.0: bili.validate_cookie(cookie, timeout=timeout)
+        )
         # 启动后台实时感知线程（守护线程，不阻塞插件生命周期）
         self._start_sync_watcher()
 
@@ -721,13 +725,9 @@ class BiliViewerPlugin(NekoPluginBase):
     _DM_LOOP_FILE = "danmaku_loop.json"
 
     def _loop_path(self) -> str:
-        base = os.environ.get("LOCALAPPDATA") or ""
-        d = os.path.join(base, "N.E.K.O", "bili_viewer", "bili_social")
-        try:
-            os.makedirs(d, exist_ok=True)
-        except OSError:
-            pass
-        return os.path.join(d, self._DM_LOOP_FILE)
+        # 与限流/私信状态共用同一路径解析：BILI_SOCIAL_DIR 优先，
+        # LOCALAPPDATA 为空时回退用户主目录，绝不落到当前工作目录。
+        return bili_social._state_path(self._DM_LOOP_FILE)
 
     def _loop_load_unlocked(self) -> dict:
         try:
@@ -891,7 +891,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 st["last_error"] = "DANMAKU_UNCONFIRMED: 接口已接受但直播间未出现"
                 st["updated_at"] = time.strftime("%H:%M:%S")
                 self._loop_merge_save(st)
-                _logger.warning("danmaku loop stopped: unconfirmed room=%s text=%r", room, text[:20])
+                _logger.warning("danmaku loop stopped: unconfirmed room=%s text_len=%d", room, len(text))
                 return
             else:
                 # 还有时间：保留 pending，下一次 tick 继续读；不 sleep、不提前判失败
@@ -2497,7 +2497,7 @@ class BiliViewerPlugin(NekoPluginBase):
             # 同房间同内容 5 秒内已发送过（v0.9.12：可能是极短时间内的重复调用）→ 不重复发送
             # v0.9.39：去重必须先于节流预占，否则重复调用会先被 5 秒窗口挡成 RATE_LIMITED，
             # 拿不到"已发送（去重）"这个正确语义。
-            _logger.info("live danmaku dedup hit room=%s text=%r", room, text[:20])
+            _logger.info("live danmaku dedup hit room=%s text_len=%d", room, len(text))
             return {"output": "弹幕已发送。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": {"dedup": True, "room": room}}
         # v0.9.39 深审 M9：account=main 也必须节流。旧实现只给 yui 加 5 秒窗口，
         # 主账号走 LLM 连发时没有任何本地护栏，直接撞 B站 风控。
@@ -2513,7 +2513,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 # 会诱导 LLM 立刻重发同一条弹幕；保留窗口并标记"可能已发"。
                 self._mark_danmaku_sent("live", room, text, 0)
                 self._record_send_result("live", False, "DANMAKU_MAYBE_SENT", exc.message, room)
-                _logger.warning("live danmaku MAYBE_SENT room=%s text=%r code=%s", room, text[:20], exc.code)
+                _logger.warning("live danmaku MAYBE_SENT room=%s code=%s text_len=%d", room, exc.code, len(text))
                 return {
                     "output": "弹幕请求超时/网络中断，可能已发出但未确认；已保留发送窗口，严禁立刻重发。",
                     "is_error": True,
@@ -2541,7 +2541,7 @@ class BiliViewerPlugin(NekoPluginBase):
             return {"output": "弹幕已发送。", "is_error": False, "meta": {"agent": {"delivery": "silent"}}, "result": result}
         # v0.9.18：接口接受但回读未在直播间出现（B站 静默吞弹幕）——如实报告，严禁假成功
         note = result.get("confirm_note") or "接口已接受但回读直播间最近弹幕未捕获该条"
-        _logger.warning("live danmaku UNCONFIRMED room=%s text=%r note=%s", room, text[:20], note)
+        _logger.warning("live danmaku UNCONFIRMED room=%s note=%s text_len=%d", room, note, len(text))
         return {
             "output": f"{note}；未确认已发出，不重试以免刷屏。",
             "is_error": True,
@@ -2761,7 +2761,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 return {"output": "已发过弹幕（同一目标 60 秒内限 1 条），请稍后再试。", "is_error": True, "error": "RATE_LIMITED"}
         if self._danmaku_recently_sent("video", bvid, text, progress):
             # 同视频同进度同内容 60 秒内已发送过（重复触发/兜底入口二次调用）→ 不重复发送
-            _logger.info("video danmaku dedup hit bvid=%s progress=%s text=%r", bvid, progress, text[:20])
+            _logger.info("video danmaku dedup hit bvid=%s progress=%s text_len=%d", bvid, progress, len(text))
             if account == "yui":
                 self._yui_rate_rollback("danmaku", f"video:{bvid}")
             return {
@@ -2867,8 +2867,10 @@ class BiliViewerPlugin(NekoPluginBase):
                     oid, type_id = None, None
             elif isinstance(parsed, dict) and parsed.get("kind") == "live" and parsed.get("room_id"):
                 oid, type_id = int(parsed["room_id"]), 11
-        if oid is None:
-            tab = self._ext_tab(force=True)  # v0.9.20：每次询问强制重新检测目标页面
+        # 只有未传 target 才允许感知兜底；显式目标解析失败必须直接 NO_TARGET，
+        # 绝不能把评论改投到浏览器当前标签页。
+        if oid is None and not target:
+            tab = self._ext_tab(force=True)
             if tab:
                 parsed = bili.parse_bili_url(tab.get("url", ""), tab.get("title", ""))
                 if isinstance(parsed, dict) and parsed.get("kind") == "video" and parsed.get("bvid"):
@@ -2894,13 +2896,18 @@ class BiliViewerPlugin(NekoPluginBase):
         except bili.BiliError as exc:
             kind_name = "video" if type_id == 1 else ("live" if type_id == 11 else f"type{type_id}")
             if _write_outcome_ambiguous(exc):
-                # v0.9.40：评论 POST 超时/网络中断可能已受理，保留 120 秒占用，禁止立刻重试
+                # 小号有本地 120 秒预占；主账号没有该窗口，文案不能谎称“已保留”。
+                detail = (
+                    "评论请求超时/网络中断，可能已发出但未确认；已保留限流窗口，严禁立刻重发。"
+                    if account == "yui"
+                    else "评论请求超时/网络中断，可能已发出但未确认；请先人工核实评论区，严禁立刻重发。"
+                )
                 _logger.warning(
                     "comment MAYBE_SENT kind=%s target=%s:%s account=%s code=%s",
                     kind_name, type_id, oid, account, exc.code,
                 )
                 return {
-                    "output": "评论请求超时/网络中断，可能已发出但未确认；已保留限流窗口，严禁立刻重发。",
+                    "output": detail,
                     "is_error": True,
                     "error": "COMMENT_MAYBE_SENT",
                     "meta": {"agent": {"delivery": "silent"}},
@@ -4623,71 +4630,71 @@ class BiliViewerPlugin(NekoPluginBase):
         return float(getattr(self, "_ext_last_seen_ts", 0) or 0)
 
     def _assign_cookie(self, cookie: str, at: int, source: str) -> dict:
-        """并发安全的账号归位入口（v0.9.39 深审 L2）。"""
-        with _ACCOUNTS_LOCK:
-            return self._assign_cookie_locked(cookie, at, source)
-
-    def _assign_cookie_locked(self, cookie: str, at: int, source: str) -> dict:
-        """按登录顺序把 Cookie 归位到账号（v0.7.10）：第一个登录=大号(main)，第二个登录=小号(yui)。
-
-        - 与当前大号同一 uid → 刷新大号（更新时间戳）；
-        - 与当前小号同一 uid → 刷新小号；
-        - 尚未有大号 → 归为大号并持久化（main_cookie.txt）；
-        - 已有大号且 uid 不同 → 归为小号并持久化（yui_cookie.txt，默认操作账号）；
-        - 大小号都已存在且新 uid 都不匹配 → 拒绝（提示先说明替换哪个角色）。
-        结果同步写入环境变量（运行期生效）+ accounts.json（角色映射记忆）。
-        """
+        """先在全局账号锁外验真，再串行提交账号归位与落盘。"""
         ts = float(at) if at and at > 0 else time.time()
         self._ext_last_seen_ts = ts
         cookie = str(cookie or "").strip()
         if "SESSDATA=" not in cookie:
             return {"ok": True, "bound": False, "detail": "扩展已推送，但浏览器中没有有效 B站登录态"}
-        uid = bili.cookie_uid(cookie)
-        if uid is None:
-            # v0.9.38：uid 解析失败时绝不猜测角色，避免把新 Cookie 当小号覆盖原绑定。
+        declared_uid = bili.cookie_uid(cookie)
+        if declared_uid is None:
             return {"ok": True, "bound": False, "detail": "收到 Cookie，但 uid 解析失败，未写入/未覆盖任何账号；请刷新 B站 登录态后重试"}
-        # v0.9.40：落盘前用 nav 验真，服务端 uid 必须与 Cookie 里声明的 DedeUserID 一致。
-        # 旧逻辑只查 SESSDATA= 并解析 DedeUserID，本机进程伪造一份带 YUI uid 的假 Cookie
-        # 就能覆盖小号登录态。验真结果按 Cookie 缓存 10 分钟，避免扩展每次心跳都打 nav。
-        cache = getattr(self, "_cookie_verify_cache", None)
-        if cache is None:
-            cache = {}
-            self._cookie_verify_cache = cache
-        now = time.time()
-        verified = cache.get(cookie)
-        if not verified or now - verified[1] >= 600.0:
-            try:
-                verified = (int(bili.validate_cookie(cookie)), now)
-            except bili.BiliError as exc:
-                return {
-                    "ok": True,
-                    "bound": False,
-                    "detail": f"Cookie 未通过 B站 nav 验真（{exc.code}），未写入/未覆盖任何账号；请刷新 B站 登录态后重试",
-                }
-            cache[cookie] = verified
-            if len(cache) > 32:
-                # 只保留最近 32 份验真结果，防止长时间运行内存无界增长
-                for old in sorted(cache, key=lambda k: cache[k][1])[:-32]:
-                    cache.pop(old, None)
-        if int(verified[0]) != int(uid):
+        verifier = getattr(self, "_cookie_verifier", None)
+        if verifier is None:
+            verifier = cookie_validation.CookieVerifier(
+                lambda value, timeout=6.0: bili.validate_cookie(value, timeout=timeout)
+            )
+            self._cookie_verifier = verifier
+        # 网络、重试 sleep、单飞等待全部发生在 _ACCOUNTS_LOCK 外。
+        verified = verifier.verify(cookie)
+        if verified.status == cookie_validation.UNAVAILABLE:
             return {
                 "ok": True,
                 "bound": False,
+                "verification": "unavailable",
+                "detail": f"暂时无法完成 B站 nav 验真（{verified.code}），未写入/未覆盖任何账号；这不代表 Cookie 已失效，请稍后重试或人工核实",
+            }
+        if verified.status != cookie_validation.VERIFIED:
+            return {
+                "ok": True,
+                "bound": False,
+                "verification": "rejected",
+                "detail": f"Cookie 未通过 B站 nav 验真（{verified.code or 'BAD_COOKIE'}），未写入/未覆盖任何账号；请刷新 B站 登录态后重试",
+            }
+        if int(verified.uid or 0) != int(declared_uid):
+            return {
+                "ok": True,
+                "bound": False,
+                "verification": "rejected",
                 "detail": "Cookie 未通过 B站 nav 验真（服务端 uid 与 DedeUserID 不一致），未写入/未覆盖任何账号",
             }
+        with _ACCOUNTS_LOCK:
+            return self._assign_cookie_locked(cookie, at, source, int(verified.uid))
+
+    def _assign_cookie_locked(self, cookie: str, at: int, source: str, verified_uid: int) -> dict:
+        """提交已完成验真的 Cookie；调用方必须持有 _ACCOUNTS_LOCK。
+
+        第一个登录=大号(main)，第二个=小号(yui)；两个角色都已绑定且 uid 不匹配时拒绝。
+        本方法只做本地提交，绝不执行网络验真。
+        """
+        self._ext_last_seen_ts = float(at) if at and at > 0 else time.time()
+        uid = int(verified_uid)
         accounts = _read_accounts()
         main_uid = accounts.get("main", {}).get("uid")
         yui_uid = accounts.get("yui", {}).get("uid")
         now = time.time()
         if uid is not None and uid == main_uid:
-            # 刷新大号
+            # 刷新大号：accounts 成为权威角色表后，_cookie 会按 uid 读文件，
+            # 因此这里必须同步更新文件，不能只更新 env 而留下旧登录态。
+            bili.write_main_cookie_file(cookie)
             accounts["main"] = {"uid": uid, "bound_at": now}  # v0.9.24：同步 uid 防错位
             _write_accounts(accounts)
             _set_env("BILI_COOKIE", cookie)
             self._cookie_source = source
             return {"ok": True, "bound": True, "detail": "已刷新大号（main）登录态"}
         if uid is not None and uid == yui_uid:
-            # 刷新小号
+            # 刷新小号同样同步持久化，避免权威角色映射读回旧文件。
+            bili.write_yui_cookie_file(cookie)
             accounts["yui"] = {"uid": uid, "bound_at": now}  # v0.9.24：同步 uid 防错位
             _write_accounts(accounts)
             _set_env("BILI_YUI_COOKIE", cookie)

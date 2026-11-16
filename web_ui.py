@@ -62,6 +62,7 @@ _CMD_LOCK = threading.Lock()
 _COOKIE_DIR = os.path.dirname(os.path.abspath(__file__))
 _COOKIE_FILES = ("main_cookie.txt", "yui_cookie.txt")
 _COOKIE_KEEP = ("SESSDATA=", "bili_jct=", "DedeUserID=", "DedeUserName=", "bili_ticket=", "buvid3=", "buvid4=")
+_COOKIE_REFRESH_LOCKS = {name: threading.RLock() for name in _COOKIE_FILES}
 
 
 def _core_cookie(cookie: str) -> str:
@@ -73,50 +74,66 @@ def _core_cookie(cookie: str) -> str:
     return "; ".join(kept)
 
 
-def _refresh_ext_cookie(cookie: str) -> dict:
-    """扩展推送的有效登录态按 uid 刷新对应 cookie 文件（原子写）。
+def _cookie_target_for_uid(uid: str) -> str | None:
+    """accounts.json 是角色权威来源；仅无有效记录时兼容旧 role.json。"""
+    try:
+        with open(os.path.join(_COOKIE_DIR, "accounts.json"), encoding="utf-8") as fh:
+            accounts = json.load(fh) or {}
+    except (OSError, ValueError):
+        accounts = {}
+    roles: dict[str, str] = {}
+    for role, filename in (("main", "main_cookie.txt"), ("yui", "yui_cookie.txt")):
+        record = accounts.get(role) if isinstance(accounts, dict) else None
+        account_uid = record.get("uid") if isinstance(record, dict) else None
+        if account_uid is not None:
+            roles[str(account_uid)] = filename
+    if roles:
+        return roles.get(str(uid))
+    # 兼容未迁移旧安装：只有 accounts 没有任何角色记录时才读取 role.json。
+    try:
+        with open(os.path.join(_COOKIE_DIR, "role.json"), encoding="utf-8") as fh:
+            legacy = json.load(fh) or {}
+        role = str(legacy.get(str(uid)) or "")
+        if role in ("main", "yui"):
+            return f"{role}_cookie.txt"
+    except (OSError, ValueError):
+        pass
+    for filename in _COOKIE_FILES:
+        try:
+            if f"DedeUserID={uid}" in bili._read_cookie_file(os.path.join(_COOKIE_DIR, filename)):
+                return filename
+        except (OSError, bili.CookieDecryptError):
+            continue
+    return None
 
-    命中规则：role.json 声明的角色 uid 优先；其次按现有 cookie 文件里 DedeUserID 匹配；
-    全新 uid（两个文件都没有）不动——留给框架首次落盘逻辑。返回 {"uid","file","updated"}。
-    """
+
+def _refresh_ext_cookie(cookie: str) -> dict:
+    """按权威角色刷新 Cookie；每角色串行，底层唯一临时文件原子替换。"""
     if not cookie or "SESSDATA=" not in cookie:
         return {"updated": False}
-    m = re.search(r"DedeUserID=(\d+)", cookie)
-    if not m:
+    match = re.search(r"DedeUserID=(\d+)", cookie)
+    if not match:
         return {"updated": False}
-    uid = m.group(1)
+    uid = match.group(1)
     core = _core_cookie(cookie)
     if not core or "SESSDATA=" not in core:
         return {"updated": False}
-    target = None
-    try:
-        roles = json.load(open(os.path.join(_COOKIE_DIR, "role.json"), encoding="utf-8")) or {}
-        if str(roles.get(uid)) == "yui":
-            target = "yui_cookie.txt"
-        elif str(roles.get(uid)) == "main":
-            target = "main_cookie.txt"
-    except (OSError, ValueError):
-        roles = {}
-    if not target:
-        for fn in _COOKIE_FILES:
-            p = os.path.join(_COOKIE_DIR, fn)
-            try:
-                if f"DedeUserID={uid}" in bili._read_cookie_file(p):
-                    target = fn
-                    break
-            except OSError:
-                continue
+    target = _cookie_target_for_uid(uid)
     if not target:
         return {"updated": False}
-    dst = os.path.join(_COOKIE_DIR, target)
-    try:
-        # 与插件统一走加密落盘，避免扩展刷新时又写回明文
-        bili._write_cookie_file(dst, core)
-        _logger.info("ext cookie refreshed: uid=%s file=%s len=%d", uid, target, len(core))
-        return {"updated": True, "uid": uid, "file": target}
-    except OSError as exc:
-        _logger.warning("ext cookie refresh failed: %s", exc)
-        return {"updated": False}
+    with _COOKIE_REFRESH_LOCKS[target]:
+        # 等锁期间角色可能已变化，写前重新解析，避免写进旧角色文件。
+        target = _cookie_target_for_uid(uid)
+        if not target:
+            return {"updated": False}
+        dst = os.path.join(_COOKIE_DIR, target)
+        try:
+            bili._write_cookie_file(dst, core)
+            _logger.info("ext cookie refreshed: file=%s len=%d", target, len(core))
+            return {"updated": True, "uid": uid, "file": target}
+        except OSError as exc:
+            _logger.warning("ext cookie refresh failed: file=%s error=%s", target, exc)
+            return {"updated": False}
 
 
 def get_recent_danmaku(limit: int = 40) -> list:
@@ -235,6 +252,11 @@ setInterval(refresh, 3000); refresh();
 """
 
 
+def _secure_equal(supplied: object, expected: object) -> bool:
+    """统一 UTF-8 bytes 比较，非 ASCII token 只返回 False，不抛 TypeError。"""
+    return secrets.compare_digest(str(supplied).encode("utf-8"), str(expected).encode("utf-8"))
+
+
 class _PanelHandler(BaseHTTPRequestHandler):
     """面板 HTTP 处理器；绑定/扩展回调由 BindPanel 挂到 server 实例属性上注入。"""
 
@@ -256,14 +278,26 @@ class _PanelHandler(BaseHTTPRequestHandler):
         self._send(code, "application/json; charset=utf-8", json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
     def _read_json_body(self, max_len: int = 65536) -> dict:
-        """读取并解析 JSON 请求体；超过 max_len 直接视为空（防内存/磁盘滥用）。
+        """读取并解析 JSON；超限返回空对象，并有界排空请求体避免 Windows RST。
 
-        extension-shot 通道（浏览器截屏 base64）与 extension-dom（页面 DOM 实况）
-        的负载可能远超默认 64KB，调用方按端点传入更大上限；其余端点保持默认小上限。
+        超限不分配与声明长度等大的缓冲区，只用小块读取并丢弃。极端大的请求
+        不继续消耗带宽，直接关闭连接；正常的略超限扩展请求仍能收到完整响应，
+        不会因服务端带着未读请求体关闭 socket 而让客户端拿到 WinError 10053。
         """
         try:
             length = int(self.headers.get("Content-Length") or 0)
-            if length <= 0 or length > max_len:
+            if length <= 0:
+                return {}
+            if length > max_len:
+                if length <= _EXT_SHOT_MAX_BYTES:
+                    remaining = length
+                    while remaining:
+                        chunk = self.rfile.read(min(remaining, 16 * 1024))
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
+                else:
+                    self.close_connection = True
                 return {}
             return json.loads(self.rfile.read(length).decode("utf-8", "replace"))
         except Exception:
@@ -325,17 +359,17 @@ class _PanelHandler(BaseHTTPRequestHandler):
         if not expected:
             return False
         supplied = str(self.headers.get(_PANEL_TOKEN_HEADER) or "")
-        if supplied and secrets.compare_digest(supplied, expected):
+        if supplied and _secure_equal(supplied, expected):
             return True
         for part in str(self.headers.get("Cookie") or "").split(";"):
             name, sep, value = part.strip().partition("=")
-            if sep and name == _PANEL_COOKIE and secrets.compare_digest(value, expected):
+            if sep and name == _PANEL_COOKIE and _secure_equal(value, expected):
                 return True
         return False
 
     def _bootstrap_ok(self, supplied: str) -> bool:
         expected = str(getattr(self.server, "bootstrap_token", "") or "")
-        return bool(expected) and bool(supplied) and secrets.compare_digest(supplied, expected)
+        return bool(expected) and bool(supplied) and _secure_equal(supplied, expected)
 
     def _extension_path(self) -> bool:
         return self.path.startswith(_EXTENSION_API_PREFIXES)
@@ -534,15 +568,14 @@ class _PanelHandler(BaseHTTPRequestHandler):
                 room = str(body.get("room", "") or "")[:20]
                 if text:
                     _DANMAKU_BUF.append((sender, text, int(body.get("at") or 0) or time.time(), room))
-                    low = text.lower()
-                    if any(n in low for n in _YUI_NICKNAMES):
+                    mentioned = any(n in text.lower() for n in _YUI_NICKNAMES)
+                    if mentioned:
                         _MENTION_NOTIFY["at"] = time.time()
                         _MENTION_NOTIFY["text"] = text
                         _MENTION_NOTIFY["sender"] = sender
                         _MENTION_NOTIFY["room"] = room
-                        _logger.info("ext danmaku: MENTION sender=%s room=%s text=%s", sender, room, text)
-                    else:
-                        _logger.info("ext danmaku: room=%s sender=%s text=%s", room, sender, text)
+                    # INFO 只留元数据：弹幕原文与发送者昵称不进入持久日志。
+                    _logger.info("ext danmaku: room=%s mention=%s text_len=%d", room, mentioned, len(text))
                 payload = {"ok": True}
             except Exception as exc:
                 payload = {"ok": False, "detail": f"扩展弹幕推送处理异常：{exc}"}

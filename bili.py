@@ -1,11 +1,11 @@
-"""B站看板 — 哔哩哔哩只读浏览 API 层（纯标准库实现）。
+"""B站看板 — 哔哩哔哩浏览与账号互动 API 层（核心为纯标准库实现）。
 
 覆盖：视频信息/分P/标签、弹幕（seg.so protobuf，XML 兜底）、CC 字幕、AI 概要、
-评论、搜索、直播信息、直播实时弹幕（标准库手写 WebSocket）、UP主信息与视频列表。
+评论、搜索、直播信息、直播实时弹幕（标准库手写 WebSocket）、UP主信息与视频列表，
+以及需用户明确授权的稿件、评论、弹幕、动态等写操作。
 
-安全边界：只读公开内容；不登录、不发评论/弹幕/动态、不下载视频文件；
-可选用环境变量 BILI_COOKIE（完整 Cookie 字符串，含 SESSDATA）提升部分
-接口的可用性，但插件绝不写入或修改任何账号数据。
+Cookie 用于对应 B站接口鉴权；绑定流程会把 main/yui Cookie 持久化到本地文件，
+Windows 使用 DPAPI，其他平台显式标记明文降级并尽量限制文件权限。
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ import re
 import socket
 import ssl
 import struct
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -67,7 +68,7 @@ class BiliError(Exception):
         self.code = code
 
 
-_AMBIGUOUS_WRITE_CODES = ("TIMEOUT", "NETWORK")
+_AMBIGUOUS_WRITE_CODES = ("TIMEOUT", "NETWORK", "WRITE_OUTCOME_UNKNOWN")
 
 
 def write_outcome_ambiguous(exc: BaseException) -> bool:
@@ -216,11 +217,17 @@ def _read_cookie_file(path: str) -> str:
 
 
 def _write_cookie_file(path: str, cookie: str) -> None:
-    """原子写入 + 尽量收紧权限；内容按平台能力加密。"""
+    """唯一临时文件 + 原子替换；多扩展/多线程不会争用同一个 .tmp。"""
     data = _encode_cookie_file(cookie)
-    tmp = f"{path}.tmp"
+    tmp = ""
     try:
-        with open(tmp, "w", encoding="utf-8") as fh:
+        fd, tmp = tempfile.mkstemp(
+            prefix=f".{os.path.basename(path)}.",
+            suffix=".tmp",
+            dir=os.path.dirname(os.path.abspath(path)),
+            text=True,
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(data)
         try:
             os.chmod(tmp, 0o600)
@@ -228,10 +235,11 @@ def _write_cookie_file(path: str, cookie: str) -> None:
             pass
         os.replace(tmp, path)
     except OSError:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
         raise
 
 
@@ -354,10 +362,30 @@ def cookie_uid(cookie: str) -> int | None:
         return None
 
 
-_ROLE_FILE = "role.json"  # 角色映射：{"uid": "yui"|"main"}——用户明确声明"某 uid 是小号/大号"时生效（v0.7.30）
+_ROLE_FILE = "role.json"  # 旧版 uid→role 映射；accounts.json 是当前权威来源
+_ACCOUNTS_FILE = "accounts.json"
+
+
+def _accounts_role_map() -> dict[str, str] | None:
+    """读取权威角色表；没有任何有效 accounts 记录时才让调用方回退旧格式。"""
+    try:
+        with open(os.path.join(_YUI_COOKIE_DIR, _ACCOUNTS_FILE), "r", encoding="utf-8") as fh:
+            accounts = json.load(fh) or {}
+    except (OSError, ValueError):
+        return None
+    roles: dict[str, str] = {}
+    for role in ("main", "yui"):
+        record = accounts.get(role) if isinstance(accounts, dict) else None
+        uid = record.get("uid") if isinstance(record, dict) else None
+        if uid is not None and str(uid).isdigit():
+            roles[str(uid)] = role
+    return roles or None
 
 
 def _load_roles() -> dict:
+    authoritative = _accounts_role_map()
+    if authoritative is not None:
+        return authoritative
     try:
         with open(os.path.join(_YUI_COOKIE_DIR, _ROLE_FILE), "r", encoding="utf-8") as fh:
             data = json.load(fh) or {}
@@ -366,9 +394,39 @@ def _load_roles() -> dict:
         return {}
 
 
+def _atomic_json_write(path: str, data: dict) -> None:
+    fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=os.path.dirname(path), text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def _save_roles(roles: dict) -> None:
-    with open(os.path.join(_YUI_COOKIE_DIR, _ROLE_FILE), "w", encoding="utf-8") as fh:
-        json.dump(roles, fh, ensure_ascii=False, indent=2)
+    """同时更新权威 accounts 与旧 role 文件，避免两个数据源长期漂移。"""
+    accounts_path = os.path.join(_YUI_COOKIE_DIR, _ACCOUNTS_FILE)
+    try:
+        with open(accounts_path, "r", encoding="utf-8") as fh:
+            accounts = json.load(fh) or {}
+    except (OSError, ValueError):
+        accounts = {}
+    for uid, role in roles.items():
+        if role not in ("main", "yui") or not str(uid).isdigit():
+            continue
+        for other in ("main", "yui"):
+            record = accounts.get(other) or {}
+            if other != role and str(record.get("uid")) == str(uid):
+                accounts.pop(other, None)
+        previous = accounts.get(role) or {}
+        accounts[role] = {"uid": int(uid), "bound_at": previous.get("bound_at", time.time())}
+    _atomic_json_write(accounts_path, accounts)
+    _atomic_json_write(os.path.join(_YUI_COOKIE_DIR, _ROLE_FILE), roles)
 
 
 def _cookie_for_uid(uid: int) -> str:
@@ -458,24 +516,25 @@ def _visitor_cookie() -> str:
 
 
 def _open_with_retry(req, timeout: float, retries: int = 3, jitter: bool = False):
-    """urlopen 网络层自动重试（防拦截加固，v0.7.11）。
+    """urlopen 网络层自动重试；非幂等请求在传输中断时返回结果未知。
 
-    - jitter=True（写操作默认）：每次调用前随机等待 0.3~1.2s，让 YUI 自主发起的高频
-      写请求（弹幕/评论/动态/投稿）时间分布更自然，降低被 B站 风控识别为机器的概率；
-    - 网络错误/超时/HTTP 5xx：指数退避重试 retries 次（基数 0.8/1.8/3.6s ± 随机抖动）；
-    - HTTP 4xx 与业务错误码不重试：避免把同一写操作重复提交放大风险。
+    - jitter=True（写操作默认）：每次调用前随机等待 0.3~1.2s；
+    - GET 等只读请求的网络错误/超时/HTTP 5xx 按 retries 退避重试；
+    - POST 调用方必须传 retries=0，RemoteDisconnected/BadStatusLine/OSError 等
+      也绝不重试。这些异常可能发生在请求已发出之后，统一标 WRITE_OUTCOME_UNKNOWN，
+      上层据此保留限流预占并要求人工核实，而不是当成“确定未发出”。
     """
     if jitter:
         time.sleep(random.uniform(0.3, 1.2))
     last: BaseException | None = None
+    is_write = str(req.get_method() or "GET").upper() not in ("GET", "HEAD")
     for i in range(retries + 1):
         if i:
             time.sleep(random.uniform(0.5, 1.5) * _RETRY_BASE[i - 1])
         try:
             return urllib.request.urlopen(req, timeout=timeout)
         except urllib.error.HTTPError as exc:
-            # HTTP 412/429 是 B站 风控拦截，不能降级成普通 HTTP_ERROR：
-            # 上层按 RISK_CONTROL 提示等待/换登录态，避免把风控当网络故障盲目重试。
+            # HTTP 412/429 是 B站 风控拦截，不能降级成普通 HTTP_ERROR。
             if exc.code == 412:
                 raise BiliError("触发风控限制（HTTP 412），请等待 1-2 分钟后再试", "RISK_CONTROL") from exc
             if exc.code == 429:
@@ -494,6 +553,18 @@ def _open_with_retry(req, timeout: float, retries: int = 3, jitter: bool = False
                 last = exc
                 continue
             raise BiliError("请求超时", "TIMEOUT") from exc
+        except (http.client.HTTPException, ConnectionError, OSError) as exc:
+            # http.client 的半包/坏状态行以及 reset/abort 等不属于 URLError，
+            # 旧实现会让裸异常穿透，绕过“可能已发送”的限流保留逻辑。
+            if i < retries:
+                last = exc
+                continue
+            if is_write:
+                raise BiliError(
+                    "写入请求结果未知：连接在收到完整响应前中断，请求可能已发出；请先人工核实，严禁立刻重发",
+                    "WRITE_OUTCOME_UNKNOWN",
+                ) from exc
+            raise BiliError(f"网络连接中断：{exc}", "NETWORK") from exc
     raise BiliError(f"网络错误：{last}", "NETWORK") from last
 
 
@@ -524,11 +595,12 @@ def _http_get(
     timeout: float = _TIMEOUT,
     account: str = "main",
     cookie_override: str | None = None,
+    retries: int = 3,
 ) -> dict:
     """GET JSON 接口；返回解析后的 dict。
 
     cookie_override：用调用方给的一次性 Cookie 发请求，不读环境变量/账号文件。
-    用于扩展推送落盘前的 nav 验真——验真前绝不能把待验证 Cookie 写进运行态。
+    retries 默认保持原行为；Cookie 验真显式降为 0，由独立编排层只做一次短重试。
     """
     if params:
         url = url + "?" + urllib.parse.urlencode(params)
@@ -542,9 +614,8 @@ def _http_get(
         cookie = _visitor_cookie()
     if cookie:
         req.add_header("Cookie", cookie)
-    # _open_with_retry 已把 HTTP/网络异常统一转成 BiliError，这里不再重复捕获
-    # （旧版 except urllib.error.HTTPError 是死代码：异常在 _open_with_retry 内就被转换了）。
-    with _open_with_retry(req, timeout) as resp:
+    # _open_with_retry 已把 HTTP/网络异常统一转成 BiliError，这里不再重复捕获。
+    with _open_with_retry(req, timeout, retries=retries) as resp:
         raw = _read_response(resp, timeout)
     try:
         data = json.loads(raw)
@@ -1573,8 +1644,9 @@ def _http_post(url: str, form: dict, timeout: float = _TIMEOUT, account: str = "
         "Content-Type": "application/x-www-form-urlencoded",
         "Origin": "https://www.bilibili.com",
     })
-    if _cookie(account):
-        req.add_header("Cookie", _cookie(account))
+    cookie = _cookie(account)
+    if cookie:
+        req.add_header("Cookie", cookie)
     try:
         # 写操作绝不重试（v0.9.39 深审 S2）：POST 已经可能被服务端受理，
         # 重试 5xx/超时会重复写（弹幕、投币、私信都是不可逆副作用）。
@@ -1618,6 +1690,7 @@ def validate_cookie(cookie: str, timeout: float = 6.0) -> int:
         timeout=timeout,
         account="main",
         cookie_override=cookie,
+        retries=0,
     ).get("data") or {}
     mid = data.get("mid")
     try:
@@ -2374,8 +2447,9 @@ def _http_post_json(
         "Content-Type": "application/json; charset=utf-8",
         "Origin": "https://t.bilibili.com",
     })
-    if _cookie(account):
-        req.add_header("Cookie", _cookie(account))
+    cookie = _cookie(account)
+    if cookie:
+        req.add_header("Cookie", cookie)
     try:
         # 写操作绝不重试（v0.9.39 深审 S2）：POST 已经可能被服务端受理，
         # 重试 5xx/超时会重复写（弹幕、投币、私信都是不可逆副作用）。
@@ -2741,8 +2815,9 @@ def _http_multipart(url: str, fields: dict, files: dict, account: str = "yui", t
         "Content-Type": f"multipart/form-data; boundary={boundary}",
         "Content-Length": str(len(body)),
     })
-    if _cookie(account):
-        req.add_header("Cookie", _cookie(account))
+    cookie = _cookie(account)
+    if cookie:
+        req.add_header("Cookie", cookie)
     try:
         # 写操作绝不重试（v0.9.39 深审 S2）：POST 已经可能被服务端受理，
         # 重试 5xx/超时会重复写（弹幕、投币、私信都是不可逆副作用）。

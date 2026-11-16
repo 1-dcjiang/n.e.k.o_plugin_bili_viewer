@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
 import os
 import socket
@@ -71,15 +72,42 @@ _KEEP_NAMES = (
 # ══════════ 极简 WebSocket 客户端（仅客户端帧 + 文本） ══════════
 
 
+def _loopback_ws_target(ws_url: str) -> tuple[str, int, str]:
+    """严格解析 CDP WebSocket，拒绝外网、userinfo 与前缀欺骗输入。"""
+    try:
+        parsed = urllib.parse.urlsplit(str(ws_url or ""))
+        if parsed.scheme.lower() not in ("ws", "wss") or parsed.username or parsed.password:
+            raise ValueError("unsupported websocket URL")
+        host = str(parsed.hostname or "").rstrip(".").lower()
+        port = parsed.port or (443 if parsed.scheme.lower() == "wss" else 80)
+    except (TypeError, ValueError) as exc:
+        raise OSError("invalid CDP websocket URL") from exc
+    if host == "localhost":
+        try:
+            resolved = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+            addresses = {ipaddress.ip_address(item[4][0]) for item in resolved}
+        except (OSError, ValueError) as exc:
+            raise OSError("cannot resolve loopback CDP host") from exc
+        if not addresses or any(ip not in (ipaddress.ip_address("127.0.0.1"), ipaddress.ip_address("::1")) for ip in addresses):
+            raise OSError("CDP websocket host is not loopback")
+    else:
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError as exc:
+            raise OSError("CDP websocket host is not loopback") from exc
+        if ip not in (ipaddress.ip_address("127.0.0.1"), ipaddress.ip_address("::1")):
+            raise OSError("CDP websocket host is not loopback")
+    path = (parsed.path or "/") + ("?" + parsed.query if parsed.query else "")
+    return host, int(port), path
+
+
 def _ws_connect(ws_url: str, timeout: float = 5.0):
-    u = ws_url.replace("ws://", "http://").replace("wss://", "https://")
-    parsed = urllib.parse.urlsplit(u)
-    host, port = parsed.hostname, parsed.port or 80
-    path = parsed.path + ("?" + parsed.query if parsed.query else "")
+    host, port, path = _loopback_ws_target(ws_url)
     sock = socket.create_connection((host, port), timeout=timeout)
     key = base64.b64encode(os.urandom(16)).decode()
+    host_header = f"[{host}]" if ":" in host else host
     req = (
-        f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\n"
+        f"GET {path} HTTP/1.1\r\nHost: {host_header}:{port}\r\nUpgrade: websocket\r\n"
         f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\n"
         "Sec-WebSocket-Version: 13\r\nOrigin: http://localhost\r\n\r\n"
     )
