@@ -5,7 +5,7 @@ description = "让 YUI 浏览、感知并管理哔哩哔哩：搜索视频/直�
 short_description = "v0.9.41 增量深审：① POST 连接中断统一为 WRITE_OUTCOME_UNKNOWN，绝不自动重试，高危写操作保留限流预占；显式评论目标失败不再改投当前标签页。② Cookie 验真拆分为独立编排模块：成功/拒绝/暂时失败分级缓存、一次短重试、同 Cookie 单飞、账号锁外网络等待；accounts.json 成为角色权威来源，账号刷新与双角色 Cookie 文件同步原子落盘。③ 限流状态损坏或不可写时 fail-closed；弹幕连发与社交状态共用路径规则。④ 本机面板支持非 ASCII 鉴权输入安全拒绝、超限请求体有界排空；CDP WebSocket 严格限制真实 loopback；弹幕日志去除昵称和原文。新增 35 项离线回归，完整 387 项测试通过；真实 B站、Cookie、CDP、扩展实机与写操作未执行。"
 
 keywords = ["bilibili", "哔哩哔哩", "B站", "视频", "弹幕", "评论", "直播", "字幕", "AI概要", "UP主", "搜索", "bili", "danmaku", "live", "感知", "now_watching", "稿件", "发弹幕", "写评论", "动态", "投稿", "独立小号", "YUI运营", "自主行动", "后台静默", "不抢界面", "同步行动", "当前观看", "CDP", "自动绑定", "cookie", "浏览器扩展", "bili-bridge", "bili-bridge-chrome", "接入桥", "直连", "实时监控", "标签页感知", "Edge扩展", "360浏览器", "360极速", "360安全", "chrome扩展", "桌面投放", "zip压缩包", "三扩展", "wbi签名", "并发", "原子占用", "防重复", "大号小号", "默认小号", "默认账号", "account", "双账号", "绑定顺序", "分清大小号", "交换角色", "bili_accounts", "bili_set_roles", "accounts.json", "main_cookie", "收件箱", "私信", "投币", "点赞", "收藏", "三连", "每日上限", "护栏", "审计", "限流", "bili-cli", "inbox", "dm", "coin", "favorite", "triple", "榜单", "每周必看", "入站必刷", "创作数据", "直播间观众", "活跃观众", "关注观众", "live_viewers", "人气", "去重", "DYN_DUP", "DM_DUP", "指令桥", "command_doubao", "doubao_bridge", "命令豆包", "指令原文", "INSTRUCTION_AS_CONTENT"]
-version = "0.9.41"
+version = "0.9.42"
 type = "plugin"
 entry = "plugin.plugins.bili_viewer:BiliViewerPlugin"
 
