@@ -219,6 +219,16 @@
 > `NEKO_COOKIE_PLAIN_V1:` 标记而非裸明文，解密失败报 `COOKIE_DECRYPT_FAILED`
 > 而不是伪装成未登录。
 > 已知边界：私信三态/扩展开关仍以单测为主；扩展换固定 ID 后需用户重载一次。
+> v0.9.45 联锁复查修复（411 项离线测试通过）：
+> ① `write_main_cookie_file` / `write_yui_cookie_file` 新增 `strict` 参数：默认继续保持
+>    “写失败只 warning 不致命”（绑定流程依赖此契约），需要事务语义的调用方必须传
+>    `strict=True` 才会抛出。v0.9.44 的互换保护假设写函数会抛 `OSError`，但实现内部
+>    自己吞掉了异常，导致 `COOKIE_WRITE_FAILED` 分支与“回滚成功”判定在真实环境永远是死路。
+> ② `_swap_cookie_files` / `_restore_cookie_files` 改走 strict 变体：第二笔写失败会被真实的
+>    `OSError` 打断并按原值回滚；回滚本身失败返回 False，不再谎报“已按原值回滚”。
+> ③ 新增 `tests/test_deep_review_0945.py`（4 项）：用**真实写函数**、只让最底层
+>    `_write_cookie_file` 失败，覆盖半交换回滚、回滚失败、默认非致命契约与端到端错误码。
+
 > v0.9.44 增量深审修复（407 项离线测试通过）：
 > ① 读响应统一：`_fetch_raw`（弹幕 seg.so）与 `video_subtitle` 的 `resp.read()` 改走
 >    `_read_response`；`_open_with_retry` 已把 HTTP/网络异常转成 `BiliError`，两处残留的

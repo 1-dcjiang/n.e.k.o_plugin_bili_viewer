@@ -325,10 +325,14 @@ def _main_cookie_from_file() -> str:
     return content
 
 
-def write_main_cookie_file(cookie: str) -> None:
+def write_main_cookie_file(cookie: str, *, strict: bool = False) -> None:
     """持久化主账号 Cookie 到插件目录 main_cookie.txt（绑定流程调用，v0.7.10）。
 
     不手动清缓存：mtime 已变化，下次读取自然重读文件。
+
+    v0.9.45：新增 ``strict``。默认仍按“写失败不致命”留痕后继续；需要事务语义的
+    调用方（大小号互换）必须传 ``strict=True``，否则失败在这里被吞掉，上层永远
+    看不到异常，回滚分支就成了装饰。
     """
     p = os.path.join(_YUI_COOKIE_DIR, _MAIN_COOKIE_FILE)
     try:
@@ -336,10 +340,15 @@ def write_main_cookie_file(cookie: str) -> None:
     except OSError as exc:
         # 写失败不致命（env/配置层仍可生效），但必须留痕，不能静默吞掉。
         _logger.warning("persist main cookie failed: %s", exc)
+        if strict:
+            raise
 
 
-def write_yui_cookie_file(cookie: str) -> None:
-    """持久化小号 Cookie 到插件目录 yui_cookie.txt（第二个登录的账号自动归位，v0.7.10）。"""
+def write_yui_cookie_file(cookie: str, *, strict: bool = False) -> None:
+    """持久化小号 Cookie 到插件目录 yui_cookie.txt（第二个登录的账号自动归位，v0.7.10）。
+
+    v0.9.45：``strict=True`` 时写失败向上抛，供大小号互换回滚使用。
+    """
     global _yui_cookie_file_cache
     _yui_cookie_file_cache = (0.0, "")
     p = os.path.join(_YUI_COOKIE_DIR, _YUI_COOKIE_FILE)
@@ -347,6 +356,8 @@ def write_yui_cookie_file(cookie: str) -> None:
         _write_cookie_file(p, cookie)
     except OSError as exc:
         _logger.warning("persist yui cookie failed: %s", exc)
+        if strict:
+            raise
 
 
 def cookie_uid(cookie: str) -> int | None:

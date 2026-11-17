@@ -184,11 +184,11 @@ def test_set_roles_half_swap_failure_rolls_back(monkeypatch, tmp_path):
     calls: list[tuple[str, str]] = []
     accounts_writes: list[dict] = []
 
-    def yui_writer(cookie):
+    def yui_writer(cookie, **_kw):
         calls.append(("yui", cookie))
         files["yui"] = cookie
 
-    def main_writer(cookie):
+    def main_writer(cookie, **_kw):
         calls.append(("main", cookie))
         # 交换的第二笔失败：此时 yui_cookie.txt 已经是主号 Cookie。
         if cookie == YUI_COOKIE:

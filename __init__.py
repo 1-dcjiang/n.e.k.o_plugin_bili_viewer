@@ -330,14 +330,18 @@ def _accounts_write_failed() -> dict:
 
 
 def _restore_cookie_files(main_cookie: str, yui_cookie: str) -> bool:
-    """按给定原值写回两份账号 Cookie 文件；返回是否两份都写回成功。"""
+    """按给定原值写回两份账号 Cookie 文件；返回是否两份都写回成功。
+
+    v0.9.45：写函数默认把 OSError 吞成一条 warning，这里必须走 strict 变体，
+    否则“回滚失败”会被伪装成成功。
+    """
     ok = True
     for writer, value, name in (
         (bili.write_main_cookie_file, main_cookie, "main"),
         (bili.write_yui_cookie_file, yui_cookie, "yui"),
     ):
         try:
-            writer(value)
+            writer(value, strict=True)
         except OSError as exc:
             _logger.warning("回滚 %s_cookie.txt 失败：%s", name, exc)
             ok = False
@@ -351,10 +355,14 @@ def _swap_cookie_files(main_cookie: str, yui_cookie: str) -> tuple[bool, bool]:
     yui_cookie.txt 已是主号 Cookie、main_cookie.txt 还是主号，
     两份文件停在"只换了一半"，重启后角色与文件错位。这里把两次写
     当一次事务处理，失败立即按原值写回。
+
+    v0.9.45：``bili.write_*_cookie_file`` 默认自己吞掉 OSError，只有传
+    ``strict=True`` 才会抛；不传的话这个 except 在真实环境里永远进不去，
+    半交换照样返回成功。
     """
     try:
-        bili.write_yui_cookie_file(main_cookie)
-        bili.write_main_cookie_file(yui_cookie)
+        bili.write_yui_cookie_file(main_cookie, strict=True)
+        bili.write_main_cookie_file(yui_cookie, strict=True)
     except OSError as exc:
         _logger.warning("交换大小号 Cookie 文件失败：%s", exc)
         return False, _restore_cookie_files(main_cookie, yui_cookie)
