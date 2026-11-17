@@ -219,7 +219,7 @@
 > `NEKO_COOKIE_PLAIN_V1:` 标记而非裸明文，解密失败报 `COOKIE_DECRYPT_FAILED`
 > 而不是伪装成未登录。
 > 已知边界：私信三态/扩展开关仍以单测为主；扩展换固定 ID 后需用户重载一次。
-> v0.9.42 增量深审修复（398 项离线测试通过）：
+> v0.9.43 增量深审修复（398 项离线测试通过）：
 > ① 日志：评论失败日志参数归位，`error` 与 `target` 不再串成 `type_id` / `oid:code`；
 >    扩展 tab/dom/shot 推送改为 DEBUG，只记 URL/标题长度与 `is_bili`，不再落浏览记录。
 > ② uid 匹配：`_cookie_for_uid` 与面板 `_cookie_target_for_uid` 改用 `cookie_uid` 精确比较，
