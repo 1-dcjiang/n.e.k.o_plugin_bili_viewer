@@ -26,6 +26,14 @@ __all__ = [
     "STATUS_TEXT",
 ]
 
+
+def _local_app_data_root() -> str:
+    """LOCALAPPDATA 缺失时回退到用户目录，避免把 CWD 当成浏览器数据根。"""
+    root = (os.environ.get("LOCALAPPDATA") or "").strip()
+    if root:
+        return root
+    return os.path.join(os.path.expanduser("~"), "AppData", "Local")
+
 # 需要保留的 Cookie 名称（含登录态与风控所需）
 _KEEP_NAMES = (
     "SESSDATA",
@@ -323,7 +331,7 @@ def detect_bili_cookie() -> tuple[str, str, str]:
     last_db_fail = False
     found_any_browser = False
     for browser_name, rel in AUTO_COOKIE_SOURCES:
-        root = os.path.join(os.environ.get("LOCALAPPDATA", ""), rel)
+        root = os.path.join(_local_app_data_root(), rel)
         if not os.path.isdir(root):
             continue
         found_any_browser = True

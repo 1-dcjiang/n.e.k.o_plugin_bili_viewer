@@ -436,7 +436,7 @@ def _cookie_for_uid(uid: int) -> str:
         p = os.path.join(_YUI_COOKIE_DIR, fn)
         try:
             content = _read_cookie_file(p)
-            if f"DedeUserID={uid}" in content and os.path.getmtime(p) >= best_mtime:
+            if cookie_uid(content) == uid and os.path.getmtime(p) >= best_mtime:
                 best, best_mtime = content, os.path.getmtime(p)
         except CookieDecryptError:
             _cookie_decrypt_errors.add("yui" if fn == _YUI_COOKIE_FILE else "main")
@@ -571,20 +571,38 @@ def _open_with_retry(req, timeout: float, retries: int = 3, jitter: bool = False
 _RETRY_BASE = (0.8, 1.8, 3.6)
 
 
-def _read_response(resp, timeout: float) -> bytes:
+def _read_response(resp, timeout: float, write: bool = False) -> bytes:
     """读完整响应体，并把读阶段的超时/截断异常转成语义化 BiliError。
 
     v0.9.39：`urlopen` 成功只代表响应头到了，`resp.read()` 仍可能超时或
     半包断开（尤其大接口/弱网）。旧实现让它穿透成裸 socket.timeout，
     上层无法归类，也不会触发任何降级；这里统一兜住。
+
+    write=True 时，读阶段失败同样意味着“请求可能已被服务端受理”，
+    必须标 WRITE_OUTCOME_UNKNOWN，不能降级成 TIMEOUT/NETWORK 让上层重试。
     """
     try:
         return resp.read()
     except (socket.timeout, TimeoutError) as exc:
+        if write:
+            raise BiliError(
+                "写入请求结果未知：读取响应超时，请求可能已发出；请先人工核实，严禁立刻重发",
+                "WRITE_OUTCOME_UNKNOWN",
+            ) from exc
         raise BiliError(f"读取响应超时（>{timeout:g}s）", "TIMEOUT") from exc
     except http.client.IncompleteRead as exc:
+        if write:
+            raise BiliError(
+                f"写入请求结果未知：响应被截断（已读 {len(exc.partial)} 字节），请求可能已发出",
+                "WRITE_OUTCOME_UNKNOWN",
+            ) from exc
         raise BiliError(f"响应被截断（已读 {len(exc.partial)} 字节）", "NETWORK") from exc
-    except (http.client.HTTPException, ConnectionError) as exc:
+    except (http.client.HTTPException, OSError) as exc:
+        if write:
+            raise BiliError(
+                f"写入请求结果未知：读取响应失败（{type(exc).__name__}），请求可能已发出",
+                "WRITE_OUTCOME_UNKNOWN",
+            ) from exc
         raise BiliError(f"读取响应失败：{exc}", "NETWORK") from exc
 
 
@@ -1647,16 +1665,11 @@ def _http_post(url: str, form: dict, timeout: float = _TIMEOUT, account: str = "
     cookie = _cookie(account)
     if cookie:
         req.add_header("Cookie", cookie)
-    try:
-        # 写操作绝不重试（v0.9.39 深审 S2）：POST 已经可能被服务端受理，
-        # 重试 5xx/超时会重复写（弹幕、投币、私信都是不可逆副作用）。
-        # jitter 仅保留发送前的自然抖动，不参与重试。
-        with _open_with_retry(req, timeout, retries=0, jitter=True) as resp:
-            raw = _read_response(resp, timeout)
-    except urllib.error.HTTPError as exc:
-        raise BiliError(f"接口 HTTP {exc.code}", "HTTP_ERROR") from exc
-    except urllib.error.URLError as exc:
-        raise BiliError(f"网络错误：{exc.reason}", "NETWORK") from exc
+    # 写操作绝不重试（v0.9.39 深审 S2）：POST 已经可能被服务端受理，
+    # 重试 5xx/超时会重复写（弹幕、投币、私信都是不可逆副作用）。
+    # jitter 仅保留发送前的自然抖动，不参与重试。
+    with _open_with_retry(req, timeout, retries=0, jitter=True) as resp:
+        raw = _read_response(resp, timeout, write=True)
     try:
         data = json.loads(raw)
     except ValueError as exc:
@@ -2450,16 +2463,11 @@ def _http_post_json(
     cookie = _cookie(account)
     if cookie:
         req.add_header("Cookie", cookie)
-    try:
-        # 写操作绝不重试（v0.9.39 深审 S2）：POST 已经可能被服务端受理，
-        # 重试 5xx/超时会重复写（弹幕、投币、私信都是不可逆副作用）。
-        # jitter 仅保留发送前的自然抖动，不参与重试。
-        with _open_with_retry(req, timeout, retries=0, jitter=True) as resp:
-            raw = _read_response(resp, timeout)
-    except urllib.error.HTTPError as exc:
-        raise BiliError(f"接口 HTTP {exc.code}", "HTTP_ERROR") from exc
-    except urllib.error.URLError as exc:
-        raise BiliError(f"网络错误：{exc.reason}", "NETWORK") from exc
+    # 写操作绝不重试（v0.9.39 深审 S2）：POST 已经可能被服务端受理，
+    # 重试 5xx/超时会重复写（弹幕、投币、私信都是不可逆副作用）。
+    # jitter 仅保留发送前的自然抖动，不参与重试。
+    with _open_with_retry(req, timeout, retries=0, jitter=True) as resp:
+        raw = _read_response(resp, timeout, write=True)
     try:
         resp_data = json.loads(raw)
     except ValueError as exc:
@@ -2818,16 +2826,11 @@ def _http_multipart(url: str, fields: dict, files: dict, account: str = "yui", t
     cookie = _cookie(account)
     if cookie:
         req.add_header("Cookie", cookie)
-    try:
-        # 写操作绝不重试（v0.9.39 深审 S2）：POST 已经可能被服务端受理，
-        # 重试 5xx/超时会重复写（弹幕、投币、私信都是不可逆副作用）。
-        # jitter 仅保留发送前的自然抖动，不参与重试。
-        with _open_with_retry(req, timeout, retries=0, jitter=True) as resp:
-            raw = _read_response(resp, timeout)
-    except urllib.error.HTTPError as exc:
-        raise BiliError(f"接口 HTTP {exc.code}", "HTTP_ERROR") from exc
-    except urllib.error.URLError as exc:
-        raise BiliError(f"网络错误：{exc.reason}", "NETWORK") from exc
+    # 写操作绝不重试（v0.9.39 深审 S2）：POST 已经可能被服务端受理，
+    # 重试 5xx/超时会重复写（弹幕、投币、私信都是不可逆副作用）。
+    # jitter 仅保留发送前的自然抖动，不参与重试。
+    with _open_with_retry(req, timeout, retries=0, jitter=True) as resp:
+        raw = _read_response(resp, timeout, write=True)
     try:
         resp_data = json.loads(raw)
     except ValueError as exc:

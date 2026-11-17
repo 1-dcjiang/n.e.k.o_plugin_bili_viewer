@@ -219,6 +219,24 @@
 > `NEKO_COOKIE_PLAIN_V1:` 标记而非裸明文，解密失败报 `COOKIE_DECRYPT_FAILED`
 > 而不是伪装成未登录。
 > 已知边界：私信三态/扩展开关仍以单测为主；扩展换固定 ID 后需用户重载一次。
+> v0.9.42 增量深审修复（398 项离线测试通过）：
+> ① 日志：评论失败日志参数归位，`error` 与 `target` 不再串成 `type_id` / `oid:code`；
+>    扩展 tab/dom/shot 推送改为 DEBUG，只记 URL/标题长度与 `is_bili`，不再落浏览记录。
+> ② uid 匹配：`_cookie_for_uid` 与面板 `_cookie_target_for_uid` 改用 `cookie_uid` 精确比较，
+>    `12345` 不再误命中 `123456`。
+> ③ 账号写失败：`_write_accounts` 返回布尔，`_assign_cookie_locked` 写失败返回
+>    `ok=False/bound=False`；大小号互换写失败回滚刚互换的 Cookie 文件并返回
+>    `ACCOUNTS_WRITE_FAILED`。
+> ④ 验真单飞：`CookieVerifier.verify` 的清理移入 `try/finally`，`SystemExit` /
+>    `KeyboardInterrupt` 等 BaseException 也会释放 flight，不再永久卡在 `VERIFY_IN_PROGRESS`。
+> ⑤ 写响应分类：`_read_response(write=True)` 把读阶段的超时、截断、`HTTPException`、
+>    `OSError`/`SSL` 统一归 `WRITE_OUTCOME_UNKNOWN`，写请求不再被误判为可重试的 `TIMEOUT/NETWORK`；
+>    三处写 helper 中不可达的 `HTTPError`/`URLError` 分支已删除。
+> ⑥ 限流释放：`release_limit` 读/写限流文件失败只记 warning，不覆盖调用方原始写失败；
+>    文件预占保留到自然过期。
+> ⑦ 路径：`LOCALAPPDATA` 为空时 Cookie/CDP/ASR 候选回退用户目录，不再拼相对 `../`。
+> ⑧ 扩展 Cookie：归位已写完整 Cookie，端点不再二次 `_refresh_ext_cookie`。
+> 验证边界：真实 B站、真实 Cookie、浏览器 CDP、扩展实机及真实写操作未执行。
 > v0.9.41 增量深审修复（387 项离线测试通过）：
 > ① 写请求传输歧义：`RemoteDisconnected` / `BadStatusLine` / reset / abort 等异常统一归为
 >    `WRITE_OUTCOME_UNKNOWN`；POST 仍绝不重试，高危写操作保留限流预占并要求人工核实。
@@ -246,7 +264,8 @@
 >    `?k=<bootstrap>` 链接，首次访问才下发 `HttpOnly; SameSite=Strict` 会话 Cookie；
 >    `/api/status` 也要求 token/Cookie，本机无凭据裸请求 403。
 > ② 扩展 Cookie 验真：`/api/extension-cookie` 改为先 nav 验真、服务端 `data.mid`
->    与 Cookie 的 `DedeUserID` 一致且归位成功后才 `_refresh_ext_cookie`；验真按
+>    与 Cookie 的 `DedeUserID` 一致且归位成功后才写入完整 Cookie；归位本身已按权威角色
+>    写盘，不再二次 `_refresh_ext_cookie`。验真按
 >    完整 Cookie 缓存 10 分钟，避免扩展心跳反复打 nav。伪造 Cookie 不再能覆盖真实登录态。
 > ③ M2 回读窗口：优先 `gethistory`（更长历史、带 timeline），失败回退 `ajax/msg`；
 >    每个 tick 只读一次，`verify_deadline` 约 15 秒跨 tick 轮询，不再在 tick 锁内

@@ -302,7 +302,8 @@ def _read_accounts() -> dict:
     return {}
 
 
-def _write_accounts(accounts: dict) -> None:
+def _write_accounts(accounts: dict) -> bool:
+    """原子写账号角色表；失败返回 False，调用方不能继续报“已绑定”。"""
     p = _accounts_path()
     tmp = p + ".tmp"
     try:
@@ -310,12 +311,22 @@ def _write_accounts(accounts: dict) -> None:
             with open(tmp, "w", encoding="utf-8") as f:
                 f.write(json.dumps(accounts, ensure_ascii=False, indent=2))
             os.replace(tmp, p)
-    except Exception:
+        return True
+    except Exception as exc:
         try:
             os.unlink(tmp)
         except OSError:
             pass
-        # 角色映射写失败不致命（仅影响大小号视图与自动归位记忆）
+        _logger.warning("写账号角色表失败：%s", exc)
+        return False
+
+
+def _accounts_write_failed() -> dict:
+    return {
+        "ok": False,
+        "bound": False,
+        "detail": "账号角色表写入失败，未确认绑定；请检查插件目录权限后重试",
+    }
 
 
 def _apply_cookie_from_config(cfg: dict, env: dict) -> str:
@@ -2928,7 +2939,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 self._yui_rate_rollback("comment", key)
             _logger.info(
                 "comment send result: kind=%s ok=False error=%s target=%s:%s account=%s",
-                kind_name, type_id, oid, exc.code, account,
+                kind_name, exc.code, type_id, oid, account,
             )
             return self._wrap_auth(exc, "发送评论")
         except Exception as exc:
@@ -3619,7 +3630,14 @@ class BiliViewerPlugin(NekoPluginBase):
         accounts = _read_accounts()
         main_rec, yui_rec = accounts.get("main") or {}, accounts.get("yui") or {}
         accounts["main"], accounts["yui"] = yui_rec, main_rec
-        _write_accounts(accounts)
+        if not _write_accounts(accounts):
+            # 角色表没写成，把刚互换的 Cookie 文件也换回去，避免重启后角色与文件错位。
+            try:
+                bili.write_main_cookie_file(main_file)
+                bili.write_yui_cookie_file(yui_file)
+            except OSError as exc:
+                _logger.warning("回滚大小号 Cookie 文件失败：%s", exc)
+            return {"output": "账号角色表写入失败，大小号未互换；请检查插件目录权限后重试。", "is_error": True, "error": "ACCOUNTS_WRITE_FAILED"}
         _set_env("BILI_COOKIE", bili._main_cookie_from_file())
         _set_env("BILI_YUI_COOKIE", bili._yui_cookie_from_file())
         if uid and role in ("main", "yui"):
@@ -4688,7 +4706,8 @@ class BiliViewerPlugin(NekoPluginBase):
             # 因此这里必须同步更新文件，不能只更新 env 而留下旧登录态。
             bili.write_main_cookie_file(cookie)
             accounts["main"] = {"uid": uid, "bound_at": now}  # v0.9.24：同步 uid 防错位
-            _write_accounts(accounts)
+            if not _write_accounts(accounts):
+                return _accounts_write_failed()
             _set_env("BILI_COOKIE", cookie)
             self._cookie_source = source
             return {"ok": True, "bound": True, "detail": "已刷新大号（main）登录态"}
@@ -4696,14 +4715,16 @@ class BiliViewerPlugin(NekoPluginBase):
             # 刷新小号同样同步持久化，避免权威角色映射读回旧文件。
             bili.write_yui_cookie_file(cookie)
             accounts["yui"] = {"uid": uid, "bound_at": now}  # v0.9.24：同步 uid 防错位
-            _write_accounts(accounts)
+            if not _write_accounts(accounts):
+                return _accounts_write_failed()
             _set_env("BILI_YUI_COOKIE", cookie)
             return {"ok": True, "bound": True, "detail": "已刷新小号（yui）登录态"}
         if main_uid is None:
             # 第一个登录的账号 → 大号（持久化到 main_cookie.txt）
             bili.write_main_cookie_file(cookie)
             accounts["main"] = {"uid": uid, "bound_at": now}
-            _write_accounts(accounts)
+            if not _write_accounts(accounts):
+                return _accounts_write_failed()
             _set_env("BILI_COOKIE", cookie)
             self._cookie_source = source
             return {"ok": True, "bound": True, "detail": "已绑定大号（第一个登录的账号，main）"}
@@ -4711,7 +4732,8 @@ class BiliViewerPlugin(NekoPluginBase):
         if yui_uid is None or uid is None:
             bili.write_yui_cookie_file(cookie)
             accounts["yui"] = {"uid": uid, "bound_at": now}
-            _write_accounts(accounts)
+            if not _write_accounts(accounts):
+                return _accounts_write_failed()
             _set_env("BILI_YUI_COOKIE", cookie)
             return {"ok": True, "bound": True, "detail": "已绑定小号（第二个登录的账号，yui），未说明时默认用它操作"}
         return {"ok": True, "bound": False, "detail": "大小号都已绑定；新账号未匹配，如需替换请说明要替换大号还是小号"}
@@ -4933,11 +4955,14 @@ class BiliViewerPlugin(NekoPluginBase):
         env = (os.environ.get("BILI_ASR_PYTHON") or "").strip()
         if env and os.path.isfile(env):
             return env
-        candidates = [
+        candidates = []
+        local_app_data = (os.environ.get("LOCALAPPDATA") or "").strip()
+        if local_app_data:
             # N.E.K.O 源码仓库 venv（本机开发环境，已装 faster-whisper 1.2.1）
-            os.path.join(os.environ.get("LOCALAPPDATA") or "", "..", "N.E.K.O", ".venv", "Scripts", "python.exe"),
-            os.path.join(str(Path.home()), "N.E.K.O", ".venv", "Scripts", "python.exe"),
-        ]
+            candidates.append(
+                os.path.join(local_app_data, "..", "N.E.K.O", ".venv", "Scripts", "python.exe")
+            )
+        candidates.append(os.path.join(str(Path.home()), "N.E.K.O", ".venv", "Scripts", "python.exe"))
         for cand in candidates:
             try:
                 if os.path.isfile(os.path.normpath(cand)):

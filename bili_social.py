@@ -213,18 +213,23 @@ def release_limit(action: str, units: int = 1, account: str = "yui") -> None:
         consumed = _consume_pending(account, action, units)
         if not consumed:
             return
-        state = _load_ratelimit()
-        for k in (key, daily_key):
-            arr = state.get(k)
-            if not arr:
-                continue
-            for stamp in consumed:
-                try:
-                    arr.remove(stamp)
-                except ValueError:
-                    pass
-            state[k] = arr
-        _save_ratelimit(state)
+        try:
+            state = _load_ratelimit()
+            for k in (key, daily_key):
+                arr = state.get(k)
+                if not arr:
+                    continue
+                for stamp in consumed:
+                    try:
+                        arr.remove(stamp)
+                    except ValueError:
+                        pass
+                state[k] = arr
+            _save_ratelimit(state)
+        except bili.BiliError as exc:
+            # 释放是失败路径的补偿动作，不能再抛异常覆盖调用方真正想报的写失败。
+            # 文件里的预占会自然过期；内存预占已清掉，宁可少放行一次也不冒充成功。
+            _logger.warning("release_limit 跳过：%s", exc)
 
 
 def record_limit(action: str, params: dict[str, Any], result: Any, units: int = 1, account: str = "yui") -> None:

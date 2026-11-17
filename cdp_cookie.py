@@ -46,6 +46,14 @@ _BROWSER_DIRS: dict[str, str] = {
 
 _BROWSER_EXES: dict[str, str] = {"Chrome": "chrome.exe", "Edge": "msedge.exe"}
 
+
+def _local_app_data_root() -> str:
+    """LOCALAPPDATA 缺失时回退到用户目录，避免拼出相对 CWD 的 ../ 路径。"""
+    root = (os.environ.get("LOCALAPPDATA") or "").strip()
+    if root:
+        return root
+    return os.path.join(os.path.expanduser("~"), "AppData", "Local")
+
 _STATUS_BOUND = "bound"
 _STATUS_NOT_LOGGED_IN = "not_logged_in"
 _STATUS_NO_BROWSER = "no_browser"
@@ -226,7 +234,7 @@ def _launch_debug_browser(name: str) -> int | None:
     exe = next((p for p in _BROWSER_EXE_PATHS.get(name, ()) if os.path.exists(p)), None)
     if not exe:
         return None
-    root = os.path.join(os.environ.get("LOCALAPPDATA", ""), _BROWSER_DIRS[name])
+    root = os.path.join(_local_app_data_root(), _BROWSER_DIRS[name])
     if not os.path.isdir(root):
         return None
     port = _DEBUG_PORT_BASE
@@ -281,7 +289,7 @@ def ensure_debug_browser(auto_launch: bool = True) -> tuple[int | None, str]:
     # 之前 Chrome 失败会立即 return，Edge 永远不会被尝试。
     for name in ("Chrome", "Edge"):
         exe_name = _BROWSER_EXES[name]
-        if not os.path.isdir(os.path.join(os.environ.get("LOCALAPPDATA", ""), _BROWSER_DIRS[name])):
+        if not os.path.isdir(os.path.join(_local_app_data_root(), _BROWSER_DIRS[name])):
             continue
         if not auto_launch:
             return None, f"{name} 未开启接入端口（本次为静默探测，不启动浏览器）"

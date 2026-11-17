@@ -100,9 +100,9 @@ def _cookie_target_for_uid(uid: str) -> str | None:
         pass
     for filename in _COOKIE_FILES:
         try:
-            if f"DedeUserID={uid}" in bili._read_cookie_file(os.path.join(_COOKIE_DIR, filename)):
+            if bili.cookie_uid(bili._read_cookie_file(os.path.join(_COOKIE_DIR, filename))) == int(uid):
                 return filename
-        except (OSError, bili.CookieDecryptError):
+        except (OSError, ValueError, bili.CookieDecryptError):
             continue
     return None
 
@@ -488,8 +488,9 @@ class _PanelHandler(BaseHTTPRequestHandler):
                     )
                     or {}
                 )
-                if payload.get("ok") and payload.get("bound"):
-                    _refresh_ext_cookie(cookie)
+                # _assign_cookie_locked 已按权威角色写入完整 Cookie，不再二次
+                # _refresh_ext_cookie；旧实现的裁剪版重写在另一个锁域重复写同一文件。
+                # 只有验真通过且归位成功才继续（payload 已由 ext_fn 返回）。
                 _logger.info("ext cookie: cookie_len=%s at=%s source=%s ok=%s", len(cookie), body.get("at"), body.get("source"), payload.get("ok"))
             except Exception as exc:
                 payload = {"ok": False, "detail": f"扩展推送处理异常：{exc}"}
@@ -508,7 +509,13 @@ class _PanelHandler(BaseHTTPRequestHandler):
                     )
                     or {}
                 )
-                _logger.info("ext tab: url=%s title=%s source=%s", str(body.get("url", "") or "")[:100], str(body.get("title", "") or "")[:40], body.get("source"))
+                _logger.debug(
+                    "ext tab: url_len=%s title_len=%s is_bili=%s source=%s",
+                    len(str(body.get("url", "") or "")),
+                    len(str(body.get("title", "") or "")),
+                    payload.get("is_bili"),
+                    body.get("source"),
+                )
             except Exception as exc:
                 payload = {"ok": False, "detail": f"扩展标签页推送处理异常：{exc}"}
                 _logger.info("ext tab: ERROR %s", exc)
@@ -518,7 +525,13 @@ class _PanelHandler(BaseHTTPRequestHandler):
             body = self._read_json_body(_EXT_DOM_MAX_BYTES)
             try:
                 payload = dict(self.server.dom_fn(body) or {"ok": False})
-                _logger.info("ext dom: kind=%s title=%s body_len=%s", body.get("kind"), str(body.get("title", "") or "")[:40], len(body))
+                _logger.debug(
+                    "ext dom: kind=%s title_len=%s body_len=%s is_bili=%s",
+                    body.get("kind"),
+                    len(str(body.get("title", "") or "")),
+                    len(body),
+                    payload.get("is_bili"),
+                )
             except Exception as exc:
                 payload = {"ok": False, "detail": f"扩展页面DOM推送处理异常：{exc}"}
                 _logger.info("ext dom: ERROR %s", exc)
@@ -528,7 +541,12 @@ class _PanelHandler(BaseHTTPRequestHandler):
             body = self._read_json_body(_EXT_SHOT_MAX_BYTES)
             try:
                 payload = dict(self.server.shot_fn(body) or {"ok": False})
-                _logger.info("ext shot: img_len=%s url=%s", len(str(body.get("image", "") or "")), str(body.get("url", "") or "")[:80])
+                _logger.debug(
+                    "ext shot: img_len=%s url_len=%s is_bili=%s",
+                    len(str(body.get("image", "") or "")),
+                    len(str(body.get("url", "") or "")),
+                    payload.get("is_bili"),
+                )
             except Exception as exc:
                 payload = {"ok": False, "detail": f"扩展截屏推送处理异常：{exc}"}
                 _logger.info("ext shot: ERROR %s", exc)

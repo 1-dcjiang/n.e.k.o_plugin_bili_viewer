@@ -137,21 +137,26 @@ class CookieVerifier:
                 return flight.result
             return CookieValidationResult(UNAVAILABLE, code="VERIFY_IN_PROGRESS")
 
-        result = self._run(str(cookie or ""), timeout)
-        now = self._clock()
-        ttl = (
-            self._positive_ttl
-            if result.status == VERIFIED
-            else self._rejected_ttl
-            if result.status == REJECTED
-            else self._negative_ttl
-        )
-        flight.result = result
-        with self._lock:
-            self._cache[key] = _CacheEntry(result, now + ttl)
-            if len(self._cache) > self._max_entries:
-                for old_key in sorted(self._cache, key=lambda k: self._cache[k].expires_at)[:-self._max_entries]:
-                    self._cache.pop(old_key, None)
-            self._flights.pop(key, None)
-            flight.event.set()
-        return result
+        try:
+            result = self._run(str(cookie or ""), timeout)
+            now = self._clock()
+            ttl = (
+                self._positive_ttl
+                if result.status == VERIFIED
+                else self._rejected_ttl
+                if result.status == REJECTED
+                else self._negative_ttl
+            )
+            flight.result = result
+            with self._lock:
+                self._cache[key] = _CacheEntry(result, now + ttl)
+                if len(self._cache) > self._max_entries:
+                    for old_key in sorted(self._cache, key=lambda k: self._cache[k].expires_at)[:-self._max_entries]:
+                        self._cache.pop(old_key, None)
+            return result
+        finally:
+            # 即使 _run 抛 BaseException（SystemExit/KeyboardInterrupt），也必须释放
+            # 单飞标记；否则同一 Cookie 之后会一直拿到 VERIFY_IN_PROGRESS。
+            with self._lock:
+                self._flights.pop(key, None)
+                flight.event.set()
