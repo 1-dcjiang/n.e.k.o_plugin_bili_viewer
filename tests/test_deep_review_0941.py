@@ -299,32 +299,31 @@ def test_loop_path_social_override_and_home_fallback(monkeypatch, tmp_path):
     assert not str(expected).startswith("N.E.K.O")
 
 
-def test_cookie_refresh_accounts_authoritative_and_concurrent_atomic(monkeypatch, tmp_path):
-    bili = _bili()
-    web_ui = _web()
-    monkeypatch.setattr(bili, "_YUI_COOKIE_DIR", str(tmp_path))
-    monkeypatch.setattr(web_ui, "_COOKIE_DIR", str(tmp_path))
-    monkeypatch.setattr(bili, "_encode_cookie_file", lambda value: bili._COOKIE_FILE_PLAIN_MAGIC + value)
-    (tmp_path / "accounts.json").write_text(json.dumps({
-        "main": {"uid": 111}, "yui": {"uid": 222}
-    }), encoding="utf-8")
-    # 旧 role 故意与权威 accounts 冲突，不能据此串号。
-    (tmp_path / "role.json").write_text(json.dumps({"111": "yui", "222": "main"}), encoding="utf-8")
+def test_cookie_file_writes_stay_atomic_under_concurrency(monkeypatch, tmp_path):
+    """v0.9.44：旧 _refresh_ext_cookie 已删除（生产路径不再调用）。
 
-    def refresh(uid, index):
-        cookie = f"SESSDATA={uid}-{index}; bili_jct=jct; DedeUserID={uid}"
-        return web_ui._refresh_ext_cookie(cookie)
+    生产落盘是 `_ACCOUNTS_LOCK` + `bili._write_cookie_file`（唯一临时文件 +
+    os.replace）。Windows 上 `os.replace` 遇到目标文件被别的线程打开会抛
+    WinError 5，所以这里按生产顺序（持锁写、持锁读）跑并发，锁住
+    "互不踩踏、读不到半截、不残留 .tmp"。
+    """
+    bili = _bili()
+    pkg = _pkg()
+    monkeypatch.setattr(bili, "_encode_cookie_file", lambda value: bili._COOKIE_FILE_PLAIN_MAGIC + value)
+    target = str(tmp_path / "main_cookie.txt")
+
+    def write(index):
+        cookie = f"SESSDATA={index}; bili_jct=jct; DedeUserID=111"
+        with pkg._ACCOUNTS_LOCK:
+            bili._write_cookie_file(target, cookie)
+            return bili._read_cookie_file(target)
 
     with ThreadPoolExecutor(max_workers=12) as pool:
-        futures = [pool.submit(refresh, uid, i) for i in range(20) for uid in (111, 222)]
+        futures = [pool.submit(write, i) for i in range(20)]
         results = [future.result(5) for future in futures]
-    assert all(item["updated"] for item in results)
-    assert {item["file"] for item in results if item["uid"] == "111"} == {"main_cookie.txt"}
-    assert {item["file"] for item in results if item["uid"] == "222"} == {"yui_cookie.txt"}
-    main = bili._read_cookie_file(str(tmp_path / "main_cookie.txt"))
-    yui = bili._read_cookie_file(str(tmp_path / "yui_cookie.txt"))
-    assert "DedeUserID=111" in main and "DedeUserID=222" not in main
-    assert "DedeUserID=222" in yui and "DedeUserID=111" not in yui
+    # 每次读回都必须是一份完整 Cookie（不会读到写了一半的内容）。
+    assert all("DedeUserID=111" in item and "SESSDATA=" in item for item in results)
+    assert "DedeUserID=111" in bili._read_cookie_file(target)
     assert list(tmp_path.glob("*.tmp")) == []
     assert list(tmp_path.glob(".*.tmp")) == []
 

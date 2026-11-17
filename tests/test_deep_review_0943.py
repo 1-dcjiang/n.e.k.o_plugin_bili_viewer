@@ -113,16 +113,18 @@ def test_extension_tab_dom_shot_logs_do_not_contain_url_or_title(caplog):
     assert "ext shot:" in messages and "img_len=" in messages
 
 
-# ── 扩展 Cookie 端点：归位已写盘，不能再二次 _refresh_ext_cookie ──────────
+# ── 扩展 Cookie 端点：归位已写盘，端点自己不能再落盘 ──────────────────────
 
 
-def test_extension_cookie_endpoint_does_not_double_write(monkeypatch):
+def test_extension_cookie_endpoint_does_not_write_files(monkeypatch):
+    bili = _bili()
     web_ui = _web()
+    writes: list[str] = []
 
-    def forbidden(_cookie):
-        raise AssertionError("不应再调用 _refresh_ext_cookie")
+    def spy(path, cookie):
+        writes.append(str(path))
 
-    monkeypatch.setattr(web_ui, "_refresh_ext_cookie", forbidden)
+    monkeypatch.setattr(bili, "_write_cookie_file", spy)
     panel, url = _panel(
         ext_fn=lambda cookie, at, source="": {"ok": True, "bound": True},
     )
@@ -133,6 +135,11 @@ def test_extension_cookie_endpoint_does_not_double_write(monkeypatch):
         assert result["ok"] is True
     finally:
         panel.stop()
+    # v0.9.44：web_ui 侧已无 _refresh_ext_cookie/_core_cookie 死代码，
+    # 端点只负责把载荷交给 ext_fn，落盘只发生在 _assign_cookie_locked 一处。
+    assert writes == []
+    assert not hasattr(web_ui, "_refresh_ext_cookie")
+    assert not hasattr(web_ui, "_core_cookie")
 
 
 # ── uid 前缀碰撞：12345 不能命中 123456 ─────────────────────────────────
@@ -150,18 +157,6 @@ def test_cookie_for_uid_requires_exact_dedeuserid(monkeypatch, tmp_path):
     current = bili._cookie_for_uid(123456)
     assert "DedeUserID=123456" in current
     assert bili._cookie_for_uid(12345) == ""
-
-
-def test_web_ui_cookie_target_requires_exact_uid(monkeypatch, tmp_path):
-    bili = _bili()
-    web_ui = _web()
-    monkeypatch.setattr(web_ui, "_COOKIE_DIR", str(tmp_path))
-    (tmp_path / "main_cookie.txt").write_text(
-        bili._COOKIE_FILE_PLAIN_MAGIC + "SESSDATA=x; DedeUserID=123456",
-        encoding="utf-8",
-    )
-    assert web_ui._cookie_target_for_uid("12345") is None
-    assert web_ui._cookie_target_for_uid("123456") == "main_cookie.txt"
 
 
 # ── accounts 写失败：不能继续报 bound=True ───────────────────────────────

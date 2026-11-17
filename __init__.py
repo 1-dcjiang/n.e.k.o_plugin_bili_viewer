@@ -329,6 +329,38 @@ def _accounts_write_failed() -> dict:
     }
 
 
+def _restore_cookie_files(main_cookie: str, yui_cookie: str) -> bool:
+    """按给定原值写回两份账号 Cookie 文件；返回是否两份都写回成功。"""
+    ok = True
+    for writer, value, name in (
+        (bili.write_main_cookie_file, main_cookie, "main"),
+        (bili.write_yui_cookie_file, yui_cookie, "yui"),
+    ):
+        try:
+            writer(value)
+        except OSError as exc:
+            _logger.warning("回滚 %s_cookie.txt 失败：%s", name, exc)
+            ok = False
+    return ok
+
+
+def _swap_cookie_files(main_cookie: str, yui_cookie: str) -> tuple[bool, bool]:
+    """把两份账号 Cookie 文件对调；返回 (是否互换成功, 失败后是否已按原值回滚)。
+
+    v0.9.44 深审：两次写文件旧实现没有任何保护，第二次抛 OSError 时
+    yui_cookie.txt 已是主号 Cookie、main_cookie.txt 还是主号，
+    两份文件停在"只换了一半"，重启后角色与文件错位。这里把两次写
+    当一次事务处理，失败立即按原值写回。
+    """
+    try:
+        bili.write_yui_cookie_file(main_cookie)
+        bili.write_main_cookie_file(yui_cookie)
+    except OSError as exc:
+        _logger.warning("交换大小号 Cookie 文件失败：%s", exc)
+        return False, _restore_cookie_files(main_cookie, yui_cookie)
+    return True, True
+
+
 def _apply_cookie_from_config(cfg: dict, env: dict) -> str:
     """决定实际生效的 BILI_COOKIE：环境变量优先，其次插件配置（settings.bili_cookie）。
 
@@ -3625,18 +3657,22 @@ class BiliViewerPlugin(NekoPluginBase):
                 return {"output": f"uid={uid} 的账号本来就是{role}，无需修改。", "is_error": False, "result": {"ok": True, "unchanged": True}}
             # uid 账号当前角色≠目标角色 → 等价于交换大小号
         # 统一动作：交换大小号（文件互换 + 角色映射互换 + 运行期 env 同步）
-        bili.write_yui_cookie_file(main_file)
-        bili.write_main_cookie_file(yui_file)
+        # v0.9.44：两次写文件纳入同一回滚保护（见 _swap_cookie_files），
+        # 旧实现第二次写失败会让两份 Cookie 停在"只换了一半"。
+        swapped, rolled_back = _swap_cookie_files(main_file, yui_file)
+        if not swapped:
+            detail = "已按原值回滚两份 Cookie 文件" if rolled_back else "回滚也失败，请人工检查 main_cookie.txt / yui_cookie.txt"
+            return {
+                "output": f"交换大小号失败：Cookie 文件写入失败（{detail}）。",
+                "is_error": True,
+                "error": "COOKIE_WRITE_FAILED",
+            }
         accounts = _read_accounts()
         main_rec, yui_rec = accounts.get("main") or {}, accounts.get("yui") or {}
         accounts["main"], accounts["yui"] = yui_rec, main_rec
         if not _write_accounts(accounts):
             # 角色表没写成，把刚互换的 Cookie 文件也换回去，避免重启后角色与文件错位。
-            try:
-                bili.write_main_cookie_file(main_file)
-                bili.write_yui_cookie_file(yui_file)
-            except OSError as exc:
-                _logger.warning("回滚大小号 Cookie 文件失败：%s", exc)
+            _restore_cookie_files(main_file, yui_file)
             return {"output": "账号角色表写入失败，大小号未互换；请检查插件目录权限后重试。", "is_error": True, "error": "ACCOUNTS_WRITE_FAILED"}
         _set_env("BILI_COOKIE", bili._main_cookie_from_file())
         _set_env("BILI_YUI_COOKIE", bili._yui_cookie_from_file())

@@ -219,6 +219,19 @@
 > `NEKO_COOKIE_PLAIN_V1:` 标记而非裸明文，解密失败报 `COOKIE_DECRYPT_FAILED`
 > 而不是伪装成未登录。
 > 已知边界：私信三态/扩展开关仍以单测为主；扩展换固定 ID 后需用户重载一次。
+> v0.9.44 增量深审修复（407 项离线测试通过）：
+> ① 读响应统一：`_fetch_raw`（弹幕 seg.so）与 `video_subtitle` 的 `resp.read()` 改走
+>    `_read_response`；`_open_with_retry` 已把 HTTP/网络异常转成 `BiliError`，两处残留的
+>    `HTTPError`/`URLError` 死分支删除，读阶段半包/超时不再以裸异常穿透。
+> ② 死代码下线：`web_ui` 里 v0.2.18 的 `_core_cookie` / `_cookie_target_for_uid` /
+>    `_refresh_ext_cookie` 以及 `_COOKIE_KEEP` / `_COOKIE_REFRESH_LOCKS` 删除；扩展 Cookie
+>    端点只把载荷交给 `_assign_cookie_locked`，`web_ui` 不再持有 Cookie 定位/裁剪/写盘逻辑。
+> ③ 大小号互换事务化：`_swap_cookie_files` 把两次写文件当一次事务，第二笔抛 `OSError`
+>    时按原值回滚两份 Cookie 并返回 `COOKIE_WRITE_FAILED`；角色表写失败复用同一回滚。
+> ④ 测试：新增 0944 覆盖读阶段超时/半包/非 JSON、交换中途失败回滚与正常交换回归；
+>    0941 并发用例改测 `_ACCOUNTS_LOCK` + `_write_cookie_file` 真实落盘路径，0943 的
+>    "不二次写盘"改为监视 `_write_cookie_file` 调用为 0。
+> 验证边界：真实 B站、真实 Cookie、浏览器 CDP、扩展实机及真实写操作未执行。
 > v0.9.43 增量深审修复（398 项离线测试通过）：
 > ① 日志：评论失败日志参数归位，`error` 与 `target` 不再串成 `type_id` / `oid:code`；
 >    扩展 tab/dom/shot 推送改为 DEBUG，只记 URL/标题长度与 `is_bili`，不再落浏览记录。

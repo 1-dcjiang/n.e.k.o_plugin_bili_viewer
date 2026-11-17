@@ -937,13 +937,11 @@ def _fetch_raw(url: str, params: dict) -> bytes:
     )
     if _cookie():
         req.add_header("Cookie", _cookie())
-    try:
-        with _open_with_retry(req, _TIMEOUT) as resp:
-            raw = resp.read()
-    except urllib.error.HTTPError as exc:
-        raise BiliError(f"弹幕接口 HTTP {exc.code}", "HTTP_ERROR") from exc
-    except urllib.error.URLError as exc:
-        raise BiliError(f"网络错误：{exc.reason}", "NETWORK") from exc
+    # v0.9.44：_open_with_retry 已把 HTTP/网络异常统一转成 BiliError，读阶段的
+    # 超时/半包也要走 _read_response；旧实现在这里再捕获 HTTPError/URLError 是
+    # 死分支，而 resp.read() 抛的 IncompleteRead/socket.timeout 会以裸异常穿透。
+    with _open_with_retry(req, _TIMEOUT) as resp:
+        raw = _read_response(resp, _TIMEOUT)
     if raw[:2] == b"\x1f\x8b":  # gzip 压缩响应
         try:
             raw = gzip.decompress(raw)
@@ -1022,11 +1020,14 @@ def video_subtitle(bvid: str, cid: int | None = None, lan: str = "zh-CN") -> str
     if url.startswith("//"):
         url = "https:" + url
     req = urllib.request.Request(url, headers={"User-Agent": _UA, "Referer": f"https://www.bilibili.com/video/{bvid}"})
+    # v0.9.44：读响应统一走 _read_response（旧实现捕获的 URLError 已被
+    # _open_with_retry 转成 BiliError，是死分支；IncompleteRead 则漏网）。
+    with _open_with_retry(req, _TIMEOUT) as resp:
+        body_bytes = _read_response(resp, _TIMEOUT)
     try:
-        with _open_with_retry(req, _TIMEOUT) as resp:
-            payload = json.loads(resp.read())
-    except (urllib.error.URLError, ValueError, socket.timeout) as exc:
-        raise BiliError(f"字幕获取失败：{exc}", "SUBTITLE_FAIL") from exc
+        payload = json.loads(body_bytes)
+    except ValueError as exc:
+        raise BiliError(f"字幕获取失败：返回非 JSON（{exc}）", "SUBTITLE_FAIL") from exc
     body = payload.get("body") or []
     if not body:
         raise BiliError("字幕内容为空", "NO_SUBTITLE")
