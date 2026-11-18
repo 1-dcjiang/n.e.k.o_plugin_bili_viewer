@@ -1,0 +1,10 @@
+[project]
+name = "bili_viewer"
+version = "0.9.46"
+description = "B站全能助手：浏览、感知与管理哔哩哔哩，含账号双分离与写操作回读验证"
+dependencies = []
+
+[tool.neko.build]
+# yui_uploads 是运行时上传/落盘目录，不能让空目录进入 payload；
+# 否则打包器无法生成可跨平台保留的 plugin.meta.json，工具参数 schema 会延迟到插件运行。
+exclude_dirs = ["tests", "yui_uploads"]

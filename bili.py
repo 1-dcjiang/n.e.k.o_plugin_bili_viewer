@@ -15,6 +15,7 @@ import difflib
 import gzip
 import hashlib
 import http.client
+import io
 import json
 import logging
 import os
@@ -38,6 +39,9 @@ _UA = (
 _API = "https://api.bilibili.com"
 _LIVE_API = "https://api.live.bilibili.com"
 _TIMEOUT = 12.0
+# A795：读响应不能无限吞内存。B站正常 JSON/弹幕/字幕远小于 16 MiB；
+# 超上限直接报错，而不是把异常大响应读完后才交给 json/gzip 继续放大。
+_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
 _logger = logging.getLogger(__name__)
 
@@ -325,10 +329,14 @@ def _main_cookie_from_file() -> str:
     return content
 
 
-def write_main_cookie_file(cookie: str) -> None:
+def write_main_cookie_file(cookie: str, *, strict: bool = False) -> None:
     """持久化主账号 Cookie 到插件目录 main_cookie.txt（绑定流程调用，v0.7.10）。
 
     不手动清缓存：mtime 已变化，下次读取自然重读文件。
+
+    v0.9.45：新增 ``strict``。默认仍按“写失败不致命”留痕后继续；需要事务语义的
+    调用方（大小号互换）必须传 ``strict=True``，否则失败在这里被吞掉，上层永远
+    看不到异常，回滚分支就成了装饰。
     """
     p = os.path.join(_YUI_COOKIE_DIR, _MAIN_COOKIE_FILE)
     try:
@@ -336,10 +344,15 @@ def write_main_cookie_file(cookie: str) -> None:
     except OSError as exc:
         # 写失败不致命（env/配置层仍可生效），但必须留痕，不能静默吞掉。
         _logger.warning("persist main cookie failed: %s", exc)
+        if strict:
+            raise
 
 
-def write_yui_cookie_file(cookie: str) -> None:
-    """持久化小号 Cookie 到插件目录 yui_cookie.txt（第二个登录的账号自动归位，v0.7.10）。"""
+def write_yui_cookie_file(cookie: str, *, strict: bool = False) -> None:
+    """持久化小号 Cookie 到插件目录 yui_cookie.txt（第二个登录的账号自动归位，v0.7.10）。
+
+    v0.9.45：``strict=True`` 时写失败向上抛，供大小号互换回滚使用。
+    """
     global _yui_cookie_file_cache
     _yui_cookie_file_cache = (0.0, "")
     p = os.path.join(_YUI_COOKIE_DIR, _YUI_COOKIE_FILE)
@@ -347,6 +360,8 @@ def write_yui_cookie_file(cookie: str) -> None:
         _write_cookie_file(p, cookie)
     except OSError as exc:
         _logger.warning("persist yui cookie failed: %s", exc)
+        if strict:
+            raise
 
 
 def cookie_uid(cookie: str) -> int | None:
@@ -578,11 +593,19 @@ def _read_response(resp, timeout: float, write: bool = False) -> bytes:
     半包断开（尤其大接口/弱网）。旧实现让它穿透成裸 socket.timeout，
     上层无法归类，也不会触发任何降级；这里统一兜住。
 
+    v0.9.46：增加响应体上限。`resp.read(size)` 只多读 1 字节用于判断越界；
+    不改变 fake 响应只接受无参 `read()` 的既有测试，也不把上限写成网络层
+    可绕过的“建议值”。
+
     write=True 时，读阶段失败同样意味着“请求可能已被服务端受理”，
     必须标 WRITE_OUTCOME_UNKNOWN，不能降级成 TIMEOUT/NETWORK 让上层重试。
     """
     try:
-        return resp.read()
+        try:
+            raw = resp.read(_MAX_RESPONSE_BYTES + 1)
+        except TypeError:
+            # 测试或自定义响应对象只实现 read()；退回无参读取后仍受同一上限约束。
+            raw = resp.read()
     except (socket.timeout, TimeoutError) as exc:
         if write:
             raise BiliError(
@@ -604,6 +627,17 @@ def _read_response(resp, timeout: float, write: bool = False) -> bytes:
                 "WRITE_OUTCOME_UNKNOWN",
             ) from exc
         raise BiliError(f"读取响应失败：{exc}", "NETWORK") from exc
+    if len(raw) > _MAX_RESPONSE_BYTES:
+        if write:
+            raise BiliError(
+                f"写入请求结果未知：响应体超过 {_MAX_RESPONSE_BYTES} 字节上限，请求可能已发出",
+                "WRITE_OUTCOME_UNKNOWN",
+            )
+        raise BiliError(
+            f"响应体超过 {_MAX_RESPONSE_BYTES} 字节上限，拒绝继续读取",
+            "RESPONSE_TOO_LARGE",
+        )
+    return raw
 
 
 
@@ -937,18 +971,23 @@ def _fetch_raw(url: str, params: dict) -> bytes:
     )
     if _cookie():
         req.add_header("Cookie", _cookie())
-    try:
-        with _open_with_retry(req, _TIMEOUT) as resp:
-            raw = resp.read()
-    except urllib.error.HTTPError as exc:
-        raise BiliError(f"弹幕接口 HTTP {exc.code}", "HTTP_ERROR") from exc
-    except urllib.error.URLError as exc:
-        raise BiliError(f"网络错误：{exc.reason}", "NETWORK") from exc
+    # v0.9.44：_open_with_retry 已把 HTTP/网络异常统一转成 BiliError，读阶段的
+    # 超时/半包也要走 _read_response；旧实现在这里再捕获 HTTPError/URLError 是
+    # 死分支，而 resp.read() 抛的 IncompleteRead/socket.timeout 会以裸异常穿透。
+    with _open_with_retry(req, _TIMEOUT) as resp:
+        raw = _read_response(resp, _TIMEOUT)
     if raw[:2] == b"\x1f\x8b":  # gzip 压缩响应
         try:
-            raw = gzip.decompress(raw)
-        except (OSError, EOFError) as exc:
+            # 不用 gzip.decompress：它没有输出上限，压缩炸弹会在解压阶段放大内存。
+            with gzip.GzipFile(fileobj=io.BytesIO(raw)) as gz:
+                raw = gz.read(_MAX_RESPONSE_BYTES + 1)
+        except (OSError, EOFError, zlib.error) as exc:
             raise BiliError("弹幕数据解压失败", "DANMAKU_PARSE") from exc
+    if len(raw) > _MAX_RESPONSE_BYTES:
+        raise BiliError(
+            f"弹幕数据解压后超过 {_MAX_RESPONSE_BYTES} 字节上限",
+            "DANMAKU_PARSE",
+        )
     return raw
 
 
@@ -1022,11 +1061,14 @@ def video_subtitle(bvid: str, cid: int | None = None, lan: str = "zh-CN") -> str
     if url.startswith("//"):
         url = "https:" + url
     req = urllib.request.Request(url, headers={"User-Agent": _UA, "Referer": f"https://www.bilibili.com/video/{bvid}"})
+    # v0.9.44：读响应统一走 _read_response（旧实现捕获的 URLError 已被
+    # _open_with_retry 转成 BiliError，是死分支；IncompleteRead 则漏网）。
+    with _open_with_retry(req, _TIMEOUT) as resp:
+        body_bytes = _read_response(resp, _TIMEOUT)
     try:
-        with _open_with_retry(req, _TIMEOUT) as resp:
-            payload = json.loads(resp.read())
-    except (urllib.error.URLError, ValueError, socket.timeout) as exc:
-        raise BiliError(f"字幕获取失败：{exc}", "SUBTITLE_FAIL") from exc
+        payload = json.loads(body_bytes)
+    except ValueError as exc:
+        raise BiliError(f"字幕获取失败：返回非 JSON（{exc}）", "SUBTITLE_FAIL") from exc
     body = payload.get("body") or []
     if not body:
         raise BiliError("字幕内容为空", "NO_SUBTITLE")

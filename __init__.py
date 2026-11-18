@@ -321,12 +321,69 @@ def _write_accounts(accounts: dict) -> bool:
         return False
 
 
-def _accounts_write_failed() -> dict:
+def _accounts_write_failed(detail: str = "") -> dict:
     return {
         "ok": False,
         "bound": False,
-        "detail": "账号角色表写入失败，未确认绑定；请检查插件目录权限后重试",
+        "detail": detail or "账号角色表写入失败，未确认绑定；请检查插件目录权限后重试",
     }
+
+
+def _persist_cookie_or_error(writer, cookie: str, label: str) -> dict | None:
+    """绑定流程持久化 Cookie 文件；失败返回统一错误，不继续报“已绑定”。
+
+    v0.9.46：A795 指出 :4751/:4760/:4768/:4777 仍走非 strict 写函数，
+    磁盘满或权限不足时只记 warning，随后 accounts.json 照样写入并返回成功。
+    这里显式 strict；失败直接中止，账号角色表不再提交。
+    """
+    try:
+        writer(cookie, strict=True)
+    except OSError as exc:
+        _logger.warning("persist %s cookie failed: %s", label, exc)
+        return _accounts_write_failed(
+            f"{label} Cookie 文件写入失败，未确认绑定；请检查插件目录权限后重试",
+        )
+    return None
+
+
+def _restore_cookie_files(main_cookie: str, yui_cookie: str) -> bool:
+    """按给定原值写回两份账号 Cookie 文件；返回是否两份都写回成功。
+
+    v0.9.45：写函数默认把 OSError 吞成一条 warning，这里必须走 strict 变体，
+    否则“回滚失败”会被伪装成成功。
+    """
+    ok = True
+    for writer, value, name in (
+        (bili.write_main_cookie_file, main_cookie, "main"),
+        (bili.write_yui_cookie_file, yui_cookie, "yui"),
+    ):
+        try:
+            writer(value, strict=True)
+        except OSError as exc:
+            _logger.warning("回滚 %s_cookie.txt 失败：%s", name, exc)
+            ok = False
+    return ok
+
+
+def _swap_cookie_files(main_cookie: str, yui_cookie: str) -> tuple[bool, bool]:
+    """把两份账号 Cookie 文件对调；返回 (是否互换成功, 失败后是否已按原值回滚)。
+
+    v0.9.44 深审：两次写文件旧实现没有任何保护，第二次抛 OSError 时
+    yui_cookie.txt 已是主号 Cookie、main_cookie.txt 还是主号，
+    两份文件停在"只换了一半"，重启后角色与文件错位。这里把两次写
+    当一次事务处理，失败立即按原值写回。
+
+    v0.9.45：``bili.write_*_cookie_file`` 默认自己吞掉 OSError，只有传
+    ``strict=True`` 才会抛；不传的话这个 except 在真实环境里永远进不去，
+    半交换照样返回成功。
+    """
+    try:
+        bili.write_yui_cookie_file(main_cookie, strict=True)
+        bili.write_main_cookie_file(yui_cookie, strict=True)
+    except OSError as exc:
+        _logger.warning("交换大小号 Cookie 文件失败：%s", exc)
+        return False, _restore_cookie_files(main_cookie, yui_cookie)
+    return True, True
 
 
 def _apply_cookie_from_config(cfg: dict, env: dict) -> str:
@@ -3599,50 +3656,73 @@ class BiliViewerPlugin(NekoPluginBase):
         action = (action or params.get("action") or "swap").strip()
         uid = int(uid if uid else params.get("uid") or 0) or 0
         role = str(role or params.get("role") or "").strip()
-        main_file = bili._main_cookie_from_file()
-        yui_file = bili._yui_cookie_from_file()
-        # 安全（v0.7.10）：只有账号 cookie 与文件层完全一致（绑定流程持久化）才允许互换；
-        # 来自环境变量/配置覆盖的账号无法程序化互换，提示手动调整，避免误清空账号。
-        main_effective = bili._cookie("main")
-        yui_effective = bili._cookie("yui")
-        if main_effective and main_effective != main_file:
-            return {"output": "大号 Cookie 来自环境变量或配置（非文件层），无法自动互换；请手动调整 BILI_COOKIE 后重试。", "is_error": True, "error": "ENV_LOCKED"}
-        if yui_effective and yui_effective != yui_file:
-            return {"output": "小号 Cookie 来自环境变量或配置（非文件层），无法自动互换；请手动调整 BILI_YUI_COOKIE 后重试。", "is_error": True, "error": "ENV_LOCKED"}
-        if not main_file and not yui_file:
-            return {"output": "当前没有文件层绑定的账号，无法修改角色；请先通过接入面板绑定两个账号（第一个登录=大号，第二个登录=小号）。", "is_error": True, "error": "NO_ACCOUNTS"}
-        # 定位目标账号当前角色（uid 指定时）
-        if uid and role in ("main", "yui"):
-            cur = None
-            for r in ("main", "yui"):
-                c = bili._cookie(r)
-                if c and bili.cookie_uid(c) == uid:
-                    cur = r
-                    break
-            if cur is None:
-                return {"output": f"没有绑定 uid={uid} 的账号。", "is_error": True, "error": "NO_ACCOUNT"}
-            if cur == role:
-                return {"output": f"uid={uid} 的账号本来就是{role}，无需修改。", "is_error": False, "result": {"ok": True, "unchanged": True}}
-            # uid 账号当前角色≠目标角色 → 等价于交换大小号
-        # 统一动作：交换大小号（文件互换 + 角色映射互换 + 运行期 env 同步）
-        bili.write_yui_cookie_file(main_file)
-        bili.write_main_cookie_file(yui_file)
-        accounts = _read_accounts()
-        main_rec, yui_rec = accounts.get("main") or {}, accounts.get("yui") or {}
-        accounts["main"], accounts["yui"] = yui_rec, main_rec
-        if not _write_accounts(accounts):
-            # 角色表没写成，把刚互换的 Cookie 文件也换回去，避免重启后角色与文件错位。
-            try:
-                bili.write_main_cookie_file(main_file)
-                bili.write_yui_cookie_file(yui_file)
-            except OSError as exc:
-                _logger.warning("回滚大小号 Cookie 文件失败：%s", exc)
-            return {"output": "账号角色表写入失败，大小号未互换；请检查插件目录权限后重试。", "is_error": True, "error": "ACCOUNTS_WRITE_FAILED"}
-        _set_env("BILI_COOKIE", bili._main_cookie_from_file())
-        _set_env("BILI_YUI_COOKIE", bili._yui_cookie_from_file())
-        if uid and role in ("main", "yui"):
-            return {"output": f"已把 uid={uid} 的账号设为{role}（原{role}的账号自动换到另一角色）。", "is_error": False, "result": {"ok": True, "uid": uid, "role": role}}
-        return {"output": "已交换大小号：原小号现在是大号，原大号现在是小号（未说明时仍默认操作小号）。", "is_error": False, "result": {"ok": True, "swapped": True}}
+
+        def _swap_roles_sync() -> dict:
+            # A795：整段互换必须和扩展 Cookie 推送共用 _ACCOUNTS_LOCK。
+            # 否则扩展可能在两次写文件之间刷新大号，角色表随后互换，
+            # 最终文件是 A 的 Cookie、accounts.json 却写 main=B。
+            with _ACCOUNTS_LOCK:
+                main_file = bili._main_cookie_from_file()
+                yui_file = bili._yui_cookie_from_file()
+                # 安全（v0.7.10）：只有账号 cookie 与文件层完全一致（绑定流程持久化）才允许互换；
+                # 来自环境变量/配置覆盖的账号无法程序化互换，提示手动调整，避免误清空账号。
+                main_effective = bili._cookie("main")
+                yui_effective = bili._cookie("yui")
+                if main_effective and main_effective != main_file:
+                    return {"output": "大号 Cookie 来自环境变量或配置（非文件层），无法自动互换；请手动调整 BILI_COOKIE 后重试。", "is_error": True, "error": "ENV_LOCKED"}
+                if yui_effective and yui_effective != yui_file:
+                    return {"output": "小号 Cookie 来自环境变量或配置（非文件层），无法自动互换；请手动调整 BILI_YUI_COOKIE 后重试。", "is_error": True, "error": "ENV_LOCKED"}
+                if not main_file and not yui_file:
+                    return {"output": "当前没有文件层绑定的账号，无法修改角色；请先通过接入面板绑定两个账号（第一个登录=大号，第二个登录=小号）。", "is_error": True, "error": "NO_ACCOUNTS"}
+                # 定位目标账号当前角色（uid 指定时）
+                if uid and role in ("main", "yui"):
+                    cur = None
+                    for r in ("main", "yui"):
+                        c = bili._cookie(r)
+                        if c and bili.cookie_uid(c) == uid:
+                            cur = r
+                            break
+                    if cur is None:
+                        return {"output": f"没有绑定 uid={uid} 的账号。", "is_error": True, "error": "NO_ACCOUNT"}
+                    if cur == role:
+                        return {"output": f"uid={uid} 的账号本来就是{role}，无需修改。", "is_error": False, "result": {"ok": True, "unchanged": True}}
+                    # uid 账号当前角色≠目标角色 → 等价于交换大小号
+                # 统一动作：交换大小号（文件互换 + 角色映射互换 + 运行期 env 同步）
+                # v0.9.44：两次写文件纳入同一回滚保护（见 _swap_cookie_files），
+                # 旧实现第二次写失败会让两份 Cookie 停在"只换了一半"。
+                swapped, rolled_back = _swap_cookie_files(main_file, yui_file)
+                if not swapped:
+                    detail = "已按原值回滚两份 Cookie 文件" if rolled_back else "回滚也失败，请人工检查 main_cookie.txt / yui_cookie.txt"
+                    return {
+                        "output": f"交换大小号失败：Cookie 文件写入失败（{detail}）。",
+                        "is_error": True,
+                        "error": "COOKIE_WRITE_FAILED",
+                    }
+                accounts = _read_accounts()
+                main_rec, yui_rec = accounts.get("main") or {}, accounts.get("yui") or {}
+                accounts["main"], accounts["yui"] = yui_rec, main_rec
+                if not _write_accounts(accounts):
+                    # 角色表没写成，把刚互换的 Cookie 文件也换回去；回滚本身失败
+                    # 必须如实说“文件可能已互换”，不能再报“大小号未互换”。
+                    rollback_ok = _restore_cookie_files(main_file, yui_file)
+                    if rollback_ok:
+                        state = "大小号未互换，已按原值回滚两份 Cookie 文件"
+                    else:
+                        state = "大小号文件可能已互换，且回滚也失败，请人工检查 main_cookie.txt / yui_cookie.txt"
+                    return {
+                        "output": f"账号角色表写入失败，{state}；请检查插件目录权限后重试。",
+                        "is_error": True,
+                        "error": "ACCOUNTS_WRITE_FAILED",
+                    }
+                _set_env("BILI_COOKIE", bili._main_cookie_from_file())
+                _set_env("BILI_YUI_COOKIE", bili._yui_cookie_from_file())
+                if uid and role in ("main", "yui"):
+                    return {"output": f"已把 uid={uid} 的账号设为{role}（原{role}的账号自动换到另一角色）。", "is_error": False, "result": {"ok": True, "uid": uid, "role": role}}
+                return {"output": "已交换大小号：原小号现在是大号，原大号现在是小号（未说明时仍默认操作小号）。", "is_error": False, "result": {"ok": True, "swapped": True}}
+
+        # A795：同步文件 + DPAPI + mkstemp 不能占事件循环线程；锁在线程内获取，
+        # 避免异步工具在主线程持有锁等待磁盘。
+        return await asyncio.to_thread(_swap_roles_sync)
 
     # ══════════ 收件箱 / 私信 / 表态 / 榜单 / 创作数据（v0.8.0：bili-cli 精华移植） ══════════
 
@@ -4704,7 +4784,11 @@ class BiliViewerPlugin(NekoPluginBase):
         if uid is not None and uid == main_uid:
             # 刷新大号：accounts 成为权威角色表后，_cookie 会按 uid 读文件，
             # 因此这里必须同步更新文件，不能只更新 env 而留下旧登录态。
-            bili.write_main_cookie_file(cookie)
+            write_failed = _persist_cookie_or_error(
+                bili.write_main_cookie_file, cookie, "main",
+            )
+            if write_failed:
+                return write_failed
             accounts["main"] = {"uid": uid, "bound_at": now}  # v0.9.24：同步 uid 防错位
             if not _write_accounts(accounts):
                 return _accounts_write_failed()
@@ -4713,7 +4797,11 @@ class BiliViewerPlugin(NekoPluginBase):
             return {"ok": True, "bound": True, "detail": "已刷新大号（main）登录态"}
         if uid is not None and uid == yui_uid:
             # 刷新小号同样同步持久化，避免权威角色映射读回旧文件。
-            bili.write_yui_cookie_file(cookie)
+            write_failed = _persist_cookie_or_error(
+                bili.write_yui_cookie_file, cookie, "yui",
+            )
+            if write_failed:
+                return write_failed
             accounts["yui"] = {"uid": uid, "bound_at": now}  # v0.9.24：同步 uid 防错位
             if not _write_accounts(accounts):
                 return _accounts_write_failed()
@@ -4721,7 +4809,11 @@ class BiliViewerPlugin(NekoPluginBase):
             return {"ok": True, "bound": True, "detail": "已刷新小号（yui）登录态"}
         if main_uid is None:
             # 第一个登录的账号 → 大号（持久化到 main_cookie.txt）
-            bili.write_main_cookie_file(cookie)
+            write_failed = _persist_cookie_or_error(
+                bili.write_main_cookie_file, cookie, "main",
+            )
+            if write_failed:
+                return write_failed
             accounts["main"] = {"uid": uid, "bound_at": now}
             if not _write_accounts(accounts):
                 return _accounts_write_failed()
@@ -4730,7 +4822,11 @@ class BiliViewerPlugin(NekoPluginBase):
             return {"ok": True, "bound": True, "detail": "已绑定大号（第一个登录的账号，main）"}
         # 已有大号且新 uid 不同 → 第二个登录的账号自动成为小号（yui，默认操作账号）
         if yui_uid is None or uid is None:
-            bili.write_yui_cookie_file(cookie)
+            write_failed = _persist_cookie_or_error(
+                bili.write_yui_cookie_file, cookie, "yui",
+            )
+            if write_failed:
+                return write_failed
             accounts["yui"] = {"uid": uid, "bound_at": now}
             if not _write_accounts(accounts):
                 return _accounts_write_failed()

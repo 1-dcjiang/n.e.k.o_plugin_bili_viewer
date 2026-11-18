@@ -201,7 +201,8 @@ def _cdp_call(ws_url: str, method: str, params: dict | None = None, timeout: flo
 
 def _http_json(url: str, timeout: float = 5.0) -> dict | None:
     try:
-        return json.load(urllib.request.urlopen(url, timeout=timeout))
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            return json.load(resp)
     except Exception:
         return None
 

@@ -11,18 +11,11 @@ from __future__ import annotations
 import collections
 import json
 import logging
-import os
-import re
 import secrets
 import threading
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-try:
-    from . import bili
-except ImportError:  # 独立模块加载（测试 / 单文件脚本）没有父包
-    import bili  # type: ignore[no-redef]
 
 _logger = logging.getLogger("N.E.K.O.Plugin_bili_viewer.plugin.bili_viewer")
 
@@ -57,83 +50,9 @@ _CMD_SEQ: int = 0
 _CMD_LOCK = threading.Lock()
 
 
-# v0.2.18：扩展推送的登录态按 uid 自保鲜（框架仅首次落盘，之后登录态变化时插件仍读旧文件
-# 会 AUTH_FAILED——"绑定账号老是掉"根因之一）。只保留 B站 请求必需的核心字段，稳定写入。
-_COOKIE_DIR = os.path.dirname(os.path.abspath(__file__))
-_COOKIE_FILES = ("main_cookie.txt", "yui_cookie.txt")
-_COOKIE_KEEP = ("SESSDATA=", "bili_jct=", "DedeUserID=", "DedeUserName=", "bili_ticket=", "buvid3=", "buvid4=")
-_COOKIE_REFRESH_LOCKS = {name: threading.RLock() for name in _COOKIE_FILES}
-
-
-def _core_cookie(cookie: str) -> str:
-    """只保留 B站 身份/凭证核心字段，丢弃页面临时 cookie，避免不同页面推送的
-    字段集合差异互相污染 cookie 文件（日志里 816B/846B 跳变的来源）。"""
-    if not cookie:
-        return ""
-    kept = [p for p in cookie.split("; ") if p and any(p.startswith(k) for k in _COOKIE_KEEP)]
-    return "; ".join(kept)
-
-
-def _cookie_target_for_uid(uid: str) -> str | None:
-    """accounts.json 是角色权威来源；仅无有效记录时兼容旧 role.json。"""
-    try:
-        with open(os.path.join(_COOKIE_DIR, "accounts.json"), encoding="utf-8") as fh:
-            accounts = json.load(fh) or {}
-    except (OSError, ValueError):
-        accounts = {}
-    roles: dict[str, str] = {}
-    for role, filename in (("main", "main_cookie.txt"), ("yui", "yui_cookie.txt")):
-        record = accounts.get(role) if isinstance(accounts, dict) else None
-        account_uid = record.get("uid") if isinstance(record, dict) else None
-        if account_uid is not None:
-            roles[str(account_uid)] = filename
-    if roles:
-        return roles.get(str(uid))
-    # 兼容未迁移旧安装：只有 accounts 没有任何角色记录时才读取 role.json。
-    try:
-        with open(os.path.join(_COOKIE_DIR, "role.json"), encoding="utf-8") as fh:
-            legacy = json.load(fh) or {}
-        role = str(legacy.get(str(uid)) or "")
-        if role in ("main", "yui"):
-            return f"{role}_cookie.txt"
-    except (OSError, ValueError):
-        pass
-    for filename in _COOKIE_FILES:
-        try:
-            if bili.cookie_uid(bili._read_cookie_file(os.path.join(_COOKIE_DIR, filename))) == int(uid):
-                return filename
-        except (OSError, ValueError, bili.CookieDecryptError):
-            continue
-    return None
-
-
-def _refresh_ext_cookie(cookie: str) -> dict:
-    """按权威角色刷新 Cookie；每角色串行，底层唯一临时文件原子替换。"""
-    if not cookie or "SESSDATA=" not in cookie:
-        return {"updated": False}
-    match = re.search(r"DedeUserID=(\d+)", cookie)
-    if not match:
-        return {"updated": False}
-    uid = match.group(1)
-    core = _core_cookie(cookie)
-    if not core or "SESSDATA=" not in core:
-        return {"updated": False}
-    target = _cookie_target_for_uid(uid)
-    if not target:
-        return {"updated": False}
-    with _COOKIE_REFRESH_LOCKS[target]:
-        # 等锁期间角色可能已变化，写前重新解析，避免写进旧角色文件。
-        target = _cookie_target_for_uid(uid)
-        if not target:
-            return {"updated": False}
-        dst = os.path.join(_COOKIE_DIR, target)
-        try:
-            bili._write_cookie_file(dst, core)
-            _logger.info("ext cookie refreshed: file=%s len=%d", target, len(core))
-            return {"updated": True, "uid": uid, "file": target}
-        except OSError as exc:
-            _logger.warning("ext cookie refresh failed: file=%s error=%s", target, exc)
-            return {"updated": False}
+# v0.9.44：v0.2.18 那套"扩展推送只保留核心字段、按 uid 自助刷新"已整体下线——
+# v0.9.40 起由 __init__._assign_cookie_locked 在验真通过后整份归位，web_ui 侧
+# 只保留 HTTP 端点转发，不再持有任何 Cookie 定位/裁剪/写盘逻辑。
 
 
 def get_recent_danmaku(limit: int = 40) -> list:

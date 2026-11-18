@@ -219,6 +219,43 @@
 > `NEKO_COOKIE_PLAIN_V1:` 标记而非裸明文，解密失败报 `COOKIE_DECRYPT_FAILED`
 > 而不是伪装成未登录。
 > 已知边界：私信三态/扩展开关仍以单测为主；扩展换固定 ID 后需用户重载一次。
+> v0.9.46 A795 增量深审修复（417 项离线测试通过）：
+> ① 大小号互换 `bili_set_roles` 整段（读文件、写 Cookie、改角色表、同步 env）纳入
+>    `_ACCOUNTS_LOCK`，不再与扩展推送的 `_assign_cookie_locked` 交叉；同步文件与 DPAPI
+>    操作改走 `asyncio.to_thread`，不在事件循环线程上阻塞。
+> ② 绑定流程四处 `write_main_cookie_file` / `write_yui_cookie_file` 改传 `strict=True`：
+>    磁盘满或权限不足时直接中止，不再出现“文件没写成、accounts.json 却说已绑定”。
+> ③ 角色表写失败时接住 `_restore_cookie_files` 返回值：回滚成功才说“大小号未互换”，
+>    回滚也失败则明确提示文件可能已互换、需人工检查。
+> ④ `_read_response` 增加 16 MiB 响应上限；gzip 弹幕用 `GzipFile` 有界解压，防压缩炸弹；
+>    `cdp_cookie._http_json` 改用 `with` 关闭响应连接。
+> ⑤ 新增 `tests/test_deep_review_0946.py`（6 项）覆盖锁/线程、回滚失败文案、strict 绑定、
+>    超大响应、gzip 炸弹与 CDP 连接关闭；全量 417 项通过。真实 B站、Cookie、CDP、扩展实机与写操作未执行。
+> ⑥ 补 `pyproject.toml`，打包排除 `tests` 与运行时目录 `yui_uploads`；否则空运行目录进入 payload
+>    会让打包器跳过 `plugin.meta.json`，工具参数 schema 要等插件启动后才可用。`check -r` 已通过。
+> v0.9.45 联锁复查修复（411 项离线测试通过）：
+> ① `write_main_cookie_file` / `write_yui_cookie_file` 新增 `strict` 参数：默认继续保持
+>    “写失败只 warning 不致命”（绑定流程依赖此契约），需要事务语义的调用方必须传
+>    `strict=True` 才会抛出。v0.9.44 的互换保护假设写函数会抛 `OSError`，但实现内部
+>    自己吞掉了异常，导致 `COOKIE_WRITE_FAILED` 分支与“回滚成功”判定在真实环境永远是死路。
+> ② `_swap_cookie_files` / `_restore_cookie_files` 改走 strict 变体：第二笔写失败会被真实的
+>    `OSError` 打断并按原值回滚；回滚本身失败返回 False，不再谎报“已按原值回滚”。
+> ③ 新增 `tests/test_deep_review_0945.py`（4 项）：用**真实写函数**、只让最底层
+>    `_write_cookie_file` 失败，覆盖半交换回滚、回滚失败、默认非致命契约与端到端错误码。
+
+> v0.9.44 增量深审修复（407 项离线测试通过）：
+> ① 读响应统一：`_fetch_raw`（弹幕 seg.so）与 `video_subtitle` 的 `resp.read()` 改走
+>    `_read_response`；`_open_with_retry` 已把 HTTP/网络异常转成 `BiliError`，两处残留的
+>    `HTTPError`/`URLError` 死分支删除，读阶段半包/超时不再以裸异常穿透。
+> ② 死代码下线：`web_ui` 里 v0.2.18 的 `_core_cookie` / `_cookie_target_for_uid` /
+>    `_refresh_ext_cookie` 以及 `_COOKIE_KEEP` / `_COOKIE_REFRESH_LOCKS` 删除；扩展 Cookie
+>    端点只把载荷交给 `_assign_cookie_locked`，`web_ui` 不再持有 Cookie 定位/裁剪/写盘逻辑。
+> ③ 大小号互换事务化：`_swap_cookie_files` 把两次写文件当一次事务，第二笔抛 `OSError`
+>    时按原值回滚两份 Cookie 并返回 `COOKIE_WRITE_FAILED`；角色表写失败复用同一回滚。
+> ④ 测试：新增 0944 覆盖读阶段超时/半包/非 JSON、交换中途失败回滚与正常交换回归；
+>    0941 并发用例改测 `_ACCOUNTS_LOCK` + `_write_cookie_file` 真实落盘路径，0943 的
+>    "不二次写盘"改为监视 `_write_cookie_file` 调用为 0。
+> 验证边界：真实 B站、真实 Cookie、浏览器 CDP、扩展实机及真实写操作未执行。
 > v0.9.43 增量深审修复（398 项离线测试通过）：
 > ① 日志：评论失败日志参数归位，`error` 与 `target` 不再串成 `type_id` / `oid:code`；
 >    扩展 tab/dom/shot 推送改为 DEBUG，只记 URL/标题长度与 `is_bili`，不再落浏览记录。
