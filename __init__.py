@@ -1805,23 +1805,23 @@ class BiliViewerPlugin(NekoPluginBase):
         description=(
             "【回复纪律·诚实优先】进入直播间成功后，你的对外回复必须逐字原样只有一句话：'已进入直播间。'，"
             "严禁'喵/搞定/任务搞定啦/完成啦'等任何口语化完成话术、表情、开场白与后缀；严禁追问与细节复述。"
-            "若浏览器扩展未加载（需 0.2.21）或浏览器未登录小号 YUI小猫娘，实际不会进入——此情况严禁谎称已进入，"
-            "必须如实回复'无法进入直播间，需先重载扩展/登录小号。'"
-            "让 YUI 小号真正进入指定直播间（出现在该直播间观众/在线名单里）：先验证房间号，"
-            "再命令浏览器扩展打开该直播间标签页并驻场（浏览器需已登录小号 YUI小猫娘）。"
-            "何时用：用户说'让她进直播间/进入直播间/挂在直播间/让她在场'等需要 YUI 以观众身份在场时。"
+            "若浏览器扩展未加载（需 0.2.21）或浏览器未登录对应 B站账号，实际不会进入——此情况严禁谎称已进入，"
+            "必须如实回复'无法进入直播间，需先重载扩展/登录账号。'"
+            "让指定账号进入指定直播间（出现在该直播间观众/在线名单里）：先验证房间号，"
+            "再命令浏览器扩展打开该直播间标签页并驻场（实际身份取决于浏览器当前登录的 B站账号，插件不能切换登录态）。"
+            "何时用：用户说'让她进直播间/进入直播间/挂在直播间/让她在场'等需要账号以观众身份在场时。"
             "参数 room：直播间房间号（可省略——未提供时自动从浏览器当前打开的直播间页面获取；若没拿到房间号直接调用本工具即可，"
-            "无需用户提供，禁止向用户索要房间号）。account：yui（默认）/ main；"
+            "无需用户提供，禁止向用户索要房间号）。account：留空自动（已绑小号则小号，只有一个账号时用大号）/ main / yui；"
             "browser：指定由哪个浏览器扩展执行（chrome/edge/360，可选）。留空时自动按最近推送的绑定浏览器定向"
             "（避免 Chrome/Edge 双扩展抢指令，实际仍以当前绑定浏览器为准）。用户明确说'走 Edge 后台/用 Edge 进直播间'"
             "时必须传 edge——只有 Edge 扩展会执行并开标签，其余浏览器扩展不会抢走指令。"
-            "浏览器需已登录小号 YUI小猫娘，否则驻场的是浏览器当前登录的其它账号。"
+            "浏览器需已登录想驻场的 B站账号；插件不切换浏览器登录态，只会打开标签页。"
         ),
         parameters={
             "type": "object",
             "properties": {
                 "room": {"type": "string", "description": "直播间房间号（必填，纯数字）"},
-                "account": {"type": "string", "description": "yui=YUI 独立小号（默认）/ main=用户主账号"},
+                "account": {"type": "string", "description": "留空自动（已绑小号则小号，只有一个账号时用大号）/ main=用户主账号 / yui=独立小号"},
             },
             "required": ["room"],
         },
@@ -1830,7 +1830,8 @@ class BiliViewerPlugin(NekoPluginBase):
     async def bili_enter_live(self, *, room: str = "", account: str = "", browser: str = "", **_):
         params = _tool_params(_)
         room = str(room or params.get("room") or "").strip()
-        acct = (account or params.get("account") or "yui").strip() or "yui"
+        raw_acct = (account or params.get("account") or "").strip()
+        acct = self._resolve_account(raw_acct)
         browser = str(browser or params.get("browser") or "").strip().lower()
         # v0.7.44：browser 留空时按最近推送的绑定浏览器定向，消除 Chrome/Edge 双扩展抢指令竞态
         if not browser:
@@ -1866,6 +1867,21 @@ class BiliViewerPlugin(NekoPluginBase):
         if browser and browser not in ("chrome", "edge", "360"):
             return {"output": "browser 参数只能为 chrome / edge / 360。", "is_error": True, "error": "BAD_BROWSER"}
         try:
+            if acct == "yui" and not bili._cookie("yui"):
+                return {
+                    "output": "YUI 小号尚未绑定；只有一个账号时请省略 account（自动用大号）或显式传 account=main。",
+                    "is_error": True,
+                    "error": "NO_YUI_ACCOUNT",
+                }
+            if acct == "main" and not bili._cookie("main"):
+                return {
+                    "output": "主账号尚未绑定；请先在接入面板绑定主账号。",
+                    "is_error": True,
+                    "error": "NO_MAIN_ACCOUNT",
+                }
+        except bili.BiliError as exc:
+            return _wrap_err(exc)
+        try:
             await asyncio.to_thread(bili.live_info, room)
         except bili.BiliError as exc:
             return _wrap_err(exc)
@@ -1873,7 +1889,7 @@ class BiliViewerPlugin(NekoPluginBase):
         try:
             import json as _json
             import urllib.request
-            body = {"type": "enter-live", "room": room}
+            body = {"type": "enter-live", "room": room, "account": acct}
             if browser:
                 body["browser"] = browser
 
@@ -1902,13 +1918,14 @@ class BiliViewerPlugin(NekoPluginBase):
         if not r.get("queued"):
             return {"output": "指令入队失败，请检查面板服务。", "is_error": True, "error": "CMD_QUEUE_FAILED"}
         who = {"chrome": "Chrome", "edge": "Edge", "360": "360浏览器"}.get(browser, "浏览器")
+        acct_label = "小号(yui)" if acct == "yui" else "大号(main)"
         return {
-            "output": f"已向{who}扩展下发进入直播间指令（房间 {room}，小号身份驻场，数秒内打开标签页）。",
+            "output": f"已向{who}扩展下发进入直播间指令（房间 {room}，账号参数 {acct_label}，数秒内打开标签页）。实际观众身份取决于该浏览器当前登录的 B站账号。",
             "is_error": False,
             "room": room,
             "account": acct,
             "browser": browser or "any",
-            "note": "观众名单将在标签页加载后显示小号；若该浏览器未登录小号则需先登录",
+            "note": "标签页不会切换 B站登录态；若要小号驻场，请先在该浏览器登录小号；只有一个账号时默认按大号。",
             "meta": {"agent": {"delivery": "silent"}},
         }
 
