@@ -219,6 +219,12 @@
 > `NEKO_COOKIE_PLAIN_V1:` 标记而非裸明文，解密失败报 `COOKIE_DECRYPT_FAILED`
 > 而不是伪装成未登录。
 > 已知边界：私信三态/扩展开关仍以单测为主；扩展换固定 ID 后需用户重载一次。
+> v0.9.48 独立小号硬校验（防止拿主号冒充 YUI）：
+> ① `_resolve_account` 不再只看 yui 字符串是否非空：必须含 `SESSDATA`、能解析 `DedeUserID`，且 uid 与主号不同；空残 Cookie、旧登录态、与主号同号一律按“未配置”处理，默认回退 main。
+> ② `bili_yui_status` / `bili_accounts` / `bili_enter_live` / 自主运营 / YUI 专属动态/投稿/删除共用同一判定；同号或无效 yui 会明确提示“已忽略”，不会拉取昵称、不会启动自主运营、不会进入直播间。
+> ③ `bili_set_roles` 增加单账号与同号拦截：只有一个账号时禁止把主号设为 yui；`main_cookie.txt` 与 `yui_cookie.txt` 解析出同一 uid 时拒绝互换，避免角色表出现指向主号的 YUI。
+> ④ 新增 `tests/test_independent_yui_0948.py`（12 项）覆盖同号、残 Cookie、有效独立小号、状态/直播拦截、YUI 专属动态/投稿/删除拦截、单账号/同号/无效文件互换拦截。
+> 验证：`ruff check`、`py_compile`、离线回归与 GitHub Actions verify 通过。真实 B站、Cookie、CDP、扩展实机与写操作未执行。
 > v0.9.47 单账号默认主号（账号路由修复）：
 > ① 32 个带 account 参数的普通工具统一规则：留空时已绑独立小号走小号，只有一个账号走主号；显式 main/yui 仍按指定。
 > ② `bili_follow_user` / `bili_unfollow_user` 去掉 `NO_YUI_ACCOUNT` 硬拦截，单账号不再要求显式 `account=main`。

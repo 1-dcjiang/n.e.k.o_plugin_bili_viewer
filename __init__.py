@@ -1301,8 +1301,8 @@ class BiliViewerPlugin(NekoPluginBase):
         """
         if os.environ.get(_YUI_AUTONOMY_ENV, "1").strip() == "0":
             return
-        if not bili._cookie("yui"):
-            return  # 小号未配置：不做自主运营（保持只读感知）
+        if not self._independent_yui_cookie():
+            return  # 小号未配置/无效：不做自主运营（保持只读感知）
         ctx = getattr(self, "ctx", None)
         if ctx is None or not callable(getattr(ctx, "push_message", None)):
             return
@@ -1867,9 +1867,9 @@ class BiliViewerPlugin(NekoPluginBase):
         if browser and browser not in ("chrome", "edge", "360"):
             return {"output": "browser 参数只能为 chrome / edge / 360。", "is_error": True, "error": "BAD_BROWSER"}
         try:
-            if acct == "yui" and not bili._cookie("yui"):
+            if acct == "yui" and not self._independent_yui_cookie():
                 return {
-                    "output": "YUI 小号尚未绑定；只有一个账号时请省略 account（自动用大号）或显式传 account=main。",
+                    "output": "YUI 独立小号尚未配置（或本地 yui 凭据无效、与主号同号）；只有一个账号时请省略 account（自动用大号）或显式传 account=main。",
                     "is_error": True,
                     "error": "NO_YUI_ACCOUNT",
                 }
@@ -2307,11 +2307,40 @@ class BiliViewerPlugin(NekoPluginBase):
     # 未说明时：有独立小号走小号，否则走主账号。
     # 所有写操作入口（直播/视频弹幕、评论、改稿件）统一走本 helper，杜绝漏网入口。
 
+    def _yui_cookie_state(self) -> tuple[str, str]:
+        """返回（独立小号 Cookie, 不可用原因）。
+
+        只有非空、含 SESSDATA、DedeUserID 可解析，且 uid 不与主号相同，才算
+        “已绑独立小号”。空残 Cookie、旧登录态、与主号同号一律视为未配置，
+        避免把主号或已经不存在的 YUI 误当成独立小号。
+        """
+        try:
+            cookie = bili._cookie("yui")
+        except bili.BiliError:
+            return "", "unreadable"
+        if not cookie:
+            return "", "missing"
+        if "SESSDATA=" not in cookie:
+            return "", "invalid"
+        yui_uid = bili.cookie_uid(cookie)
+        if not yui_uid:
+            return "", "invalid"
+        try:
+            main_cookie = bili._cookie("main")
+        except bili.BiliError:
+            main_cookie = ""
+        if main_cookie and bili.cookie_uid(main_cookie) == yui_uid:
+            return "", "duplicate"
+        return cookie, ""
+
+    def _independent_yui_cookie(self) -> str:
+        return self._yui_cookie_state()[0]
+
     def _resolve_account(self, account: str) -> str:
-        """账号归一：未指定/非法时，已绑小号则小号，只有一个账号时用主账号。"""
+        """账号归一：未指定/非法时，有独立小号则小号，只有一个账号时用主账号。"""
         account = (account or "").strip()
         if account not in ("main", "yui"):
-            account = "yui" if bili._cookie("yui") else "main"
+            account = "yui" if self._independent_yui_cookie() else "main"
         return account
 
     @llm_tool(
@@ -3168,6 +3197,8 @@ class BiliViewerPlugin(NekoPluginBase):
         text = str(text or params.get("text") or "").strip()
         if not text:
             return {"output": "请提供动态内容。", "is_error": True, "error": "EMPTY_MSG"}
+        if not self._independent_yui_cookie():
+            return {"output": "YUI 独立小号未配置（或 yui 凭据无效、与主号同号），已拒绝用主号冒充小号发动态。", "is_error": True, "error": "NO_YUI_ACCOUNT"}
         if not self._yui_daily_reserve("dynamic"):
             return {"output": "今天动态已发满 6 条，明天再继续。", "is_error": True, "error": "RATE_LIMITED"}
         try:
@@ -3217,6 +3248,8 @@ class BiliViewerPlugin(NekoPluginBase):
         dynamic_id = str(dynamic_id or params.get("dynamic_id") or "").strip()
         if not dynamic_id:
             return {"output": "请提供要删除的动态 ID。", "is_error": True, "error": "EMPTY_ID"}
+        if not self._independent_yui_cookie():
+            return {"output": "YUI 独立小号未配置（或 yui 凭据无效、与主号同号），已拒绝用主号冒充小号删除动态。", "is_error": True, "error": "NO_YUI_ACCOUNT"}
         try:
             # v0.9.25 对照 bili-cli guard.py：删除操作本地限流 3 秒/次、60 次/小时
             await asyncio.to_thread(bili_social.check_limit, "delete", account="yui")
@@ -3269,6 +3302,8 @@ class BiliViewerPlugin(NekoPluginBase):
             return {"output": "请提供 yui_uploads 目录下的视频文件名。", "is_error": True, "error": "NO_FILE"}
         if not title:
             return {"output": "请提供稿件标题。", "is_error": True, "error": "NO_TITLE"}
+        if not self._independent_yui_cookie():
+            return {"output": "YUI 独立小号未配置（或 yui 凭据无效、与主号同号），已拒绝用主号冒充小号投稿。", "is_error": True, "error": "NO_YUI_ACCOUNT"}
         if not self._yui_daily_reserve("upload"):
             return {"output": "今天已投稿 2 个，明天再继续。", "is_error": True, "error": "RATE_LIMITED"}
         # 安全：仅允许插件目录 yui_uploads 内的文件（拒绝路径穿越/任意文件上传）
@@ -3353,6 +3388,8 @@ class BiliViewerPlugin(NekoPluginBase):
         title = str(title or params.get("title") or "").strip()
         desc = str(desc or params.get("desc") or "").strip()
         tags = str(tags or params.get("tags") or "").strip()
+        if not self._independent_yui_cookie():
+            return {"output": "YUI 独立小号未配置（或 yui 凭据无效、与主号同号），已拒绝用主号冒充小号投稿。", "is_error": True, "error": "NO_YUI_ACCOUNT"}
         if not url:
             return {"output": "请提供视频直链（url）。", "is_error": True, "error": "NO_URL"}
         if not title:
@@ -3566,10 +3603,20 @@ class BiliViewerPlugin(NekoPluginBase):
         timeout=20.0,
     )
     async def bili_yui_status(self, **_):
-        if not bili._cookie("yui"):
+        yui_cookie, reason = self._yui_cookie_state()
+        if not yui_cookie:
+            if reason == "duplicate":
+                prefix = "检测到本地 yui 凭据与主号是同一个 uid，已拒绝把主号当成独立小号。"
+            elif reason == "invalid":
+                prefix = "检测到本地 yui 凭据缺少有效 SESSDATA/DedeUserID，已按未配置处理。"
+            elif reason == "unreadable":
+                prefix = "本地 yui 凭据无法解密，已按未配置处理。"
+            else:
+                prefix = "YUI 小号未配置。"
             return {
                 "output": (
-                    "YUI 小号未配置。配置方法：把 B站小号的完整 Cookie（含 SESSDATA 与 bili_jct）"
+                    prefix +
+                    "配置方法：把 B站小号的完整 Cookie（含 SESSDATA 与 bili_jct）"
                     "保存到插件目录的 yui_cookie.txt 文件（或设置环境变量 BILI_YUI_COOKIE）。"
                     "也可以打开接入面板绑定第二个账号：第一个登录的账号自动成为大号，第二个登录的自动成为小号（v0.7.10）。"
                     "配置后 YUI 即可用独立小号跟随你同步行动、自主发弹幕/评论/动态/投稿，与你的主账号完全隔离。"
@@ -3601,13 +3648,21 @@ class BiliViewerPlugin(NekoPluginBase):
     )
     async def bili_accounts(self, **_):
         accounts = _read_accounts()
+        yui_cookie, yui_reason = self._yui_cookie_state()
         rows = []
         for role, label in (("main", "大号(main，第一个登录的账号)"), ("yui", "小号(yui，第二个登录的账号；有独立小号时默认操作)")):
-            cookie = bili._cookie(role)
+            cookie = yui_cookie if role == "yui" else bili._cookie(role)
             uid = accounts.get(role, {}).get("uid")
             bound_at = accounts.get(role, {}).get("bound_at")
             if not cookie:
-                rows.append(f"{label}：未配置")
+                if role == "yui" and yui_reason == "duplicate":
+                    rows.append(f"{label}：未配置（本地 yui 凭据与主号同 uid，已忽略）")
+                elif role == "yui" and yui_reason == "invalid":
+                    rows.append(f"{label}：未配置（本地 yui 凭据无效，已忽略）")
+                elif role == "yui" and yui_reason == "unreadable":
+                    rows.append(f"{label}：未配置（本地 yui 凭据无法解密，已忽略）")
+                else:
+                    rows.append(f"{label}：未配置")
                 continue
             if uid is None:
                 uid = bili.cookie_uid(cookie)
@@ -3624,7 +3679,7 @@ class BiliViewerPlugin(NekoPluginBase):
             except bili.BiliError:
                 ident = f"uid {uid if uid is not None else '未知'}"
             rows.append(f"{label}：{ident}｜来源{('绑定于 ' + bound_txt) if bound_txt else '配置'}")
-        default_txt = "yui（小号）" if bili._cookie("yui") else "main（大号，小号未配置时的回退）"
+        default_txt = "yui（小号）" if yui_cookie else "main（大号，小号未配置时的回退）"
         return {
             "output": "\n".join(rows) + f"\n未说明时默认使用：{default_txt}",
             "is_error": False,
@@ -3637,9 +3692,9 @@ class BiliViewerPlugin(NekoPluginBase):
                 "yui": {
                     "uid": accounts.get("yui", {}).get("uid"),
                     "bound_at": accounts.get("yui", {}).get("bound_at"),
-                    "configured": bool(bili._cookie("yui")),
+                    "configured": bool(yui_cookie),
                 },
-                "default_role": "yui" if bili._cookie("yui") else "main",
+                "default_role": "yui" if yui_cookie else "main",
             },
         }
 
@@ -3650,7 +3705,8 @@ class BiliViewerPlugin(NekoPluginBase):
             "何时用：用户后期说明'把小号当大号用''交换一下大小号''以后都用那个账号操作'时。"
             "参数 action：swap=交换大小号（默认）；uid：要设为目标角色的账号 uid；role：目标角色（main 或 yui）。"
             "规则：大小号归属默认按绑定顺序（第一个登录=大号，第二个登录=小号），本工具用于后期修改；"
-            "仅支持文件层配置的账号互换（环境变量优先时请手动调整 BILI_COOKIE / BILI_YUI_COOKIE 后重试）。"
+            "仅支持两个独立文件层账号互换，只有一个账号时禁止把主号设为 yui；"
+            "环境变量优先时请手动调整 BILI_COOKIE / BILI_YUI_COOKIE 后重试。"
         ),
         parameters={
             "type": "object",
@@ -3686,6 +3742,14 @@ class BiliViewerPlugin(NekoPluginBase):
                     return {"output": "小号 Cookie 来自环境变量或配置（非文件层），无法自动互换；请手动调整 BILI_YUI_COOKIE 后重试。", "is_error": True, "error": "ENV_LOCKED"}
                 if not main_file and not yui_file:
                     return {"output": "当前没有文件层绑定的账号，无法修改角色；请先通过接入面板绑定两个账号（第一个登录=大号，第二个登录=小号）。", "is_error": True, "error": "NO_ACCOUNTS"}
+                main_uid = bili.cookie_uid(main_file) if main_file else None
+                yui_uid = bili.cookie_uid(yui_file) if yui_file else None
+                if main_file and ("SESSDATA=" not in main_file or not main_uid):
+                    return {"output": "main_cookie.txt 不是有效的 B站登录态（缺 SESSDATA 或 DedeUserID），不能交换；请重新绑定主账号。", "is_error": True, "error": "INVALID_ACCOUNT"}
+                if yui_file and ("SESSDATA=" not in yui_file or not yui_uid):
+                    return {"output": "yui_cookie.txt 不是有效的 B站登录态（缺 SESSDATA 或 DedeUserID），不能交换；请重新绑定独立小号。", "is_error": True, "error": "INVALID_ACCOUNT"}
+                if main_uid and yui_uid and main_uid == yui_uid:
+                    return {"output": "当前 main_cookie.txt 与 yui_cookie.txt 是同一个账号，不能互换；请重新绑定独立的第二个 B站账号。", "is_error": True, "error": "DUPLICATE_ACCOUNT"}
                 # 定位目标账号当前角色（uid 指定时）
                 if uid and role in ("main", "yui"):
                     cur = None
@@ -3699,6 +3763,8 @@ class BiliViewerPlugin(NekoPluginBase):
                     if cur == role:
                         return {"output": f"uid={uid} 的账号本来就是{role}，无需修改。", "is_error": False, "result": {"ok": True, "unchanged": True}}
                     # uid 账号当前角色≠目标角色 → 等价于交换大小号
+                if not main_file or not yui_file:
+                    return {"output": "只有一个账号，不能把小号角色指向主号；请先绑定第二个 B站账号。", "is_error": True, "error": "NEED_SECOND_ACCOUNT"}
                 # 统一动作：交换大小号（文件互换 + 角色映射互换 + 运行期 env 同步）
                 # v0.9.44：两次写文件纳入同一回滚保护（见 _swap_cookie_files），
                 # 旧实现第二次写失败会让两份 Cookie 停在"只换了一半"。
