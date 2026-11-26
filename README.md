@@ -219,6 +219,12 @@
 > `NEKO_COOKIE_PLAIN_V1:` 标记而非裸明文，解密失败报 `COOKIE_DECRYPT_FAILED`
 > 而不是伪装成未登录。
 > 已知边界：私信三态/扩展开关仍以单测为主；扩展换固定 ID 后需用户重载一次。
+> v0.9.47 单账号默认主号（账号路由修复）：
+> ① 32 个带 account 参数的普通工具统一规则：留空时已绑独立小号走小号，只有一个账号走主号；显式 main/yui 仍按指定。
+> ② `bili_follow_user` / `bili_unfollow_user` 去掉 `NO_YUI_ACCOUNT` 硬拦截，单账号不再要求显式 `account=main`。
+> ③ `bili_enter_live` 不再默认硬编码 yui，并修正“小号身份驻场”文案：实际身份取决于浏览器当前登录的 B站账号。
+> ④ 工具说明、`docs/guide.md`、`plugin.toml` 与生成元数据同步统一；`bili_yui_dynamic` / `bili_yui_upload` / `bili_yui_status` 仍为独立小号专属。
+> 验证：`ruff check`、`py_compile`、账号解析离线用例与 GitHub Actions verify 通过。真实 B站、Cookie、CDP、扩展实机与写操作未执行。
 > v0.9.46 A795 增量深审修复（417 项离线测试通过）：
 > ① 大小号互换 `bili_set_roles` 整段（读文件、写 Cookie、改角色表、同步 env）纳入
 >    `_ACCOUNTS_LOCK`，不再与扩展推送的 `_assign_cookie_locked` 交叉；同步文件与 DPAPI
