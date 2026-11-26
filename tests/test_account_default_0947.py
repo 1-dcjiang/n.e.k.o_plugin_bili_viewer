@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 MAIN_COOKIE = "SESSDATA=main; DedeUserID=111; bili_jct=mj"
+YUI_COOKIE = "SESSDATA=yui; DedeUserID=222; bili_jct=yj"
 
 
 def _bili():
@@ -41,7 +42,7 @@ def test_omitted_account_prefers_yui_when_bound(monkeypatch):
     monkeypatch.setattr(
         bili,
         "_cookie",
-        lambda role: MAIN_COOKIE if role in ("main", "yui") else "",
+        lambda role: MAIN_COOKIE if role == "main" else (YUI_COOKIE if role == "yui" else ""),
     )
     inst = _inst()
 

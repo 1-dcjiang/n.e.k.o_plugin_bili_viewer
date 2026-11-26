@@ -284,7 +284,7 @@ def test_default_account_uses_yui_when_configured(monkeypatch) -> None:
     from plugin.plugins.bili_viewer import bili
 
     monkeypatch.setenv("BILI_COOKIE", "SESSDATA=m; bili_jct=mj")
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
     captured: list[str] = []
 
     def fake_send(room, text, account="main"):
@@ -304,7 +304,7 @@ def test_default_account_uses_yui_when_configured(monkeypatch) -> None:
 def test_danmaku_rate_limit_applies_to_all_accounts(monkeypatch) -> None:
     from plugin.plugins.bili_viewer import bili
 
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
 
     def fake_send(room, text, account="main"):
         return {"ok": True, "confirmed": True}
@@ -324,7 +324,7 @@ def test_danmaku_rate_limit_applies_to_all_accounts(monkeypatch) -> None:
 def test_yui_comment_rate_limit(monkeypatch) -> None:
     from plugin.plugins.bili_viewer import bili
 
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
     monkeypatch.setattr(bili, "add_reply", lambda oid, t, text, account="yui": {"ok": True})
     monkeypatch.setattr(bili, "video_info", lambda bvid, account="main": {"aid": 123456, "title": "t"})
     inst = _make_inst(monkeypatch)
@@ -342,7 +342,7 @@ def test_yui_comment_unverified_keeps_rate_slot(monkeypatch) -> None:
     """v0.9.38：REPLY_UNVERIFIED 不释放限流槽，避免系统诱导重试造成重复评论。"""
     from plugin.plugins.bili_viewer import bili
 
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
     monkeypatch.setattr(bili, "video_info", lambda bvid, account="main": {"aid": 123456, "title": "t"})
 
     def fake_reply(*_a, **_kw):
@@ -360,7 +360,7 @@ def test_yui_dynamic_non_bili_error_releases_daily_quota(monkeypatch) -> None:
     """v0.9.38：非 BiliError 异常也要回退每日额度，不能一次崩溃吃掉当天名额。"""
     from plugin.plugins.bili_viewer import bili, bili_social
 
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
     monkeypatch.setattr(bili_social, "check_limit", lambda *a, **k: None)
     monkeypatch.setattr(bili_social, "record_limit", lambda *a, **k: None)
     state = {"fail": True}
@@ -384,7 +384,7 @@ def test_yui_rate_reserve_atomic_blocks_concurrent(monkeypatch) -> None:
     且发送失败后 rollback 释放窗口允许重试。"""
     from plugin.plugins.bili_viewer import bili
 
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
     monkeypatch.setattr(bili, "live_send_danmaku", lambda room, text, account="main": {"ok": True, "confirmed": True})
     inst = _make_inst(monkeypatch)
     # 第一次发送：成功（占用窗口）
@@ -399,7 +399,7 @@ def test_yui_rate_rollback_after_failure(monkeypatch) -> None:
     """v0.7.8 复查优化：发送失败回退占用，稍后可重试（不被误限流）。"""
     from plugin.plugins.bili_viewer import bili
 
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
     state = {"fail": True}
 
     def fake_send(room, text, account="main"):
@@ -423,7 +423,7 @@ def test_yui_upload_mutex_blocks_second(monkeypatch) -> None:
 
     from plugin.plugins.bili_viewer import bili
 
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
     calls: list[str] = []
     upload_dir = _os.path.join(_os.path.dirname(_os.path.abspath(bili.__file__)), "yui_uploads")
     _os.makedirs(upload_dir, exist_ok=True)
@@ -456,7 +456,7 @@ def test_yui_upload_mutex_blocks_second(monkeypatch) -> None:
 
 
 def test_reply_comment_no_target(monkeypatch) -> None:
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
     inst = _make_inst(monkeypatch)
     # 无 target 且感知不到内容
     monkeypatch.setattr(inst, "_ext_tab", lambda **kw: None)
@@ -467,7 +467,7 @@ def test_reply_comment_no_target(monkeypatch) -> None:
 def test_reply_comment_video_aid_resolution(monkeypatch) -> None:
     from plugin.plugins.bili_viewer import bili
 
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
     seen: list[tuple] = []
 
     def fake_add(oid, t, text, account="yui"):
@@ -486,7 +486,7 @@ def test_reply_comment_main_account_resolution(monkeypatch) -> None:
     """评论目标解析使用实际账号（v0.9.23 修复：原硬编码 account=yui，只有主账号时评论会解析失败）。"""
     from plugin.plugins.bili_viewer import bili
 
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
     monkeypatch.setenv("BILI_COOKIE", "SESSDATA=m; bili_jct=mj")
     got: list = []
     seen: list[tuple] = []
@@ -514,7 +514,7 @@ def test_reply_comment_main_account_resolution(monkeypatch) -> None:
 def test_yui_dynamic_daily_cap(monkeypatch) -> None:
     from plugin.plugins.bili_viewer import bili, bili_social
 
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
     monkeypatch.setattr(bili, "post_dynamic", lambda text, account="yui": {"ok": True})
     # v0.9.25 对照 bili-cli guard.py 新增 dynamic 60s 限流：本测试聚焦每日 6 条上限，绕开间隔限流
     monkeypatch.setattr(bili_social, "check_limit", lambda *a, **k: None)
@@ -534,7 +534,7 @@ def test_yui_dynamic_failure_releases_daily_quota(monkeypatch) -> None:
     """v0.7.8 复查优化：动态发布失败回退天级占用，稍后可重试。"""
     from plugin.plugins.bili_viewer import bili, bili_social
 
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
     monkeypatch.setattr(bili_social, "check_limit", lambda *a, **k: None)
     monkeypatch.setattr(bili_social, "record_limit", lambda *a, **k: None)
     state = {"fail": True}
@@ -557,7 +557,7 @@ def test_yui_dynamic_failure_releases_daily_quota(monkeypatch) -> None:
 
 
 def test_yui_upload_path_safety(monkeypatch) -> None:
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
     inst = _make_inst(monkeypatch)
     # 路径穿越拒绝
     out = asyncio.run(inst.bili_yui_upload(file="../evil.mp4", title="t"))
@@ -574,7 +574,7 @@ def test_yui_upload_path_safety(monkeypatch) -> None:
 
 def test_upload_video_url_bad_inputs(monkeypatch) -> None:
     """缺 url/标题、非 http 链接 → 拒绝，不下载。"""
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
     inst = _make_inst(monkeypatch)
     out1 = asyncio.run(inst.bili_yui_upload_video_url(title="t"))
     assert out1.get("error") == "NO_URL"
@@ -590,7 +590,7 @@ def test_upload_video_url_delegates_to_upload(monkeypatch) -> None:
 
     from plugin.plugins.bili_viewer import bili_social
 
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
     # mock 下载：返回带 ftyp 头、>64KB 的有效视频体
     class _FakeResp:
         def __init__(self):
@@ -655,7 +655,7 @@ def test_upload_video_url_download_failure_cleans_up(monkeypatch) -> None:
 
     from plugin.plugins.bili_viewer import bili
 
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
 
     def boom(req, timeout=30):
         raise OSError("connection refused")
@@ -698,7 +698,7 @@ def test_upload_video_url_bad_content_rejected(monkeypatch) -> None:
 
     from plugin.plugins.bili_viewer import bili
 
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
 
     class _FakeResp:
         def __init__(self):
@@ -748,7 +748,7 @@ def test_yui_upload_rejects_invalid_file(monkeypatch) -> None:
     """bili_yui_upload 对 yui_uploads 里的无效空壳文件 → INVALID_VIDEO_FILE，不消耗额度。"""
     from plugin.plugins.bili_viewer import bili
 
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
     upload_dir = os.path.join(os.path.dirname(os.path.abspath(bili.__file__)), "yui_uploads")
     os.makedirs(upload_dir, exist_ok=True)
     shell = os.path.join(upload_dir, "yui_shell_test.mp4")
@@ -779,7 +779,7 @@ class _FakeCtx:
 def test_autonomy_tick_cooldown(monkeypatch) -> None:
     from plugin.plugins.bili_viewer import BiliViewerPlugin
 
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
     monkeypatch.delenv("YUI_AUTONOMY", raising=False)
     fake_ctx = _FakeCtx()
     inst = BiliViewerPlugin(ctx=fake_ctx)
@@ -802,7 +802,7 @@ def test_autonomy_push_is_background_silent(monkeypatch) -> None:
     """v0.7.1 后台化：自主唤醒必须 read（不触发 YUI 开口/不弹气泡）、低优先级、带 autonomy 标记。"""
     from plugin.plugins.bili_viewer import BiliViewerPlugin
 
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
     monkeypatch.delenv("YUI_AUTONOMY", raising=False)
     fake_ctx = _FakeCtx()
     inst = BiliViewerPlugin(ctx=fake_ctx)
@@ -822,7 +822,7 @@ def test_autonomy_push_is_background_silent(monkeypatch) -> None:
 def test_autonomy_disabled_env(monkeypatch) -> None:
     from plugin.plugins.bili_viewer import BiliViewerPlugin
 
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
     monkeypatch.setenv("YUI_AUTONOMY", "0")
     fake_ctx = _FakeCtx()
     inst = BiliViewerPlugin(ctx=fake_ctx)
@@ -858,7 +858,7 @@ def test_autonomy_popular_cache_throttle(monkeypatch) -> None:
 def test_bili_add_reply_posts(monkeypatch) -> None:
     from plugin.plugins.bili_viewer import bili
 
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
     posted: list[tuple] = []
 
     def fake_post(url, form, timeout=12.0, account="main"):
@@ -892,7 +892,7 @@ def test_bili_post_dynamic_vc_stable_endpoint(monkeypatch) -> None:
 
     from plugin.plugins.bili_viewer import bili
 
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
     calls: list[tuple[str, dict]] = []
 
     def fake_post_json(url, body, csrf, account="yui", timeout=12.0, query=None):
@@ -928,7 +928,7 @@ def test_bili_delete_dynamic(monkeypatch) -> None:
     """v0.8.8 新增：删除动态走 rm_dynamic 接口。"""
     from plugin.plugins.bili_viewer import bili
 
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
     calls: list[tuple[str, dict]] = []
 
     def fake_post_json(url, body, csrf, account="yui", timeout=12.0, query=None):
@@ -962,7 +962,7 @@ def test_unread_tick_push_and_cooldown(monkeypatch) -> None:
     """自主查私信：有未读且冷却已过时静默注入；无未读/冷却内不注入。"""
     from plugin.plugins.bili_viewer import BiliViewerPlugin, bili_social
 
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
     fake_ctx = _FakeCtx()
     inst = BiliViewerPlugin(ctx=fake_ctx)
     fake_counts = {
@@ -1593,7 +1593,7 @@ def test_tool_params_scalar_int_defense(monkeypatch) -> None:
     bili_dm_read 不再抛 'int' object has no attribute 'get'，参数从显式形参兜底。"""
     from plugin.plugins.bili_viewer import BiliViewerPlugin, bili_social
 
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
     fake_ctx = _FakeCtx()
     inst = BiliViewerPlugin(ctx=fake_ctx)
 
@@ -1646,7 +1646,7 @@ def test_tool_params_dm_send_scalar_int_defense(monkeypatch) -> None:
     """v0.9.32：bili_dm_send 收到标量 parameters（int）时不崩溃，返回缺参错误。"""
     from plugin.plugins.bili_viewer import BiliViewerPlugin
 
-    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; bili_jct=yj")
+    monkeypatch.setenv("BILI_YUI_COOKIE", "SESSDATA=y; DedeUserID=222; bili_jct=yj")
     fake_ctx = _FakeCtx()
     inst = BiliViewerPlugin(ctx=fake_ctx)
     out = asyncio.run(inst.bili_dm_send(parameters=30))
