@@ -280,7 +280,7 @@ _COOKIE_SOURCE_NONE = "none"
 
 # 账号角色映射（v0.7.10）：记录大小号归属与绑定顺序，供 YUI 分清大小号、后期说明修改。
 # 文件格式：{"main": {"uid": int, "bound_at": float}, "yui": {"uid": int, "bound_at": float}}
-# 默认规则：第一个绑定/登录的账号 = main（大号），第二个绑定/登录的账号 = yui（小号，默认操作账号）。
+# 默认规则：第一个绑定/登录的账号 = main（大号），第二个绑定/登录的账号 = yui（小号；有独立小号时默认操作账号）。
 _ACCOUNTS_FILE = "accounts.json"
 # v0.9.39 深审 L2：面板/扩展推送/命令工具会并发读改写 accounts.json，
 # 旧实现无锁且直接覆盖写，两个绑定会丢一个、进程被杀还会留下半截 JSON。
@@ -2177,7 +2177,7 @@ class BiliViewerPlugin(NekoPluginBase):
         description=(
             "【角色声明】把当前绑定的 B站 账号标记为小号或主账号。"
             "何时用：用户明确说明'这个账号是小号/大号'（例如 YUI 报出 uid 后用户回应'这个是小号'）时调用——"
-            "把当前登录账号的角色固定下来，此后默认操作账号（小号）真正作用在该账号上，关注/取关/发弹幕都走它。"
+            "把当前登录账号的角色固定下来，此后有独立小号时默认操作账号（小号）真正作用在该账号上，关注/取关/发弹幕都走它。"
             "参数 role：yui=标记为小号（默认）/ main=标记为主账号；uid：可选（校验当前账号是否匹配）；"
             "force：目标角色 Cookie 已存在时是否覆盖（默认 false 防误覆盖）。"
             "成功后回复用户确认标记结果（严禁'搞定/任务完成'类话术）。"
@@ -2304,7 +2304,7 @@ class BiliViewerPlugin(NekoPluginBase):
         return {"output": f"{'小号' if account == 'yui' else '主账号'}的稿件（第 {page} 页）：\n" + bili.format_my_videos(videos), "is_error": False, "videos": videos}
 
     # ══════════ 账号解析（v0.7.9 复查优化） ══════════
-    # 未说明时默认操作 YUI 小号；小号未配置才回退主账号。
+    # 未说明时：有独立小号走小号，否则走主账号。
     # 所有写操作入口（直播/视频弹幕、评论、改稿件）统一走本 helper，杜绝漏网入口。
 
     def _resolve_account(self, account: str) -> str:
@@ -3590,8 +3590,8 @@ class BiliViewerPlugin(NekoPluginBase):
     @llm_tool(
         name="bili_accounts",
         description=(
-            "查询当前绑定的 B站大小号视图：大号（main，第一个登录的账号）与小号（yui，第二个登录的账号，"
-            "默认操作账号）各自的昵称/uid/来源/绑定时间。何时用：用户问'哪个是大号/小号''现在用的哪个账号'"
+            "查询当前绑定的 B站大小号视图：大号（main，第一个登录的账号）与小号（yui，第二个登录的账号；"
+            "有独立小号时默认操作账号）各自的昵称/uid/来源/绑定时间。何时用：用户问'哪个是大号/小号''现在用的哪个账号'"
             "'YUI 用的是谁的账号'，或 YUI 需要分清大小号再行动时。"
             "返回两个账号的 uid（可从 uid 判断身份），未配置的账号标注'未配置'。"
             "大小号归属默认为绑定顺序：第一个登录=大号，第二个登录=小号；如需交换请用 bili_set_roles。"
@@ -3602,7 +3602,7 @@ class BiliViewerPlugin(NekoPluginBase):
     async def bili_accounts(self, **_):
         accounts = _read_accounts()
         rows = []
-        for role, label in (("main", "大号(main，第一个登录的账号)"), ("yui", "小号(yui，第二个登录的账号，默认操作)")):
+        for role, label in (("main", "大号(main，第一个登录的账号)"), ("yui", "小号(yui，第二个登录的账号；有独立小号时默认操作)")):
             cookie = bili._cookie(role)
             uid = accounts.get(role, {}).get("uid")
             bound_at = accounts.get(role, {}).get("bound_at")
@@ -3730,7 +3730,7 @@ class BiliViewerPlugin(NekoPluginBase):
                 _set_env("BILI_YUI_COOKIE", bili._yui_cookie_from_file())
                 if uid and role in ("main", "yui"):
                     return {"output": f"已把 uid={uid} 的账号设为{role}（原{role}的账号自动换到另一角色）。", "is_error": False, "result": {"ok": True, "uid": uid, "role": role}}
-                return {"output": "已交换大小号：原小号现在是大号，原大号现在是小号（未说明时仍默认操作小号）。", "is_error": False, "result": {"ok": True, "swapped": True}}
+                return {"output": "已交换大小号：原小号现在是大号，原大号现在是小号（有独立小号时未说明仍默认操作小号）。", "is_error": False, "result": {"ok": True, "swapped": True}}
 
         # A795：同步文件 + DPAPI + mkstemp 不能占事件循环线程；锁在线程内获取，
         # 避免异步工具在主线程持有锁等待磁盘。
@@ -4832,7 +4832,7 @@ class BiliViewerPlugin(NekoPluginBase):
             _set_env("BILI_COOKIE", cookie)
             self._cookie_source = source
             return {"ok": True, "bound": True, "detail": "已绑定大号（第一个登录的账号，main）"}
-        # 已有大号且新 uid 不同 → 第二个登录的账号自动成为小号（yui，默认操作账号）
+        # 已有大号且新 uid 不同 → 第二个登录的账号自动成为小号（yui；有独立小号时默认操作账号）
         if yui_uid is None or uid is None:
             write_failed = _persist_cookie_or_error(
                 bili.write_yui_cookie_file, cookie, "yui",
